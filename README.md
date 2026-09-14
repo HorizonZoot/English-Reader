@@ -130,20 +130,30 @@ EnglishReader/
 │   │   │   │   │   └── theme/                  # Material 3 主题
 │   │   │   │   ├── util/                       # 分句、分段、词形还原、TTS、缓存键
 │   │   │   │   └── viewmodel/                  # 各屏 ViewModel 与 AI 面板协调器
-│   │   │   ├── res/values/ · res/values-night/ # 全部用户可见文案与主题
+│   │   │   ├── res/
+│   │   │   │   ├── mipmap-*/                   # 启动图标：5 档密度 + anydpi-v26 自适应
+│   │   │   │   ├── values/                     # 用户可见文案、颜色、主题
+│   │   │   │   └── values-night/               # 深色主题
 │   │   │   └── AndroidManifest.xml
 │   │   ├── test/                               # JVM + Robolectric 测试
-│   │   ├── testDebug/                          # 依赖 debug-only fixture 的测试
+│   │   ├── testDebug/
+│   │   │   ├── java/                           # 真实 EPUB 的导入与阅读链路测试
+│   │   │   └── resources/readium/public/       # EPUB 固件与来源说明 SOURCE.md
 │   │   ├── androidTest/                        # Room、迁移、Compose、Hilt 仪器测试
-│   │   └── debug/                              # 仅 debug 的 spike fixture
-│   └── build.gradle.kts
+│   │   └── debug/java/…/importer/spike/        # 合成 EPUB 固件（testDebug 与 androidTest 共用）
+│   ├── build.gradle.kts
+│   └── proguard-rules.pro                      # release 混淆与 keep 规则
 ├── assets/app-icon.png                         # 应用图标源图（1254×1254），mipmap 资源由它生成
-├── gradle/libs.versions.toml                   # 版本目录
-├── tools/epub-corpus/                          # EPUB 语料调查工具
+├── gradle/
+│   ├── libs.versions.toml                      # 版本目录
+│   └── wrapper/                                # Gradle Wrapper
+├── tools/epub-corpus/                          # EPUB 语料调查工具（语料按需下载，不进仓库）
 ├── AGENTS.md                                   # 工程规范与项目不变量
 ├── LICENSE                                     # MIT
-├── THIRD-PARTY-NOTICES.md                      # 第三方资源的许可原文与版权声明
-└── settings.gradle.kts
+├── README.md · THIRD-PARTY-NOTICES.md
+├── build.gradle.kts · settings.gradle.kts · gradle.properties
+├── gradlew · gradlew.bat
+└── .gitignore · .gitattributes
 ```
 
 ---
@@ -177,7 +187,4 @@ Release 构建启用 R8/ProGuard；修改 release 依赖、混淆规则或加密
 
 ### 第三方资源
 
-- **离线词典**（`app/src/main/assets/dict_base.tsv`）的词条由 [ECDICT](https://github.com/skywind3000/ECDICT) 提取整理，该项目同样采用 MIT 许可。
-- **测试用 EPUB 固件**（`app/src/testDebug/resources/readium/public/`）取自 Project Gutenberg 公版书。每本书的作品信息、下载地址与 SHA-256 校验值见同目录的 `SOURCE.md`。这些文件仅供离线兼容性测试使用，不随发布产物分发。
-
-上述资源各自的许可原文与版权声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+离线词典（`app/src/main/assets/dict_base.tsv`）的词条由 [ECDICT](https://github.com/skywind3000/ECDICT) 提取整理，该项目同样采用 MIT 许可。其许可原文与版权声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。

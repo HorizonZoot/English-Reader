@@ -35,13 +35,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
----
-
-## Project Gutenberg（仅测试固件）
-
-`app/src/testDebug/resources/readium/public/` 下的两个 EPUB 文件取自 Project Gutenberg 的公版书，
-仅用于离线兼容性测试，**不随发布产物分发**。
-
-每本书的作品信息、下载地址与 SHA-256 校验值见同目录的 `SOURCE.md`。这些出版物**内嵌的
-Project Gutenberg 许可与商标条款继续适用**，不因本项目采用 MIT 而改变。

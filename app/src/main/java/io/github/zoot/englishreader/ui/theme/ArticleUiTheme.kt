@@ -65,6 +65,38 @@ private val DarkArticleColors = darkColorScheme(
 private val LightArticleHighlightColors = ReaderHighlightColors(Color(0xFFD9E9FC))
 private val DarkArticleHighlightColors = ReaderHighlightColors(Color(0xFF2C4769))
 
+/**
+ * 分段控件的配色：浅灰轨道 + 更亮的滑块。
+ *
+ * 暗色必须单独给一组。`ArticleUiTheme` 的暗色 `surface`（#292A2D）比
+ * `surfaceVariant`（#343539）**更暗**，直接拿这两个 token 当「滑块 / 轨道」
+ * 会把选中项画成一个凹槽，与 iOS 的观感相反。
+ */
+data class SegmentedControlColors(
+    val track: Color,
+    val thumb: Color
+)
+
+private val LightSegmentedControlColors = SegmentedControlColors(
+    track = Color(0xFFF0F0F2),
+    thumb = Color.White
+)
+
+private val DarkSegmentedControlColors = SegmentedControlColors(
+    track = Color(0xFF2C2C2E),
+    thumb = Color(0xFF48484A)
+)
+
+val LocalSegmentedControlColors = staticCompositionLocalOf { LightSegmentedControlColors }
+
+/**
+ * iOS 系统灰（#8E8E93）。
+ *
+ * 用于底栏未选中图标、以及删除手势尚未触发时的图标：比 `onSurfaceVariant`
+ * （#6C6F75）更浅，明暗两套主题下都够用，且不占用正文文字的颜色体系。
+ */
+val NeutralIconGray = Color(0xFF8E8E93)
+
 // 复用应用已解析的用户主题，不在局部表面重新判断系统设置。
 internal val LocalArticleUiDarkTheme = staticCompositionLocalOf { false }
 
@@ -73,8 +105,12 @@ fun ArticleUiTheme(content: @Composable () -> Unit) {
     val darkTheme = LocalArticleUiDarkTheme.current
     val colors = if (darkTheme) DarkArticleColors else LightArticleColors
     val highlights = if (darkTheme) DarkArticleHighlightColors else LightArticleHighlightColors
+    val segments = if (darkTheme) DarkSegmentedControlColors else LightSegmentedControlColors
 
-    CompositionLocalProvider(LocalReaderHighlightColors provides highlights) {
+    CompositionLocalProvider(
+        LocalReaderHighlightColors provides highlights,
+        LocalSegmentedControlColors provides segments
+    ) {
         MaterialTheme(colorScheme = colors, content = content)
     }
 }

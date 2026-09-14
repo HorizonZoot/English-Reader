@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -70,5 +71,32 @@ class VocabularyDaoAndroidTest {
         assertEquals(original.phonetic, rows.single().phonetic)
         assertEquals(original.definitions, rows.single().definitions)
         assertEquals(original.definitionSource, rows.single().definitionSource)
+    }
+
+    /**
+     * 生词本用 LEFT JOIN 取来源标题：关联文章的要带上标题，未关联（articleId 为 NULL，
+     * 删书时生词会被解绑成这种状态）的**必须仍然返回**，只是没有标题。
+     * 写成 INNER JOIN 会让这些生词整条从生词本消失。
+     */
+    @Test
+    fun getAllVocabularyWithSource_joinsTitleAndKeepsUnboundWords() = runBlocking {
+        val articleId = articleDao.insertArticle(
+            ArticleEntity(title = "The Future of AI", content = "content")
+        )
+        vocabularyDao.insertVocabulary(
+            VocabularyEntity(word = "noticing", articleId = articleId)
+        )
+        vocabularyDao.insertVocabulary(
+            VocabularyEntity(word = "orphan", articleId = null)
+        )
+
+        val rows = vocabularyDao.getAllVocabularyWithSource().first()
+
+        assertEquals(2, rows.size)
+        assertEquals(
+            "The Future of AI",
+            rows.first { it.vocabulary.word == "noticing" }.articleTitle
+        )
+        assertNull(rows.first { it.vocabulary.word == "orphan" }.articleTitle)
     }
 }

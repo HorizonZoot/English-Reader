@@ -25,6 +25,24 @@ sealed interface VocabularyGroupId {
 }
 
 /**
+ * 分组头部在 LazyColumn 里用的 item key。
+ *
+ * 必须是能存进 Bundle 的类型：LazySaveableStateHolder 会把 item key 原样交给
+ * SaveableStateProvider 用于保存列表项状态，直接用 [VocabularyGroupId] 实例会在
+ * 列表首次测量时抛 IllegalArgumentException 崩掉整个界面。String 是安全的。
+ *
+ * 前缀用于区分分组维度，避免不同维度下取值相同的分组撞 key。
+ */
+val VocabularyGroupId.listKey: String
+    get() = when (this) {
+        VocabularyGroupId.Today -> "time:today"
+        VocabularyGroupId.Yesterday -> "time:yesterday"
+        VocabularyGroupId.ThisWeek -> "time:this-week"
+        is VocabularyGroupId.OlderDate -> "date:$value"
+        is VocabularyGroupId.Alphabet -> "alphabet:$value"
+    }
+
+/**
  * 生词分组
  *
  * @param id 稳定的分组标识，显示文案由 Compose 根据 locale 映射

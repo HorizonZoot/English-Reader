@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.data.repository
 
 import io.github.zoot.englishreader.data.dao.VocabularyDao
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import io.github.zoot.englishreader.data.entity.VocabularyWithSource
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -27,6 +28,16 @@ class VocabularyRepository @Inject constructor(
      */
     fun getAllVocabulary(): Flow<List<VocabularyEntity>> {
         return vocabularyDao.getAllVocabulary()
+    }
+
+    /**
+     * 获取所有生词，并附带来源文章标题（响应式）。
+     *
+     * 生词本界面用这个入口：展示「来自《标题》」所需的标题由 SQL 一次 JOIN 取出，
+     * 不必逐条回查文章。
+     */
+    fun getAllVocabularyWithSource(): Flow<List<VocabularyWithSource>> {
+        return vocabularyDao.getAllVocabularyWithSource()
     }
 
     /**

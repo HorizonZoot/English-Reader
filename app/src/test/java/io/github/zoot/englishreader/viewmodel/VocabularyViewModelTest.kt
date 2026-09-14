@@ -1,16 +1,25 @@
 package io.github.zoot.englishreader.viewmodel
 
 import app.cash.turbine.test
+import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import io.github.zoot.englishreader.data.entity.VocabularyWithSource
+import io.github.zoot.englishreader.data.repository.DictionaryRepository
+import io.github.zoot.englishreader.data.repository.OfflineLookupResult
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
+import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
 import io.github.zoot.englishreader.util.MainDispatcherRule
+import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -19,12 +28,10 @@ import org.junit.Test
 /**
  * VocabularyViewModel 单元测试
  *
- * 覆盖分组逻辑：
- * - 默认按时间分组
- * - 切换到字母分组后 groups 输出按首字母聚合
- * - 切换分组重置展开状态
- * - toggleGroup 展开/收起
- * - deleteVocabulary 委托 repository
+ * 覆盖：
+ * - 分组逻辑（默认按时间、切字母、重置展开、toggleGroup）
+ * - 卡片补充信息：释义、音标、词形还原标注、来源文章标题
+ * - 删除与撤销删除（撤销必须把 id 归零，见 restoreVocabulary 的注释）
  */
 class VocabularyViewModelTest {
 
@@ -32,20 +39,43 @@ class VocabularyViewModelTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var vocabularyRepository: VocabularyRepository
+    private lateinit var dictionaryRepository: DictionaryRepository
     private lateinit var viewModel: VocabularyViewModel
 
     private fun vocab(word: String, id: Long): VocabularyEntity =
         VocabularyEntity(id = id, word = word, articleId = 1L)
 
-    private fun setupWith(words: List<VocabularyEntity>) {
+    private fun row(
+        word: String,
+        id: Long,
+        articleTitle: String? = null
+    ): VocabularyWithSource = VocabularyWithSource(
+        vocabulary = VocabularyEntity(
+            id = id,
+            word = word,
+            articleId = if (articleTitle != null) 1L else null
+        ),
+        articleTitle = articleTitle
+    )
+
+    private fun offlineEntry(word: String, phonetic: String?, chinese: String) =
+        OfflineLookupResult(DictionaryEntry(word = word, phonetic = phonetic, chinese = chinese, english = null))
+
+    private fun setupWith(rows: List<VocabularyWithSource>) {
         vocabularyRepository = mockk(relaxed = true)
-        io.mockk.every { vocabularyRepository.getAllVocabulary() } returns flowOf(words)
-        viewModel = VocabularyViewModel(vocabularyRepository)
+        dictionaryRepository = mockk(relaxed = true)
+        every { vocabularyRepository.getAllVocabularyWithSource() } returns flowOf(rows)
+        viewModel = VocabularyViewModel(vocabularyRepository, dictionaryRepository)
+    }
+
+    /** 只关心分组时用这个重载：来源标题一并置空。 */
+    private fun setupWithWords(words: List<VocabularyEntity>) {
+        setupWith(words.map { VocabularyWithSource(it, articleTitle = null) })
     }
 
     @Before
     fun setup() {
-        setupWith(emptyList())
+        setupWith(emptyList<VocabularyWithSource>())
     }
 
     @Test
@@ -55,7 +85,7 @@ class VocabularyViewModelTest {
 
     @Test
     fun switchToAlphabet_groupsWordsByFirstLetter() = runTest {
-        setupWith(
+        setupWithWords(
             listOf(
                 vocab("apple", 1),
                 vocab("banana", 2),
@@ -115,4 +145,64 @@ class VocabularyViewModelTest {
 
         coVerify(exactly = 1) { vocabularyRepository.deleteVocabulary(entity) }
     }
+
+    @Test
+    fun restoreVocabulary_zeroesIdBeforeInsert() = runTest {
+        val entity = vocab("restore-me", 99)
+
+        viewModel.restoreVocabulary(entity)
+
+        // 带原 id 插入会写成显式主键，可能覆盖删除后新建的行。
+        coVerify(exactly = 1) { vocabularyRepository.insertVocabulary(entity.copy(id = 0)) }
+        coVerify(exactly = 0) { vocabularyRepository.insertVocabulary(entity) }
+    }
+
+    @Test
+    fun details_resolvesPhoneticGlossAndSourceTitle() = runTest {
+        setupWith(listOf(row("Apple", id = 1L, articleTitle = "The Future of AI")))
+        // 生词存的是原文大小写，查词典必须走 lowercase。
+        coEvery { dictionaryRepository.lookupOffline("apple") } returns
+            offlineEntry("apple", "/ˈæpl/", "n. 苹果；苹果树")
+
+        val detail = awaitDetails().getValue(1L)
+
+        assertEquals("/ˈæpl/", detail.phonetic)
+        assertEquals("n. 苹果；苹果树", detail.chinese)
+        assertEquals("The Future of AI", detail.sourceTitle)
+        assertNull("直接命中时不应标注原形", detail.headword)
+        assertTrue(detail.hasGloss)
+    }
+
+    @Test
+    fun details_inflectedForm_reportsHeadword() = runTest {
+        setupWith(listOf(row("lives", id = 7L)))
+        coEvery { dictionaryRepository.lookupOffline("lives") } returns
+            OfflineLookupResult(
+                entry = DictionaryEntry("live", "/lɪv/", "vi. 活；居住", null),
+                inflectedForm = "lives"
+            )
+
+        val detail = awaitDetails().getValue(7L)
+
+        assertEquals("/lɪv/", detail.phonetic)
+        assertEquals("live", detail.headword)
+    }
+
+    @Test
+    fun details_wordMissingFromDictionary_hasNoGlossButKeepsSource() = runTest {
+        setupWith(listOf(row("Zyxwvu", id = 3L, articleTitle = "Obscure Words")))
+        coEvery { dictionaryRepository.lookupOffline("zyxwvu") } returns null
+
+        val detail = awaitDetails().getValue(3L)
+
+        assertNull(detail.phonetic)
+        assertNull(detail.chinese)
+        assertTrue(!detail.hasGloss)
+        // 词库查不到不应连累来源标题。
+        assertEquals("Obscure Words", detail.sourceTitle)
+    }
+
+    /** 取第一份非空的 details：stateIn 的初始值是空 map，解析完成后才发第二份。 */
+    private suspend fun awaitDetails(): Map<Long, VocabularyWordDetail> =
+        viewModel.details.first { it.isNotEmpty() }
 }

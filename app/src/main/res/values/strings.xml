@@ -209,15 +209,23 @@
 
     <!-- Vocabulary screen -->
     <string name="vocabulary_empty">还没有生词，去阅读文章吧～</string>
+    <string name="vocabulary_empty_supporting">阅读时长按任意单词即可加入生词本</string>
+    <string name="vocabulary_total_count">共 %1$d 个生词</string>
     <string name="vocabulary_group_by_time">按时间</string>
     <string name="vocabulary_group_by_alphabet">按字母</string>
     <string name="vocabulary_group_today">今天</string>
     <string name="vocabulary_group_yesterday">昨天</string>
     <string name="vocabulary_group_this_week">本周</string>
-    <string name="vocabulary_group_count">%1$s  %2$d 词</string>
+    <string name="vocabulary_group_words">%1$d 个单词</string>
+    <string name="vocabulary_group_words_new">%1$d 个新单词</string>
     <string name="vocabulary_group_expand">展开</string>
     <string name="vocabulary_group_collapse">收起</string>
     <string name="delete_vocabulary">删除生词</string>
+    <string name="vocabulary_source_article">来自《%1$s》</string>
+    <string name="vocabulary_open_article">查看原文</string>
+    <string name="vocabulary_headword_note">→ %1$s</string>
+    <string name="vocabulary_deleted">已删除“%1$s”</string>
+    <string name="vocabulary_undo">撤销</string>
 
     <!-- Reading screen - empty state -->
     <string name="article_empty_content">这篇文章没有可显示的内容</string>

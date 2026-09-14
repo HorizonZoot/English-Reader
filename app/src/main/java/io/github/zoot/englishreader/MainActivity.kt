@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -53,6 +54,7 @@ import io.github.zoot.englishreader.ui.screen.SettingsCacheManagementScreen
 import io.github.zoot.englishreader.ui.screen.VocabularyScreen
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
+import io.github.zoot.englishreader.ui.theme.NeutralIconGray
 import io.github.zoot.englishreader.util.TestDataGenerator
 import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
@@ -178,38 +180,54 @@ fun EnglishReaderNavigation() {
         bottomBar = {
             if (currentRoute == "article_list" || currentRoute == "vocabulary" || currentRoute == "settings") {
                 ArticleUiTheme {
+                    // 选中色降低一点饱和度（叠一层透明度而不是换色相），未选中统一系统灰，
+                    // 让底栏退到内容之后；文字不加粗。
                     val navigationColors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                        selectedIconColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                        selectedTextColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
                         indicatorColor = Color.Transparent,
-                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                        unselectedIconColor = NeutralIconGray,
+                        unselectedTextColor = NeutralIconGray
                     )
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(MaterialTheme.colorScheme.background)
                             .navigationBarsPadding()
-                            .padding(horizontal = 20.dp, vertical = 10.dp),
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Surface(
                             modifier = Modifier.widthIn(max = 600.dp).fillMaxWidth(),
-                            shape = RoundedCornerShape(26.dp),
+                            shape = RoundedCornerShape(22.dp),
                             color = MaterialTheme.colorScheme.surface,
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                            shadowElevation = 2.dp
+                            shadowElevation = 1.dp
                         ) {
                             NavigationBar(
+                                // 80dp 是每个 item 的 defaultMinSize 撑出来的，容器自身没有高度约束，
+                                // 而图标/文字的垂直居中走 Constraints.constrainHeight(NavigationBarHeight)
+                                // ——会被这里的 72dp 夹紧后重新居中，不会裁切。
+                                modifier = Modifier.height(72.dp),
                                 containerColor = Color.Transparent,
                                 tonalElevation = 0.dp,
                                 windowInsets = WindowInsets(0, 0, 0, 0)
                             ) {
                                 NavigationBarItem(
                                     icon = {
-                                        Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null)
+                                        Icon(
+                                            Icons.AutoMirrored.Outlined.MenuBook,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(22.dp)
+                                        )
                                     },
-                                    label = { Text(stringResource(R.string.nav_articles)) },
+                                    label = {
+                                        Text(
+                                            text = stringResource(R.string.nav_articles),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Normal
+                                        )
+                                    },
                                     colors = navigationColors,
                                     selected = currentRoute == "article_list",
                                     onClick = {
@@ -222,8 +240,20 @@ fun EnglishReaderNavigation() {
                                     }
                                 )
                                 NavigationBarItem(
-                                    icon = { Icon(Icons.Outlined.BookmarkBorder, contentDescription = null) },
-                                    label = { Text(stringResource(R.string.nav_vocabulary)) },
+                                    icon = {
+                                        Icon(
+                                            Icons.Outlined.BookmarkBorder,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = stringResource(R.string.nav_vocabulary),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Normal
+                                        )
+                                    },
                                     colors = navigationColors,
                                     selected = currentRoute == "vocabulary",
                                     onClick = {
@@ -235,8 +265,20 @@ fun EnglishReaderNavigation() {
                                     }
                                 )
                                 NavigationBarItem(
-                                    icon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
-                                    label = { Text(stringResource(R.string.nav_settings)) },
+                                    icon = {
+                                        Icon(
+                                            Icons.Outlined.Settings,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = stringResource(R.string.nav_settings),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Normal
+                                        )
+                                    },
                                     colors = navigationColors,
                                     selected = currentRoute == "settings",
                                     onClick = {
@@ -300,7 +342,10 @@ fun EnglishReaderNavigation() {
         }
 
         composable("vocabulary") {
-            VocabularyScreen()
+            VocabularyScreen(
+                // 从生词跳回原文：普通 navigate（不是 popBackStack），返回键回到生词本。
+                onOpenArticle = { articleId -> navController.navigate("reading/$articleId") }
+            )
         }
 
         composable("settings") {

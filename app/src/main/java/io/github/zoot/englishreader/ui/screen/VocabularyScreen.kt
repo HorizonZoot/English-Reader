@@ -1,89 +1,155 @@
 package io.github.zoot.englishreader.ui.screen
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
+import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
+import io.github.zoot.englishreader.ui.screen.vocabulary.listKey
+import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
+import io.github.zoot.englishreader.ui.theme.LocalSegmentedControlColors
+import io.github.zoot.englishreader.ui.theme.NeutralIconGray
+import io.github.zoot.englishreader.ui.theme.SegmentedControlColors
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
+import kotlinx.coroutines.launch
+
+// 分段控件尺寸：整体 38dp 高、19dp 圆角（正圆端），滑块比轨道内缩 2dp。
+private val SegmentHeight = 38.dp
+private val SegmentRadius = 19.dp
+private val SegmentThumbRadius = 17.dp
+private val SegmentInset = 2.dp
 
 /**
- * 生词本界面
+ * 生词本界面。
+ *
+ * 视觉上只做四件事：标题收小、留白放大、边框减到几乎没有、字体层级拉开。
+ * 不加卡片、不加渐变、不加装饰。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VocabularyScreen(
+    onOpenArticle: (Long) -> Unit,
     viewModel: VocabularyViewModel = hiltViewModel()
-) {
+) = ArticleUiTheme {
     val groups by viewModel.groups.collectAsStateWithLifecycle()
+    val details by viewModel.details.collectAsStateWithLifecycle()
     val groupType by viewModel.groupType.collectAsStateWithLifecycle()
+    val wordCount by viewModel.vocabulary.collectAsStateWithLifecycle()
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    // 删除后给一次撤销机会：左滑是易误触的手势，而误删一条生词没有任何其它找回途径。
+    val onDelete: (VocabularyEntity) -> Unit = remember(viewModel, snackbarHostState, context) {
+        { word ->
+            viewModel.deleteVocabulary(word)
+            scope.launch {
+                val result = snackbarHostState.showSnackbar(
+                    message = context.getString(R.string.vocabulary_deleted, word.word),
+                    actionLabel = context.getString(R.string.vocabulary_undo)
+                )
+                if (result == SnackbarResult.ActionPerformed) {
+                    viewModel.restoreVocabulary(word)
+                }
+            }
+        }
+    }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.nav_vocabulary)) }
+            VocabularyHeader(
+                wordCount = wordCount.size,
+                groupType = groupType,
+                onTypeSelected = viewModel::switchGroupType
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .padding(padding),
+            contentAlignment = Alignment.TopCenter
         ) {
-            // 分组方式切换标签
-            GroupTypeTabs(
-                selectedType = groupType,
-                onTypeSelected = { viewModel.switchGroupType(it) }
-            )
-
-            // 分组列表
             if (groups.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(stringResource(R.string.vocabulary_empty))
-                }
+                VocabularyEmptyState()
             } else {
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier
+                        .widthIn(max = 600.dp)
+                        .fillMaxSize(),
+                    contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 32.dp)
                 ) {
                     groups.forEach { group ->
-                        item(key = group.id) {
+                        item(key = group.id.listKey, contentType = "group-header") {
                             GroupHeader(
                                 title = vocabularyGroupTitle(group.id),
-                                count = group.words.size,
+                                wordCount = group.words.size,
+                                isToday = group.id == VocabularyGroupId.Today,
                                 isExpanded = group.isExpanded,
                                 onClick = { viewModel.toggleGroup(group.id) }
                             )
                         }
 
                         if (group.isExpanded) {
-                            items(group.words, key = { it.id }) { word ->
-                                VocabularyCard(
-                                    word = word,
-                                    onDelete = { viewModel.deleteVocabulary(word) }
-                                )
+                            itemsIndexed(group.words, key = { _, word -> word.id }) { index, word ->
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    // 分隔线画在可滑动内容之外：跟着手指滑走会很别扭。
+                                    // 从内容区左边缘起（列表已有 24dp 内边距），不贯穿屏幕。
+                                    if (index > 0) {
+                                        HorizontalDivider(
+                                            color = MaterialTheme.colorScheme.outlineVariant
+                                        )
+                                    }
+                                    SwipeToDeleteWordRow(
+                                        word = word,
+                                        detail = details[word.id],
+                                        onOpenArticle = onOpenArticle,
+                                        onDelete = { onDelete(word) }
+                                    )
+                                }
                             }
                         }
                     }
@@ -94,96 +160,421 @@ fun VocabularyScreen(
 }
 
 /**
- * 分组类型切换标签
+ * 顶部标题区：标题、总词数、分组方式分段控件。
+ *
+ * 标题 32sp/Semibold 而不是更大更粗——Apple 的大标题感来自留白，不是字重。
+ * 词数为 0 时不显示分段控件：没有分组可切换，摆在那里只是噪音。
  */
 @Composable
-fun GroupTypeTabs(
-    selectedType: GroupType,
+private fun VocabularyHeader(
+    wordCount: Int,
+    groupType: GroupType,
     onTypeSelected: (GroupType) -> Unit
 ) {
-    TabRow(
-        selectedTabIndex = when (selectedType) {
-            GroupType.ByTime -> 0
-            GroupType.ByAlphabet -> 1
-            // ByArticle 已从 UI 中移除，若触发则默认为 ByTime
-            GroupType.ByArticle -> 0
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 600.dp)
+                .fillMaxWidth()
+                .windowInsetsPadding(
+                    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                )
+                .padding(horizontal = 24.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.nav_vocabulary),
+                style = MaterialTheme.typography.headlineLarge,
+                fontSize = 32.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = (-0.4).sp,
+                modifier = Modifier.semantics { heading() }
+            )
+            if (wordCount > 0) {
+                Text(
+                    text = stringResource(R.string.vocabulary_total_count, wordCount),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontSize = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                GroupTypeSegments(
+                    selectedType = groupType,
+                    onTypeSelected = onTypeSelected,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
-    ) {
-        Tab(
-            selected = selectedType == GroupType.ByTime,
-            onClick = { onTypeSelected(GroupType.ByTime) },
-            text = { Text(stringResource(R.string.vocabulary_group_by_time)) }
-        )
-        Tab(
-            selected = selectedType == GroupType.ByAlphabet,
-            onClick = { onTypeSelected(GroupType.ByAlphabet) },
-            text = { Text(stringResource(R.string.vocabulary_group_by_alphabet)) }
-        )
-        // ByArticle tab 已移除，因为功能未实现
     }
 }
 
 /**
- * 分组头部
+ * 分组方式切换，iOS 风格分段控件。
+ *
+ * 不用 Material 3 的 `SegmentedButton`：它自带描边和选中打勾图标，视觉重量远超这里
+ * 需要的「浅灰轨道 + 白色滑块」；那圈描边正是要弱化的东西。
+ *
+ * 语义上用 [selectableGroup] + `Role.RadioButton`，读屏会念出「已选中」，而不是
+ * 把两个按钮念成两个独立动作。
  */
 @Composable
-fun GroupHeader(
+private fun GroupTypeSegments(
+    selectedType: GroupType,
+    onTypeSelected: (GroupType) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = LocalSegmentedControlColors.current
+
+    Row(
+        modifier = modifier
+            .height(SegmentHeight)
+            .clip(RoundedCornerShape(SegmentRadius))
+            .background(colors.track)
+            .padding(SegmentInset)
+            .selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(SegmentInset)
+    ) {
+        SegmentButton(
+            label = stringResource(R.string.vocabulary_group_by_time),
+            selected = selectedType == GroupType.ByTime,
+            onClick = { onTypeSelected(GroupType.ByTime) },
+            colors = colors,
+            modifier = Modifier.weight(1f)
+        )
+        SegmentButton(
+            label = stringResource(R.string.vocabulary_group_by_alphabet),
+            selected = selectedType == GroupType.ByAlphabet,
+            onClick = { onTypeSelected(GroupType.ByAlphabet) },
+            colors = colors,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun SegmentButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    colors: SegmentedControlColors,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(SegmentThumbRadius)
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            // 选中项只有极轻的一层投影，用来把它从轨道上「浮」起来，不制造边框。
+            .then(if (selected) Modifier.shadow(1.dp, shape) else Modifier)
+            .clip(shape)
+            .background(if (selected) colors.thumb else Color.Transparent)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Normal,
+            // 蓝色只出现在文字上，不做选中色块。
+            color = if (selected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            maxLines = 1
+        )
+    }
+}
+
+/**
+ * 分组头：标题一行、词数一行、右侧展开箭头。
+ *
+ * 纯文本，没有背景也没有边框——做成卡片会把「分组」变成视觉主体，
+ * 而这里真正的主体是下面的单词。
+ */
+@Composable
+private fun GroupHeader(
     title: String,
-    count: Int,
+    wordCount: Int,
+    isToday: Boolean,
     isExpanded: Boolean,
     onClick: () -> Unit
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth()
+    val rotation by animateFloatAsState(
+        targetValue = if (isExpanded) 0f else 180f,
+        label = "group-chevron"
+    )
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(top = 24.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             Text(
-                text = stringResource(R.string.vocabulary_group_count, title, count),
-                style = MaterialTheme.typography.titleMedium
+                text = title,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.semantics { heading() }
             )
-            Icon(
-                Icons.Default.KeyboardArrowDown,
-                contentDescription = stringResource(
-                    if (isExpanded) R.string.vocabulary_group_collapse
-                    else R.string.vocabulary_group_expand
+            Text(
+                text = stringResource(
+                    if (isToday) R.string.vocabulary_group_words_new
+                    else R.string.vocabulary_group_words,
+                    wordCount
                 ),
-                modifier = Modifier.rotate(if (isExpanded) 180f else 0f)
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Icon(
+            imageVector = Icons.Default.KeyboardArrowUp,
+            contentDescription = stringResource(
+                if (isExpanded) R.string.vocabulary_group_collapse
+                else R.string.vocabulary_group_expand
+            ),
+            tint = NeutralIconGray,
+            modifier = Modifier
+                .size(20.dp)
+                .rotate(rotation)
+        )
+    }
+}
+
+/**
+ * 左滑删除的生词行。
+ *
+ * 删除是**破坏性且不可逆**的操作，所以：
+ *  - 只允许从右往左滑（[SwipeToDismissBox] 的 StartToEnd 关掉），避免方向上的误触；
+ *  - [consumed] 保证一次手势只派发一次删除——`confirmValueChange` 会在目标值
+ *    来回穿越阈值时被反复调用；
+ *  - 垃圾桶默认是系统灰，随滑动进度渐变到红色——静止的红图标是最抢视觉的元素之一，
+ *    而这里只有真正在删除时才需要警告色；
+ *  - 自定义无障碍操作是滑动手势在 TalkBack 下的等价入口，没有它这个界面
+ *    对读屏用户就是「只能看不能删」。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeToDeleteWordRow(
+    word: VocabularyEntity,
+    detail: VocabularyWordDetail?,
+    onOpenArticle: (Long) -> Unit,
+    onDelete: () -> Unit
+) {
+    var consumed by remember { mutableStateOf(false) }
+    val deleteActionLabel = stringResource(R.string.delete_vocabulary)
+
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
+                if (!consumed) {
+                    consumed = true
+                    onDelete()
+                }
+                true
+            } else {
+                false
+            }
+        }
+    )
+
+    val errorColor = MaterialTheme.colorScheme.error
+    val iconTint = lerp(NeutralIconGray, errorColor, dismissState.progress)
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = false,
+        modifier = Modifier
+            .testTag("vocabulary-word-${word.id}")
+            .semantics {
+                customActions = listOf(
+                    CustomAccessibilityAction(deleteActionLabel) {
+                        onDelete()
+                        true
+                    }
+                )
+            },
+        backgroundContent = {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(end = 4.dp),
+                contentAlignment = Alignment.CenterEnd
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    ) {
+        WordRow(
+            word = word,
+            detail = detail,
+            onOpenArticle = onOpenArticle
+        )
+    }
+}
+
+/**
+ * 生词行本体。
+ *
+ * 字体体系是刻意分开的：英文单词与音标用 Serif（和阅读页、文章列表的标题一致），
+ * 中文释义与来源用系统字体（苹方）——一套字体打天下会让所有信息看起来一样重。
+ *
+ * 颜色层级由深到浅：单词 `onSurface` > 释义 `onSurface` > 音标 `onSurfaceVariant`
+ * > 来源 `onSurfaceVariant` 再降透明度；「查看原文」是唯一的系统蓝。
+ *
+ * 释义最多两行：ECDICT 的长词条（如 "a"）展开有几百字，不截断会把整屏撑爆。
+ */
+@Composable
+private fun WordRow(
+    word: VocabularyEntity,
+    detail: VocabularyWordDetail?,
+    onOpenArticle: (Long) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = word.word,
+            fontFamily = FontFamily.Serif,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Normal,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+
+        if (detail?.hasGloss == true) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                detail.phonetic?.let {
+                    Text(
+                        text = it,
+                        fontFamily = FontFamily.Serif,
+                        fontSize = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = detail.chinese.orEmpty(),
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        detail?.headword?.let {
+            Text(
+                text = stringResource(R.string.vocabulary_headword_note, it),
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        val articleId = word.articleId
+        val sourceTitle = detail?.sourceTitle
+        if (articleId != null && sourceTitle != null) {
+            SourceArticleRow(
+                sourceTitle = sourceTitle,
+                onClick = { onOpenArticle(articleId) }
             )
         }
     }
 }
 
 /**
- * 单词卡片
+ * 来源文章行：整行可点，跳回该文章的阅读页。
+ *
+ * 「查看原文」是纯文本链接——没有背景、没有圆角、不加粗，只有系统蓝。
+ *
+ * `articleId` 非空即代表文章仍存在——vocabulary 对 articles 是 CASCADE，
+ * 文章被删时关联生词会一起消失（删书场景则由 `deleteBookCascade` 先把
+ * `articleId` 置 NULL 保住生词，那种情况下这里不显示来源行）。
  */
 @Composable
-fun VocabularyCard(
-    word: VocabularyEntity,
-    onDelete: () -> Unit
+private fun SourceArticleRow(
+    sourceTitle: String,
+    onClick: () -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Description,
+            contentDescription = null,
+            tint = NeutralIconGray,
+            modifier = Modifier.size(15.dp)
+        )
+        Text(
+            text = stringResource(R.string.vocabulary_source_article, sourceTitle),
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false)
+        )
+        Text(
+            text = stringResource(R.string.vocabulary_open_article),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Normal,
+            color = MaterialTheme.colorScheme.primary
+        )
+    }
+}
+
+@Composable
+private fun VocabularyEmptyState() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 420.dp)
+                .padding(horizontal = 32.dp)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = word.word,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.weight(1f)
+            Icon(
+                imageVector = Icons.Outlined.BookmarkBorder,
+                contentDescription = null,
+                tint = NeutralIconGray,
+                modifier = Modifier.size(40.dp)
             )
-            IconButton(onClick = onDelete) {
-                Icon(
-                    Icons.Default.Delete,
-                    contentDescription = stringResource(R.string.delete_vocabulary)
-                )
-            }
+            Text(
+                text = stringResource(R.string.vocabulary_empty),
+                style = MaterialTheme.typography.titleMedium,
+                textAlign = TextAlign.Center
+            )
+            Text(
+                text = stringResource(R.string.vocabulary_empty_supporting),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }

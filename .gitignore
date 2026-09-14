@@ -59,6 +59,8 @@ captures/
 # Keystore files
 *.jks
 *.keystore
+# Release 签名凭据（storeFile 路径与各项口令）。绝不可入库。
+keystore.properties
 
 # External native build folder generated in Android Studio 2.2 and later
 .externalNativeBuild

@@ -1,8 +1,21 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
     id("com.google.dagger.hilt.android")
+}
+
+// Release 签名凭据从仓库根目录的 keystore.properties 读取，该文件不入库（见 .gitignore）。
+//
+// 文件缺失时不报错，release 构建照常进行、只是产出未签名 APK：贡献者与 CI 不需要持有
+// 签名密钥就能编译。只有维护者本机有该文件，因此只有维护者能产出可安装的 release 包。
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -14,11 +27,22 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.1-beta"
         testInstrumentationRunner = "io.github.zoot.englishreader.HiltTestRunner"
 
         ksp {
             arg("room.schemaLocation", "$projectDir/schemas")
+        }
+    }
+
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
         }
     }
 
@@ -37,10 +61,16 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            // 资源压缩依赖代码压缩（isMinifyEnabled 必须为 true），它会移除未被引用的资源。
+            // 注意：通过 getIdentifier()/反射在运行时才解析的资源名不在「被引用」之列，会被删掉。
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

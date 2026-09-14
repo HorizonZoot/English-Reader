@@ -3,6 +3,8 @@ package io.github.zoot.englishreader.viewmodel
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
+import io.github.zoot.englishreader.data.audio.WordAudioUrl
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.entity.VocabularyWithSource
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
@@ -13,8 +15,13 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.TimeGrouper
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
+import io.github.zoot.englishreader.util.AudioPlayer
+import io.github.zoot.englishreader.util.NetworkChecker
+import io.github.zoot.englishreader.util.TtsPlayer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -27,7 +34,11 @@ import javax.inject.Inject
 @HiltViewModel
 class VocabularyViewModel @Inject constructor(
     private val vocabularyRepository: VocabularyRepository,
-    private val dictionaryRepository: DictionaryRepository
+    private val dictionaryRepository: DictionaryRepository,
+    private val audioPlayer: AudioPlayer,
+    private val networkChecker: NetworkChecker,
+    private val ttsPlayer: TtsPlayer,
+    private val pronunciationAudioCache: PronunciationAudioCache
 ) : ViewModel() {
 
     private val timeGrouper = TimeGrouper()
@@ -134,6 +145,104 @@ class VocabularyViewModel @Inject constructor(
                 Log.e("VocabularyViewModel", "Vocabulary restore failed", e)
             }
         }
+    }
+
+    /**
+     * 正在准备读音的生词 id；null 表示当前没有在准备。
+     *
+     * 只覆盖「需要联网取音频」的那一段：命中本地缓存时 prepare() 是毫秒级，闪一下
+     * 转圈比不转更难看。
+     */
+    private val _loadingAudioWordId = MutableStateFlow<Long?>(null)
+    val loadingAudioWordId: StateFlow<Long?> = _loadingAudioWordId.asStateFlow()
+
+    /** 系统 TTS 也不可用时的一次性提示，界面据此弹 Snackbar。 */
+    private val _audioUnavailable = Channel<Unit>(Channel.CONFLATED)
+    val audioUnavailable: Flow<Unit> = _audioUnavailable.receiveAsFlow()
+
+    private var playAudioJob: Job? = null
+    private var audioGeneration = 0
+
+    /**
+     * 播放生词读音。
+     *
+     * 顺序沿用阅读页的查词发音：**先查本地缓存，再判网络**。反过来的话，离线时明明
+     * 缓存里已经有的词也用不上——而缓存存在的全部意义就是让这些词离线可用。
+     *
+     * 比阅读页那份简单的地方：这里没有「弹窗中途被关掉」这种失效场景，所以一个代次
+     * 就够——连点两个词时，前一个的结果不得覆盖后一个的状态。
+     */
+    fun playWordAudio(vocabulary: VocabularyEntity) {
+        val word = vocabulary.word.trim()
+        if (word.isEmpty()) return
+        val key = word.lowercase()
+        val generation = ++audioGeneration
+        playAudioJob?.cancel()
+        playAudioJob = viewModelScope.launch {
+            try {
+                val cached = pronunciationAudioCache.get(key)
+                if (generation != audioGeneration) return@launch
+
+                if (cached == null && !networkChecker.isOnline()) {
+                    speakViaTts(word)
+                    return@launch
+                }
+
+                if (cached == null) _loadingAudioWordId.value = vocabulary.id
+
+                val url = cached?.absolutePath ?: WordAudioUrl.forWord(word)
+                audioPlayer.play(
+                    url = url,
+                    onError = { exception ->
+                        // 回到主线程后再检查代次，旧回调不能打断后来开始的那次播放。
+                        viewModelScope.launch playbackFailure@ {
+                            if (generation != audioGeneration) return@playbackFailure
+                            _loadingAudioWordId.value = null
+                            // 只记类名：异常信息可能回显带单词的 URL。
+                            Log.e(
+                                "VocabularyViewModel",
+                                "Audio playback failed: ${exception.javaClass.simpleName}"
+                            )
+                            // 本地文件不可播时失效它，让下次重走远端；远端失败不动缓存。
+                            if (cached != null) pronunciationAudioCache.invalidate(key)
+                            speakViaTts(word)
+                        }
+                    }
+                )
+                if (generation == audioGeneration) _loadingAudioWordId.value = null
+
+                // 播放已经启动，另起协程把音频存入缓存，不阻塞本次播放。
+                // 与阅读页同一取舍：首次发两个请求，换后续每次为零。
+                if (cached == null && networkChecker.isOnline()) {
+                    viewModelScope.launch {
+                        runCatching { pronunciationAudioCache.download(key, url) }
+                            .onFailure { if (it is CancellationException) throw it }
+                    }
+                }
+            } catch (e: CancellationException) {
+                if (generation == audioGeneration) _loadingAudioWordId.value = null
+                throw e
+            } catch (e: Exception) {
+                if (generation != audioGeneration) return@launch
+                _loadingAudioWordId.value = null
+                Log.e(
+                    "VocabularyViewModel",
+                    "Failed to start audio playback: ${e.javaClass.simpleName}"
+                )
+                speakViaTts(word)
+            }
+        }
+    }
+
+    private fun speakViaTts(word: String) {
+        // trySend：CONFLATED channel 永不阻塞，回调可能同步触发，无需起协程。
+        ttsPlayer.speak(word) { _audioUnavailable.trySend(Unit) }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        // AudioPlayer 是 @Singleton：离开生词本后不该继续出声。
+        audioPlayer.stop()
     }
 
     /**

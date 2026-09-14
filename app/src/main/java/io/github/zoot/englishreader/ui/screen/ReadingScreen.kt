@@ -127,6 +127,7 @@ fun ReadingScreen(
     val sentenceTranslationState by viewModel.sentenceTranslationState.collectAsStateWithLifecycle()
     val chapterContext by viewModel.chapterContext.collectAsStateWithLifecycle()
     val pendingPositionTarget by viewModel.pendingPositionTarget.collectAsStateWithLifecycle()
+    val highlightedParagraph by viewModel.highlightedParagraph.collectAsStateWithLifecycle()
     val readingMode by viewModel.readingMode.collectAsStateWithLifecycle()
     val ttsState by viewModel.readingTtsState.collectAsStateWithLifecycle()
     val voiceSettings by viewModel.voiceSettings.collectAsStateWithLifecycle()
@@ -334,6 +335,7 @@ fun ReadingScreen(
             onReadingModeChange = viewModel::setReadingMode,
             pendingPositionTarget = pendingPositionTarget,
             onPositionTargetConsumed = viewModel::consumePositionTarget,
+            highlightedParagraph = highlightedParagraph,
             onSaveReadingPosition = viewModel::saveReadingPosition,
             ttsState = ttsState,
             ttsPositionTarget = ttsPositionTarget,
@@ -399,6 +401,8 @@ fun ReadingScreenContent(
     onReadingModeChange: (ReadingMode) -> Unit = {},
     pendingPositionTarget: ReadingPositionTarget? = null,
     onPositionTargetConsumed: (ReadingPositionTarget) -> Unit = {},
+    /** 从生词本跳转过来时要临时点亮的段落序号；null 表示没有。 */
+    highlightedParagraph: Int? = null,
     onSaveReadingPosition: (ReadingPosition) -> Unit = {},
     onNavigateChapter: (Long) -> Unit = {},
     onNavigatePageBoundary: (Long, ReadingEntry) -> Unit = { id, _ -> onNavigateChapter(id) },
@@ -994,6 +998,7 @@ fun ReadingScreenContent(
                                 target = restoreTarget,
                                 enabled = !isLoading && !showReadingSettings,
                                 bottomInset = with(density) { if (wordDetailsVisible) wordSheetObstructionHeightPx.toDp() else 0.dp },
+                                highlightedParagraphIndex = highlightedParagraph,
                                 onRestored = restorePosition,
                                 onPositionChanged = { readingAnchor = it },
                                 onPositionSettled = savePosition,

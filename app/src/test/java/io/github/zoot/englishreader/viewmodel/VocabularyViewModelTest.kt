@@ -1,6 +1,8 @@
 package io.github.zoot.englishreader.viewmodel
 
 import app.cash.turbine.test
+import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
+import io.github.zoot.englishreader.data.audio.WordAudioUrl
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.entity.VocabularyWithSource
@@ -10,11 +12,15 @@ import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
+import io.github.zoot.englishreader.util.AudioPlayer
 import io.github.zoot.englishreader.util.MainDispatcherRule
+import io.github.zoot.englishreader.util.NetworkChecker
+import io.github.zoot.englishreader.util.TtsPlayer
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
@@ -24,6 +30,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import java.io.File
 
 /**
  * VocabularyViewModel 单元测试
@@ -40,6 +47,10 @@ class VocabularyViewModelTest {
 
     private lateinit var vocabularyRepository: VocabularyRepository
     private lateinit var dictionaryRepository: DictionaryRepository
+    private lateinit var audioPlayer: AudioPlayer
+    private lateinit var networkChecker: NetworkChecker
+    private lateinit var ttsPlayer: TtsPlayer
+    private lateinit var pronunciationAudioCache: PronunciationAudioCache
     private lateinit var viewModel: VocabularyViewModel
 
     private fun vocab(word: String, id: Long): VocabularyEntity =
@@ -64,8 +75,20 @@ class VocabularyViewModelTest {
     private fun setupWith(rows: List<VocabularyWithSource>) {
         vocabularyRepository = mockk(relaxed = true)
         dictionaryRepository = mockk(relaxed = true)
+        audioPlayer = mockk(relaxed = true)
+        networkChecker = mockk(relaxed = true)
+        ttsPlayer = mockk(relaxed = true)
+        pronunciationAudioCache = mockk(relaxed = true)
         every { vocabularyRepository.getAllVocabularyWithSource() } returns flowOf(rows)
-        viewModel = VocabularyViewModel(vocabularyRepository, dictionaryRepository)
+        every { networkChecker.isOnline() } returns true
+        viewModel = VocabularyViewModel(
+            vocabularyRepository = vocabularyRepository,
+            dictionaryRepository = dictionaryRepository,
+            audioPlayer = audioPlayer,
+            networkChecker = networkChecker,
+            ttsPlayer = ttsPlayer,
+            pronunciationAudioCache = pronunciationAudioCache
+        )
     }
 
     /** 只关心分组时用这个重载：来源标题一并置空。 */
@@ -205,4 +228,60 @@ class VocabularyViewModelTest {
     /** 取第一份非空的 details：stateIn 的初始值是空 map，解析完成后才发第二份。 */
     private suspend fun awaitDetails(): Map<Long, VocabularyWordDetail> =
         viewModel.details.first { it.isNotEmpty() }
+
+    // ---- 点击单词播放读音 ----
+
+    @Test
+    fun playWordAudio_cachedFile_playsLocalPathInsteadOfRemote() = runTest {
+        val entity = vocab("noticing", 1L)
+        val cached = File("cache/abc.mp3")
+        coEvery { pronunciationAudioCache.get("noticing") } returns cached
+
+        viewModel.playWordAudio(entity)
+
+        // 命中缓存必须走本地文件：远端 URL 在离线时根本播不出来，而缓存存在的
+        // 全部意义就是让这些词离线可用。
+        coVerify(exactly = 1) {
+            audioPlayer.play(url = cached.absolutePath, onComplete = any(), onError = any())
+        }
+        coVerify(exactly = 0) { audioPlayer.play(url = WordAudioUrl.forWord("noticing"), any(), any()) }
+    }
+
+    @Test
+    fun playWordAudio_notCachedAndOnline_playsRemoteUrl() = runTest {
+        val entity = vocab("noticing", 1L)
+        coEvery { pronunciationAudioCache.get("noticing") } returns null
+        every { networkChecker.isOnline() } returns true
+
+        viewModel.playWordAudio(entity)
+
+        coVerify(exactly = 1) {
+            audioPlayer.play(
+                url = WordAudioUrl.forWord("noticing"),
+                onComplete = any(),
+                onError = any()
+            )
+        }
+    }
+
+    @Test
+    fun playWordAudio_notCachedAndOffline_fallsBackToTtsWithoutRequestingAudio() = runTest {
+        val entity = vocab("noticing", 1L)
+        coEvery { pronunciationAudioCache.get("noticing") } returns null
+        every { networkChecker.isOnline() } returns false
+
+        viewModel.playWordAudio(entity)
+
+        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
+        verify(exactly = 1) { ttsPlayer.speak("noticing", any()) }
+    }
+
+    @Test
+    fun playWordAudio_looksUpCacheWithLowercaseWord() = runTest {
+        // 生词存的是原文大小写，而缓存键与阅读页一致走 lowercase——
+        // 两边不一致会让阅读时缓存过的词在生词本里永远命中不了。
+        viewModel.playWordAudio(vocab("Noticing", 1L))
+
+        coVerify(exactly = 1) { pronunciationAudioCache.get("noticing") }
+    }
 }

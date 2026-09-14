@@ -3,6 +3,7 @@ package io.github.zoot.englishreader
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.util.Log
@@ -313,8 +314,16 @@ fun EnglishReaderNavigation() {
         }
 
         composable(
-            route = "reading/{articleId}",
-            arguments = listOf(navArgument("articleId") { type = NavType.LongType })
+            // word 是可选的：文章列表/目录/翻页进来时不带它，只有生词本「查看原文」才带，
+            // 阅读页据此滚动到该词所在段落并临时点亮。
+            route = "reading/{articleId}?word={word}",
+            arguments = listOf(
+                navArgument("articleId") { type = NavType.LongType },
+                navArgument("word") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                }
+            )
         ) { backStackEntry ->
             val articleId = backStackEntry.arguments?.getLong("articleId") ?: 0L
             val viewModel: ReadingViewModel = hiltViewModel()
@@ -344,7 +353,10 @@ fun EnglishReaderNavigation() {
         composable("vocabulary") {
             VocabularyScreen(
                 // 从生词跳回原文：普通 navigate（不是 popBackStack），返回键回到生词本。
-                onOpenArticle = { articleId -> navController.navigate("reading/$articleId") }
+                // 词一并带过去，阅读页会滚到它所在的段落并短暂高亮。
+                onOpenArticle = { articleId, word ->
+                    navController.navigate("reading/$articleId?word=${Uri.encode(word)}")
+                }
             )
         }
 

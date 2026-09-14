@@ -12,6 +12,7 @@ import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.BookmarkBorder
@@ -30,6 +31,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -68,17 +70,26 @@ private val SegmentInset = 2.dp
  */
 @Composable
 fun VocabularyScreen(
-    onOpenArticle: (Long) -> Unit,
+    onOpenArticle: (articleId: Long, word: String) -> Unit,
     viewModel: VocabularyViewModel = hiltViewModel()
 ) = ArticleUiTheme {
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val details by viewModel.details.collectAsStateWithLifecycle()
     val groupType by viewModel.groupType.collectAsStateWithLifecycle()
     val wordCount by viewModel.vocabulary.collectAsStateWithLifecycle()
+    val loadingAudioWordId by viewModel.loadingAudioWordId.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // 真人音与缓存都拿不到时回落系统 TTS；TTS 也没有引擎才算真失败，那必须说出来——
+    // 用户是主动点了一下，静默无声会被当成「这个功能没做」。
+    LaunchedEffect(viewModel) {
+        viewModel.audioUnavailable.collect {
+            snackbarHostState.showSnackbar(context.getString(R.string.tts_unavailable))
+        }
+    }
 
     // 删除后给一次撤销机会：左滑是易误触的手势，而误删一条生词没有任何其它找回途径。
     val onDelete: (VocabularyEntity) -> Unit = remember(viewModel, snackbarHostState, context) {
@@ -146,6 +157,8 @@ fun VocabularyScreen(
                                     SwipeToDeleteWordRow(
                                         word = word,
                                         detail = details[word.id],
+                                        isPreparingAudio = loadingAudioWordId == word.id,
+                                        onPlayAudio = { viewModel.playWordAudio(word) },
                                         onOpenArticle = onOpenArticle,
                                         onDelete = { onDelete(word) }
                                     )
@@ -364,7 +377,9 @@ private fun GroupHeader(
 private fun SwipeToDeleteWordRow(
     word: VocabularyEntity,
     detail: VocabularyWordDetail?,
-    onOpenArticle: (Long) -> Unit,
+    isPreparingAudio: Boolean,
+    onPlayAudio: () -> Unit,
+    onOpenArticle: (articleId: Long, word: String) -> Unit,
     onDelete: () -> Unit
 ) {
     var consumed by remember { mutableStateOf(false) }
@@ -420,6 +435,8 @@ private fun SwipeToDeleteWordRow(
         WordRow(
             word = word,
             detail = detail,
+            isPreparingAudio = isPreparingAudio,
+            onPlayAudio = onPlayAudio,
             onOpenArticle = onOpenArticle
         )
     }
@@ -440,21 +457,55 @@ private fun SwipeToDeleteWordRow(
 private fun WordRow(
     word: VocabularyEntity,
     detail: VocabularyWordDetail?,
-    onOpenArticle: (Long) -> Unit
+    isPreparingAudio: Boolean,
+    onPlayAudio: () -> Unit,
+    onOpenArticle: (articleId: Long, word: String) -> Unit
 ) {
+    // clickable 会合并子节点语义，读屏只会念出单词本身「noticing，按钮」——听不出按下去
+    // 会做什么。用 contentDescription 覆盖成动作描述。
+    val playDescription = if (isPreparingAudio) {
+        stringResource(R.string.loading_pronunciation)
+    } else {
+        stringResource(R.string.word_play_pronunciation, word.word)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 18.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text(
-            text = word.word,
-            fontFamily = FontFamily.Serif,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Normal,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+        // 单词本身就是播放按钮：喇叭图标只是可点区域的提示，不是独立的第二次点击目标。
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button, onClick = onPlayAudio)
+                .semantics { contentDescription = playDescription },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = word.word,
+                fontFamily = FontFamily.Serif,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Normal,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (isPreparingAudio) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(15.dp),
+                    strokeWidth = 2.dp,
+                    color = NeutralIconGray
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                    contentDescription = null,
+                    tint = NeutralIconGray,
+                    modifier = Modifier.size(15.dp)
+                )
+            }
+        }
 
         if (detail?.hasGloss == true) {
             Row(
@@ -494,7 +545,7 @@ private fun WordRow(
         if (articleId != null && sourceTitle != null) {
             SourceArticleRow(
                 sourceTitle = sourceTitle,
-                onClick = { onOpenArticle(articleId) }
+                onClick = { onOpenArticle(articleId, word.word) }
             )
         }
     }

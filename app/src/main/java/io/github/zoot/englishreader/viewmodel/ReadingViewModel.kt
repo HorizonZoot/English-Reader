@@ -55,11 +55,13 @@ import io.github.zoot.englishreader.util.TtsPlaybackResult
 import io.github.zoot.englishreader.util.TtsVoiceSnapshot
 import io.github.zoot.englishreader.util.failureReason
 import io.github.zoot.englishreader.util.ParagraphAligner
+import io.github.zoot.englishreader.data.audio.WordAudioUrl
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -113,6 +115,17 @@ enum class DefinitionSource {
 private const val MAX_DEFINITIONS = 5
 private const val READING_ROUTE_ARTICLE = "reading_route_article"
 private const val READING_CURRENT_ARTICLE = "reading_current_article"
+
+/**
+ * 生词本「查看原文」带的词。既是导航参数名，也是 SavedStateHandle 的键。
+ *
+ * 只在 [ReadingViewModel.openReadingSession] 首次进入该路由时读取一次：用户从生词本
+ * 跳过来是为了看这个词所在的段落，之后在原地切章不该再被拽回去。
+ */
+private const val READING_ROUTE_WORD = "word"
+
+/** 跳转过来的段落亮多久。够看清位置，又不至于在随后的阅读里持续干扰。 */
+private const val PARAGRAPH_HIGHLIGHT_MS = 3000L
 
 /**
  * 词典错误类型（用于本地化错误消息）
@@ -360,6 +373,19 @@ class ReadingViewModel @Inject constructor(
     private val _pendingPositionTarget = MutableStateFlow<ReadingPositionTarget?>(null)
     val pendingPositionTarget: StateFlow<ReadingPositionTarget?> = _pendingPositionTarget.asStateFlow()
     private var loadArticleJob: Job? = null
+
+    /**
+     * 要临时高亮的段落序号（生词本跳转过来的那一段），不等同于阅读位置。
+     *
+     * 只在跳转后亮一段时间就自行熄灭：它是一个「就是这里」的提示，不是选中态——
+     * 常亮的段落底色会变成阅读时的干扰。
+     */
+    private val _highlightedParagraph = MutableStateFlow<Int?>(null)
+    val highlightedParagraph: StateFlow<Int?> = _highlightedParagraph.asStateFlow()
+    private var highlightJob: Job? = null
+
+    /** 从生词本跳转时携带的词，由 [loadArticle] 消费一次后置空。 */
+    private var pendingHighlightWord: String? = null
     private var lookupWordJob: Job? = null
     private var wordSelectionGeneration = 0L
     private var explanationPreparationJob: Job? = null
@@ -390,6 +416,8 @@ class ReadingViewModel @Inject constructor(
             savedStateHandle[READING_CURRENT_ARTICLE] = articleId
         }
         savedStateHandle[READING_ROUTE_ARTICLE] = articleId
+        // 生词本「查看原文」带来的词。只在进入该路由时取一次，原地切章不再复用。
+        pendingHighlightWord = savedStateHandle.get<String>(READING_ROUTE_WORD)?.takeIf { it.isNotBlank() }
         loadArticle(savedStateHandle.get<Long>(READING_CURRENT_ARTICLE) ?: articleId)
     }
 
@@ -410,6 +438,7 @@ class ReadingViewModel @Inject constructor(
         _isLoadingArticle.value = true
         val previousTarget = _pendingPositionTarget.value
         _pendingPositionTarget.value = null
+        clearParagraphHighlight()
         loadArticleJob = viewModelScope.launch {
             try {
                 val loaded = articleRepository.getArticleById(articleId)
@@ -425,9 +454,20 @@ class ReadingViewModel @Inject constructor(
                 } else null
                 val context = chapterContextFor(articleId)
                 if (generation != articleLoadGeneration || requestedArticleId != articleId) return@launch
-                val position = stored ?: ReadingPosition(
-                    articleId, ReadingAnchor(textKind = ReadingTextKind.TITLE)
-                )
+
+                // 生词本跳转：定位词所在段落，既覆盖阅读位置（滚过去），又点亮那一段。
+                // 词找不到时按 null 处理，退回正常的阅读位置恢复——生词可能是变形词，
+                // 而正文里存的是它出现时的形态，理论上必然命中；找不到也不该让跳转失败。
+                val highlightWord = pendingHighlightWord
+                pendingHighlightWord = null
+                val wordAnchor = highlightWord?.let { findWordAnchor(loaded.content, it) }
+                wordAnchor?.let { highlightParagraph(it.paragraphIndex) }
+
+                val position = wordAnchor?.let { ReadingPosition(articleId, it) }
+                    ?: stored
+                    ?: ReadingPosition(
+                        articleId, ReadingAnchor(textKind = ReadingTextKind.TITLE)
+                    )
                 // 位置先发布，内容随后可见；首帧的临时位置不得冲掉已保存的锚点。
                 _pendingPositionTarget.value = ReadingPositionTarget(
                     position = position,
@@ -1412,9 +1452,49 @@ class ReadingViewModel @Inject constructor(
      * type=2 为美式发音（1 为英式）。国内可访问，MediaPlayer 可直接播放。
      * word 经 URL 编码，保证含空格/特殊字符的短语也能安全拼接。
      */
-    private fun buildYoudaoAudioUrl(word: String): String {
-        val encoded = java.net.URLEncoder.encode(word, "UTF-8")
-        return "https://dict.youdao.com/dictvoice?audio=$encoded&type=2"
+    private fun buildYoudaoAudioUrl(word: String): String = WordAudioUrl.forWord(word)
+
+    /**
+     * 在正文里定位生词所在的段落。
+     *
+     * 先按整词匹配（`\b`），找不到再退化成子串匹配：生词就是从正文里选出来的，理论上
+     * 必然命中，但 `\b` 会把带撇号的词（`don't`）在中间断开，也可能因为词尾标点而落空。
+     * 两级都找不到时返回 null，调用方退回正常的阅读位置恢复。
+     *
+     * 段落切分用 [ParagraphAligner.splitParagraphs]，与阅读页渲染时的分段同源——
+     * 各自切一遍就会得到不同的段落序号。
+     */
+    private fun findWordAnchor(content: String, word: String): ReadingAnchor? {
+        val needle = word.trim()
+        if (needle.isEmpty()) return null
+        val paragraphs = ParagraphAligner.splitParagraphs(content)
+
+        val wholeWord = Regex("\\b${Regex.escape(needle)}\\b", RegexOption.IGNORE_CASE)
+        paragraphs.forEachIndexed { index, paragraph ->
+            wholeWord.find(paragraph)?.let {
+                return ReadingAnchor(index, ReadingTextKind.ORIGINAL, it.range.first)
+            }
+        }
+        paragraphs.forEachIndexed { index, paragraph ->
+            val at = paragraph.indexOf(needle, ignoreCase = true)
+            if (at >= 0) return ReadingAnchor(index, ReadingTextKind.ORIGINAL, at)
+        }
+        return null
+    }
+
+    private fun highlightParagraph(index: Int) {
+        highlightJob?.cancel()
+        highlightJob = viewModelScope.launch {
+            _highlightedParagraph.value = index
+            delay(PARAGRAPH_HIGHLIGHT_MS)
+            _highlightedParagraph.value = null
+        }
+    }
+
+    private fun clearParagraphHighlight() {
+        highlightJob?.cancel()
+        highlightJob = null
+        _highlightedParagraph.value = null
     }
 
     /**

@@ -221,6 +221,7 @@
     <string name="vocabulary_group_expand">展开</string>
     <string name="vocabulary_group_collapse">收起</string>
     <string name="delete_vocabulary">删除生词</string>
+    <string name="word_play_pronunciation">播放“%1$s”的发音</string>
     <string name="vocabulary_source_article">来自《%1$s》</string>
     <string name="vocabulary_open_article">查看原文</string>
     <string name="vocabulary_headword_note">→ %1$s</string>

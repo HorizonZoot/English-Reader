@@ -24,6 +24,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -51,13 +52,16 @@ class VocabularyScreenTest {
     private val detailsState = MutableStateFlow<Map<Long, VocabularyWordDetail>>(emptyMap())
     private val groupTypeState = MutableStateFlow<GroupType>(GroupType.ByTime)
     private val vocabularyState = MutableStateFlow<List<VocabularyEntity>>(emptyList())
-    private val openedArticles = mutableListOf<Long>()
+    private val loadingAudioWordIdState = MutableStateFlow<Long?>(null)
+    private val openedArticles = mutableListOf<Pair<Long, String>>()
 
     private val viewModel = mockk<VocabularyViewModel>(relaxed = true).also { model ->
         every { model.groups } returns groupsState
         every { model.details } returns detailsState
         every { model.groupType } returns groupTypeState
         every { model.vocabulary } returns vocabularyState
+        every { model.loadingAudioWordId } returns loadingAudioWordIdState
+        every { model.audioUnavailable } returns emptyFlow()
     }
 
     @Test
@@ -124,7 +128,18 @@ class VocabularyScreenTest {
         ).assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performClick()
 
-        composeRule.runOnIdle { assertEquals(listOf(42L), openedArticles) }
+        // 词一并带过去：阅读页要靠它滚动到并高亮该词所在的段落。
+        composeRule.runOnIdle { assertEquals(listOf(42L to "noticing"), openedArticles) }
+    }
+
+    @Test
+    fun tappingWord_playsItsPronunciation() {
+        val word = word(1L, "noticing")
+        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
+
+        composeRule.onNodeWithText("noticing").performClick()
+
+        verify(exactly = 1) { viewModel.playWordAudio(word) }
     }
 
     @Test
@@ -208,7 +223,7 @@ class VocabularyScreenTest {
         composeRule.setContent {
             Box(modifier = Modifier.width(360.dp).fillMaxHeight()) {
                 VocabularyScreen(
-                    onOpenArticle = { openedArticles += it },
+                    onOpenArticle = { articleId, word -> openedArticles += articleId to word },
                     viewModel = viewModel
                 )
             }

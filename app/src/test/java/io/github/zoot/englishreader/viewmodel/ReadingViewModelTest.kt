@@ -35,6 +35,7 @@ import io.github.zoot.englishreader.model.ReadingAnchor
 import io.github.zoot.englishreader.model.ReadingEntry
 import io.github.zoot.englishreader.model.ReadingPosition
 import io.github.zoot.englishreader.model.ReadingPositionTarget
+import io.github.zoot.englishreader.model.ReadingTextKind
 import io.github.zoot.englishreader.model.SelectedSentence
 import io.github.zoot.englishreader.model.TtsReadingSettings
 import io.github.zoot.englishreader.util.AudioPlayer
@@ -1961,5 +1962,82 @@ class ReadingViewModelTest {
             viewModel.selectSentence(105, 0, SentenceRange(0, "Body text.", 0, 10))
             assertEquals(105L, viewModel.selectedSentence.value?.articleId)
         }
+    }
+
+    // ---- 生词本「查看原文」：跳到该词所在段落并点亮 ----
+
+    @Test
+    fun openReadingSession_withWord_scrollsToAndHighlightsItsParagraph() = runTest {
+        val fixture = ReadingViewModelFixture()
+        coEvery { fixture.articleRepository.getArticleById(7L) } returns ArticleEntity(
+            id = 7L,
+            title = "The Art of Noticing",
+            content = "Opening line.\n\nA second paragraph.\n\nSmall details reward noticing."
+        )
+        val viewModel = fixture.create(SavedStateHandle(mapOf("word" to "noticing")))
+
+        viewModel.openReadingSession(7L)
+
+        val anchor = requireNotNull(viewModel.pendingPositionTarget.value).position.anchor
+        assertEquals("noticing 在第三段", 2, anchor.paragraphIndex)
+        assertEquals(ReadingTextKind.ORIGINAL, anchor.textKind)
+        assertEquals(
+            "Start of the match within the paragraph",
+            "Small details reward noticing.".indexOf("noticing"),
+            anchor.characterOffset
+        )
+        assertEquals(2, viewModel.highlightedParagraph.value)
+    }
+
+    @Test
+    fun openReadingSession_wordAppearsInMultipleParagraphs_usesTheFirst() = runTest {
+        val fixture = ReadingViewModelFixture()
+        coEvery { fixture.articleRepository.getArticleById(7L) } returns ArticleEntity(
+            id = 7L,
+            title = "Repeat",
+            content = "noticing here.\n\nAnd noticing again."
+        )
+        val viewModel = fixture.create(SavedStateHandle(mapOf("word" to "noticing")))
+
+        viewModel.openReadingSession(7L)
+
+        assertEquals(0, viewModel.pendingPositionTarget.value?.position?.anchor?.paragraphIndex)
+    }
+
+    @Test
+    fun openReadingSession_wordNotFound_keepsSavedPositionAndHighlightsNothing() = runTest {
+        val fixture = ReadingViewModelFixture()
+        val saved = ReadingPosition(
+            articleId = 7L,
+            anchor = ReadingAnchor(paragraphIndex = 1, characterOffset = 4)
+        )
+        coEvery { fixture.articleRepository.getArticleById(7L) } returns ArticleEntity(
+            id = 7L,
+            title = "Unrelated",
+            content = "First paragraph.\n\nSecond paragraph."
+        )
+        coEvery { fixture.articleRepository.getReadingPosition(7L) } returns saved
+        val viewModel = fixture.create(SavedStateHandle(mapOf("word" to "absent")))
+
+        viewModel.openReadingSession(7L)
+
+        // 词找不到不该让跳转失败，退回正常的阅读位置恢复，且什么都不点亮。
+        assertEquals(saved, viewModel.pendingPositionTarget.value?.position)
+        assertNull(viewModel.highlightedParagraph.value)
+    }
+
+    @Test
+    fun openReadingSession_withoutWord_highlightsNothing() = runTest {
+        val fixture = ReadingViewModelFixture()
+        coEvery { fixture.articleRepository.getArticleById(7L) } returns ArticleEntity(
+            id = 7L,
+            title = "Plain",
+            content = "First paragraph.\n\nSecond paragraph."
+        )
+        val viewModel = fixture.create()
+
+        viewModel.openReadingSession(7L)
+
+        assertNull(viewModel.highlightedParagraph.value)
     }
 }

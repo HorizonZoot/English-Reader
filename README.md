@@ -168,3 +168,12 @@ Release 构建启用 R8/ProGuard；修改 release 依赖、混淆规则或加密
 应用不附带任何 API Key。在「设置 → AI 配置」中新建 Profile，选择服务商模板或填写任意 OpenAI 兼容端点，填入自己的 Key 并做一次连接测试即可。Key 只存在设备的加密存储中。
 
 ---
+
+## 许可
+
+[MIT License](LICENSE)。可自由使用、修改、分发，包括商业用途，只需保留版权声明。
+
+### 第三方资源
+
+- **离线词典**（`app/src/main/assets/dict_base.tsv`）的词条由 [ECDICT](https://github.com/skywind3000/ECDICT) 提取整理。
+- **测试用 EPUB 固件**（`app/src/testDebug/resources/readium/public/`）取自 Project Gutenberg 公版书。每本书的作品信息、下载地址与 SHA-256 校验值见同目录的 `SOURCE.md`。这些文件仅供离线兼容性测试使用，不随发布产物分发。

@@ -170,10 +170,6 @@ EnglishReader/
 .\gradlew.bat :app:connectedDebugAndroidTest   # 需要真机或模拟器
 ```
 
-当前基线：**JVM 962 个测试全部通过**，`lintDebug` 0 error。仪器测试共 105 个，**本地只做过编译，未在设备上执行**。
-
-Release 构建启用 R8/ProGuard；修改 release 依赖、混淆规则或加密存储相关代码后，`assembleDebug` 成功**不足以**作为验证，需要跑 `assembleRelease`。
-
 ### 配置 AI（可选）
 
 应用不附带任何 API Key。在「设置 → AI 配置」中新建 Profile，选择服务商模板或填写任意 OpenAI 兼容端点，填入自己的 Key 并做一次连接测试即可。Key 只存在设备的加密存储中。

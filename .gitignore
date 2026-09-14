@@ -1,0 +1,95 @@
+# Gradle
+.gradle/
+.gradle-cli/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio
+.idea/
+*.iml
+.DS_Store
+local.properties
+
+# Built application files
+*.apk
+*.ap_
+*.aab
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Python bytecode from tools/
+__pycache__/
+*.py[cod]
+
+# Gradle files
+.gradle/
+build/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Log Files
+*.log
+
+# Android Studio Navigation editor temp files
+.navigation/
+
+# Android Studio captures folder
+captures/
+
+# IntelliJ
+*.iml
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/gradle.xml
+.idea/assetWizardSettings.xml
+.idea/dictionaries
+.idea/libraries
+.idea/caches
+
+# Keystore files
+*.jks
+*.keystore
+
+# External native build folder generated in Android Studio 2.2 and later
+.externalNativeBuild
+.cxx/
+
+# Version control
+.svn/
+
+# Misc
+*.swp
+*~
+.DS_Store
+
+# Claude Code 本地配置
+.claude/
+
+# OMC 运行时状态（计划/日志/会话缓存等操作产物，非源码）
+.omc/
+
+# ---------------------------------------------------------------------------
+# 本地开发工具与内部记录：不随公开仓库发布
+#
+# 这些内容在工作区里照常存在、照常使用，只是不再被 git 跟踪。选择排除而不是删除，
+# 是因为它们只对本地开发流程有意义（任务记录、agent 配置、进度表、会话日志），
+# 对读代码的人没有价值，发布出去只会淹没真正的项目资源。
+#
+# 路径用前导 / 锚定到仓库根：不锚定的 `docs/` 会连 `app/src/main/docs/` 一起忽略。
+# ---------------------------------------------------------------------------
+/.trellis/
+/.agents/
+/.codex/
+/.superpowers/
+/docs/
+/CLAUDE.md

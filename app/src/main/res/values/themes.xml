@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        应用窗口主题（亮色）。纯 Compose 应用，窗口主题主要负责 Compose 首帧绘制前的
+        窗口背景，避免冷启动白/黑屏突兀。深色变体见 values-night/themes.xml，由系统按
+        深浅色模式自动选择；应用内主题（含固定 Light/Dark 覆盖）由 EnglishReaderTheme 负责。
+        父主题用平台 Material NoActionBar（API 24 可用），不依赖 AppCompat/MaterialComponents。
+    -->
+    <style name="Theme.EnglishReader" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

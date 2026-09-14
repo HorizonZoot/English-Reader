@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        应用窗口主题（深色）。系统处于深色模式时自动生效，与 values/themes.xml 同名 style，
+        仅父主题与窗口背景不同，消除深色模式下冷启动的白屏闪烁。
+    -->
+    <style name="Theme.EnglishReader" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>

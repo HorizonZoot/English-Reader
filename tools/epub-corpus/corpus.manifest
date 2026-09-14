@@ -1,0 +1,54 @@
+# EPUB corpus manifest
+#
+# Every line: <local-name> <sha256> <bytes> <url>
+# Blank lines and lines starting with '#' are ignored.
+#
+# The files themselves are NOT committed -- ~40 MiB of binaries, and Project
+# Gutenberg regenerates its artifacts, so a committed copy would silently drift
+# from what the sources actually serve. The digest is the anchor: fetch_corpus.py
+# refuses any download whose SHA-256 does not match, so a regenerated upstream
+# artifact fails loudly instead of quietly changing ADR-013's numbers.
+#
+# Downloaded 2026-08-30. Three groups, chosen to separate "the packer's habits"
+# from "the ceiling is wrong":
+#   gutenberg-*   Project Gutenberg EPUB 2 (.epub.noimages)  -- coarse packing
+#   gutenberg3-*  Project Gutenberg EPUB 3 (.epub3.images)   -- same texts, EPUB 3 packer
+#   se-*          Standard Ebooks                            -- one chapter per file
+#
+# All titles are public domain in the United States. Gutenberg content carries the
+# Project Gutenberg License; Standard Ebooks releases to the public domain via CC0.
+# The corpus is used for measurement only -- no text is redistributed here, and no
+# fixture from it ships in the app.
+
+gutenberg-1342.epub 0b71e0cbe9818ed433226f56babc82231bf8f4ea532105c8430d2008a980e072 558373 https://www.gutenberg.org/ebooks/1342.epub.noimages
+gutenberg-2701.epub 4c4bd055e2d91a0a27a4220b5f1927e259595970ea5fae1346849ab16df3b271 727453 https://www.gutenberg.org/ebooks/2701.epub.noimages
+gutenberg-84.epub 2719565ac885c335df88f220b03a9c45b95dc4225193a8dc649f6493550c4332 356351 https://www.gutenberg.org/ebooks/84.epub.noimages
+gutenberg-1661.epub 4e380df6664160703b706b3b690f1a63b1242c2c5085c30ee79727f0177230b0 311604 https://www.gutenberg.org/ebooks/1661.epub.noimages
+gutenberg-11.epub 5c0706a6ad6ed931c1ad1892461490250ea8818a5429db708381d336a25815e9 136761 https://www.gutenberg.org/ebooks/11.epub.noimages
+gutenberg-345.epub 0926608cc4e5e0b65591474efc13b3871703fbf6959e73376c4e22776dcd1c57 433229 https://www.gutenberg.org/ebooks/345.epub.noimages
+gutenberg-98.epub 94e22b2d9db5a53b462e82957cad4b4680ce133b33ebe32bde70d7cb8c3b30e3 487514 https://www.gutenberg.org/ebooks/98.epub.noimages
+gutenberg-174.epub 4df2cfc0bfa11fa038c54453c8b31c6b7197e0449a8946c10451e3b795dc8533 460225 https://www.gutenberg.org/ebooks/174.epub.noimages
+gutenberg-1080.epub 5800b2f68ad0c141fbaf6eb062691e440ac3bc0be1abc67816a4f80961c20d45 107322 https://www.gutenberg.org/ebooks/1080.epub.noimages
+gutenberg-2542.epub 054bea4635fb2d07066ced1465d5d82d350536de8ef87e15f3fcfa45288a87c7 163911 https://www.gutenberg.org/ebooks/2542.epub.noimages
+gutenberg-1260.epub 57fcd3683aaf969a4fe4d6595a1b92604b278689524ee6cb3c52baa6f30922a1 607556 https://www.gutenberg.org/ebooks/1260.epub.noimages
+gutenberg-205.epub beb26f548b1fbda80a10efe4ea9a678dedff12f89fa564f55f91d87a1d0226bf 389400 https://www.gutenberg.org/ebooks/205.epub.noimages
+gutenberg-16328.epub 219941960ffd2dd25437635fb0855ac0a0c1e73d1ec67873cebcf4ef2ba86e5b 292045 https://www.gutenberg.org/ebooks/16328.epub.noimages
+gutenberg-4300.epub dde9cd9d7687ac8501338b00c59e8a41f0adb996dd6c8a930c06e6ccf3cabf05 764845 https://www.gutenberg.org/ebooks/4300.epub.noimages
+gutenberg-158.epub 458cf4072e7d868bcbdb3adbf606495585899c955bfea00a41eea11fe2b7ef42 475737 https://www.gutenberg.org/ebooks/158.epub.noimages
+gutenberg-120.epub 5aa314f20c4761994146accb1aa5a4ddc212352019a39639b9c45521ab9ab8e9 273936 https://www.gutenberg.org/ebooks/120.epub.noimages
+gutenberg-768.epub a5976ec27cb296b61ac58711e2b1ce97ccd29efec12ee3bd13393448399c1799 435016 https://www.gutenberg.org/ebooks/768.epub.noimages
+gutenberg-74.epub fe35a8197504c0331a5b0c3bb5098a9aa6f57491cb9ae208e21e5377784e44f5 288751 https://www.gutenberg.org/ebooks/74.epub.noimages
+gutenberg3-1342.epub 4c2dadd1a2135fdb9904eaffd8f5115c331569eda5df9fbd859729756bc7def9 24835567 https://www.gutenberg.org/ebooks/1342.epub3.images
+gutenberg3-2701.epub 2f39814cbc740d02e0a12aa82952e7ee489a831ff56a7cac77b28ce13f4e0ee1 812600 https://www.gutenberg.org/ebooks/2701.epub3.images
+gutenberg3-84.epub dd7ec02d2c8db4162bf587aa09a692ed5394ead3dfb12d8cc14b449d89795a6a 474401 https://www.gutenberg.org/ebooks/84.epub3.images
+gutenberg3-1661.epub e837276635b63b808453ed833f0e34a0ffca95bc67603f43eb8ae3302713dd9a 379445 https://www.gutenberg.org/ebooks/1661.epub3.images
+se-pride-and-prejudice.epub e9214abb5eafe0e567e92df604a9e549923fad8482867e275c2c93e42eb7f7e1 831960 https://standardebooks.org/ebooks/jane-austen/pride-and-prejudice/downloads/jane-austen_pride-and-prejudice.epub?source=download
+se-moby-dick.epub 5d9c3ddb9d4cda136605ebfd1415f22fa30fd312872346bd8dda6be4c4c47d82 1165523 https://standardebooks.org/ebooks/herman-melville/moby-dick/downloads/herman-melville_moby-dick.epub?source=download
+se-frankenstein.epub 52f92aa83c8430e9e0edb4409571331968be188ff00598e7884a3f41bede3299 685738 https://standardebooks.org/ebooks/mary-shelley/frankenstein/downloads/mary-shelley_frankenstein.epub?source=download
+se-the-adventures-of-sherlock-holmes.epub 644ab66744e64b03915d0d1ee6167c1de1b7a17f0544c81fc31ad4ad3585d59c 742083 https://standardebooks.org/ebooks/arthur-conan-doyle/the-adventures-of-sherlock-holmes/downloads/arthur-conan-doyle_the-adventures-of-sherlock-holmes.epub?source=download
+se-dracula.epub 568ee9d37b2cc12dfd5e24ebf7b16ae71a805e269af159dc836647751739340a 633860 https://standardebooks.org/ebooks/bram-stoker/dracula/downloads/bram-stoker_dracula.epub?source=download
+se-a-tale-of-two-cities.epub 7785cc95f413c73b50457a8bae690ea8c84219afe9384eb432ebe30c1704c799 815013 https://standardebooks.org/ebooks/charles-dickens/a-tale-of-two-cities/downloads/charles-dickens_a-tale-of-two-cities.epub?source=download
+se-the-picture-of-dorian-gray.epub 8613aa7fd5874c4b9fce62245220545711bff0cc128cc914648ff0e20241ec78 634177 https://standardebooks.org/ebooks/oscar-wilde/the-picture-of-dorian-gray/downloads/oscar-wilde_the-picture-of-dorian-gray.epub?source=download
+se-crime-and-punishment.epub 0b25f648cc4038050f179cbde8010c2c94912791310fac2ca4b57c83ebd00429 1217908 https://standardebooks.org/ebooks/fyodor-dostoevsky/crime-and-punishment/constance-garnett/downloads/fyodor-dostoevsky_crime-and-punishment_constance-garnett.epub?source=download
+se-war-and-peace.epub eca2cdd11d9880c799dd578ba2611d5c8364e5c06169ac588845cb93d3b41b36 2424900 https://standardebooks.org/ebooks/leo-tolstoy/war-and-peace/louise-maude_aylmer-maude/downloads/leo-tolstoy_war-and-peace_louise-maude_aylmer-maude.epub?source=download
+se-the-time-machine.epub 3931b56fecfb0b0d00737f5fabcd00a46a96c26a6b1c9b8a60751d154057d9a6 535571 https://standardebooks.org/ebooks/h-g-wells/the-time-machine/downloads/h-g-wells_the-time-machine.epub?source=download

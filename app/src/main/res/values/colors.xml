@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      自适应图标背景层。
+
+      取值来自图标源文件的背景采样：整圈边框 252..255，均值 #FDFDFE。前景层保留了源图
+      自带的同一背景色，两层之间因此没有接缝——换成纯 #FFFFFF 会露出一块略暗的方块。
+    -->
+    <color name="ic_launcher_background">#FDFDFE</color>
+</resources>

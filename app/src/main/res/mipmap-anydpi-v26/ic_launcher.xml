@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  API 26+ 自适应图标。API 24–25 会回退到 mipmap-*dpi/ic_launcher.png。
+
+  前景层里的主体已按 108dp 画布上的 66dp 安全区缩放（源图主体的外接圆是画布半径的
+  1.063 倍，直接整图使用会被圆形遮罩切掉四角）。缩放量见工具的 gen_icon 脚本注释。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

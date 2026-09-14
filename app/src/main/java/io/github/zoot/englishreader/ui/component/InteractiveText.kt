@@ -73,6 +73,14 @@ fun InteractiveText(
     onSentenceTargetLayoutChanged: ((InteractiveTextLongPressTarget) -> Unit)? = null,
     visibleViewport: ReadingTextViewport? = null,
     enabled: Boolean = true,
+    /**
+     * 整段高亮的强度（0 = 不高亮，1 = 与句子选中同强度）。
+     *
+     * 用强度而不是布尔：调用方要把它接到 `animateFloatAsState` 上做渐隐，否则
+     * 生词本跳过来点亮的那一段到期熄灭时是硬切。颜色仍由本组件内部决定，
+     * 调用方不需要知道高亮色是什么。
+     */
+    paragraphHighlight: Float = 0f,
     onTextLayout: (TextLayoutResult) -> Unit = {}
 ) {
     if (text.isEmpty()) {
@@ -99,6 +107,13 @@ fun InteractiveText(
     // 句子选中与单词选中共用同一高亮色。
     val highlightColor = LocalReaderHighlightColors.current.word
     val underlineColor = MaterialTheme.colorScheme.primary
+    // 整段高亮走同一套观感：贴字形的底纹 + 虚线框，和「选中」完全一致，
+    // 而不是给整段套一个色块——那看起来像卡片，不像选中。
+    val paragraphHighlightColor = if (paragraphHighlight > 0f) {
+        highlightColor.copy(alpha = highlightColor.alpha * paragraphHighlight)
+    } else {
+        Color.Transparent
+    }
 
     // 句子来源：调用方已在对齐阶段分好句时直接复用，避免同一段文本被分句两次
     // （对齐层算 sentenceOffset 一次 + 渲染层再一次）。
@@ -260,10 +275,14 @@ fun InteractiveText(
     // 配不同列表），只键 text 会用旧列表拼出与当前句子不一致的 annotatedText。
     val annotatedText = remember(
         text, sentences, highlightedSentenceIndex, selectedWord, selectedWordStartOffset,
-        selectedWordEndOffset, sentenceIndexOffset, highlightColor
+        selectedWordEndOffset, sentenceIndexOffset, highlightColor, paragraphHighlightColor
     ) {
         buildAnnotatedString {
             append(text)
+            // 整段先铺底纹，句子/单词的高亮随后覆盖在其上。
+            if (paragraphHighlightColor != Color.Transparent) {
+                addStyle(SpanStyle(background = paragraphHighlightColor), 0, text.length)
+            }
             sentences.forEach { sentence ->
                 if (sentence.index + sentenceIndexOffset == highlightedSentenceIndex) {
                     addStyle(SpanStyle(background = highlightColor), sentence.startOffset, sentence.endOffset)
@@ -309,6 +328,15 @@ fun InteractiveText(
             .readingTextViewport(visibleViewport)
             .drawWithContent {
                 drawContent()
+                // 整段的虚线框画在最底层：它标的是「这一段」，句子/单词的框叠在其上。
+                if (paragraphHighlightColor != Color.Transparent) {
+                    drawDashedTextRange(
+                        layout = textLayoutResult,
+                        startOffset = 0,
+                        endOffset = text.length,
+                        color = underlineColor.copy(alpha = paragraphHighlight)
+                    )
+                }
                 val selectedSentence = sentences.firstOrNull { sentence ->
                     sentence.index + sentenceIndexOffset == highlightedSentenceIndex
                 }

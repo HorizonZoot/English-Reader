@@ -1,7 +1,5 @@
 package io.github.zoot.englishreader.ui.component
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,7 +12,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,7 +28,6 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Dp
@@ -42,13 +38,9 @@ import io.github.zoot.englishreader.model.ReadingAnchor
 import io.github.zoot.englishreader.model.ReadingEntry
 import io.github.zoot.englishreader.model.ReadingPositionTarget
 import io.github.zoot.englishreader.model.ReadingTextKind
-import io.github.zoot.englishreader.ui.theme.LocalReaderHighlightColors
 import io.github.zoot.englishreader.util.ParagraphAligner
 import kotlinx.coroutines.flow.first
 import kotlin.math.roundToInt
-
-/** 跳转高亮的段落底色圆角。直角底色贴着正文太生硬，和阅读页其它圆角保持一致。 */
-private val ParagraphHighlightShape = RoundedCornerShape(10.dp)
 
 internal data class ReadingBlockKey(val paragraphIndex: Int, val kind: ReadingTextKind)
 
@@ -80,7 +72,6 @@ internal fun ScrollReadingContent(
     target: ReadingPositionTarget?,
     enabled: Boolean,
     bottomInset: Dp,
-    highlightedParagraphIndex: Int? = null,
     onRestored: (ReadingAnchor, ReadingPositionTarget?) -> Unit,
     onPositionChanged: (ReadingAnchor) -> Unit,
     onPositionSettled: (ReadingAnchor) -> Unit,
@@ -246,23 +237,7 @@ internal fun ScrollReadingContent(
             }
         }
         itemsIndexed(paragraphs, key = { index, _ -> index }) { index, _ ->
-            // 生词本跳过来的那一段临时上色。用句子/单词高亮同一个色值——在阅读页里
-            // 它统一表示「相关的正文」，另起一个颜色只会变成第二套语义。
-            // animateColorAsState 让高亮到期熄灭时是渐隐而不是硬切。
-            val highlightTint by animateColorAsState(
-                targetValue = if (index == highlightedParagraphIndex) {
-                    LocalReaderHighlightColors.current.word
-                } else {
-                    Color.Transparent
-                },
-                label = "paragraph-highlight"
-            )
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(highlightTint, ParagraphHighlightShape),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                 originalContent(index, enabled && restored)
                 blocks.firstOrNull { it.paragraphIndex == index && it.kind == ReadingTextKind.TRANSLATION }?.let { block ->
                     Spacer(Modifier.height(8.dp))

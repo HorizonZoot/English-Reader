@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.ui.screen
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
@@ -720,6 +721,13 @@ fun ReadingScreenContent(
                         val renderOriginal: @Composable (Int, ReadingTextViewport?, Boolean) -> Unit =
                             { paragraphIndex, visibleViewport, interactiveEnabled ->
                                 val paragraph = paragraphs[paragraphIndex]
+                                // 生词本跳过来的那一段临时点亮。强度交给 InteractiveText 内部
+                                // 与高亮色相乘，所以这里不需要知道高亮色是什么。
+                                // 用动画而非布尔：到期熄灭时是渐隐，硬切会像页面闪了一下。
+                                val paragraphHighlight by animateFloatAsState(
+                                    targetValue = if (paragraphIndex == highlightedParagraph) 1f else 0f,
+                                    label = "paragraph-highlight"
+                                )
                                 val ownsResultPopup = popupMode != SentencePopupMode.ACTIONS &&
                                     sentenceActionAnchor?.paragraphIndex == paragraphIndex
                                 if (readingMode == ReadingMode.SCROLL && readingLayoutReady && ownsResultPopup) {
@@ -796,6 +804,7 @@ fun ReadingScreenContent(
                                         selectedWordEndOffset = selectedWordAnchor?.endOffset,
                                         sentenceIndexOffset = paragraph.sentenceOffset,
                                         precomputedSentences = paragraph.sentences,
+                                        paragraphHighlight = paragraphHighlight,
                                         selectedSentenceTarget = sentenceActionAnchor
                                             ?.takeIf {
                                                 it.paragraphIndex == paragraphIndex && (visibleViewport == null ||
@@ -998,7 +1007,6 @@ fun ReadingScreenContent(
                                 target = restoreTarget,
                                 enabled = !isLoading && !showReadingSettings,
                                 bottomInset = with(density) { if (wordDetailsVisible) wordSheetObstructionHeightPx.toDp() else 0.dp },
-                                highlightedParagraphIndex = highlightedParagraph,
                                 onRestored = restorePosition,
                                 onPositionChanged = { readingAnchor = it },
                                 onPositionSettled = savePosition,

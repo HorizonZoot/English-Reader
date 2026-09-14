@@ -141,6 +141,8 @@ EnglishReader/
 ├── gradle/libs.versions.toml                   # 版本目录
 ├── tools/epub-corpus/                          # EPUB 语料调查工具
 ├── AGENTS.md                                   # 工程规范与项目不变量
+├── LICENSE                                     # MIT
+├── THIRD-PARTY-NOTICES.md                      # 第三方资源的许可原文与版权声明
 └── settings.gradle.kts
 ```
 
@@ -175,5 +177,7 @@ Release 构建启用 R8/ProGuard；修改 release 依赖、混淆规则或加密
 
 ### 第三方资源
 
-- **离线词典**（`app/src/main/assets/dict_base.tsv`）的词条由 [ECDICT](https://github.com/skywind3000/ECDICT) 提取整理。
+- **离线词典**（`app/src/main/assets/dict_base.tsv`）的词条由 [ECDICT](https://github.com/skywind3000/ECDICT) 提取整理，该项目同样采用 MIT 许可。
 - **测试用 EPUB 固件**（`app/src/testDebug/resources/readium/public/`）取自 Project Gutenberg 公版书。每本书的作品信息、下载地址与 SHA-256 校验值见同目录的 `SOURCE.md`。这些文件仅供离线兼容性测试使用，不随发布产物分发。
+
+上述资源各自的许可原文与版权声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。

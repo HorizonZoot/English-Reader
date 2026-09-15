@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -79,6 +80,28 @@ class InteractiveTextParagraphHighlightAndroidTest {
     private fun sampleY(rect: Rect, off: PixelMap, on: PixelMap) =
         rect.midY().coerceIn(0, minOf(off.height, on.height) - 1)
 
+    /** 第一行底纹矩形。 */
+    private fun firstRect(layout: TextLayoutResult) =
+        textRangeBackgroundRects(layout, 0, paragraph.length).first()
+
+    /**
+     * 关掉底纹截图 → 翻到满强度再截图，返回两次结果与首行矩形。
+     *
+     * 两条像素断言共用这段 arrange，但保持各自独立：分开失败时能直接看出是
+     * 「根本没涂」还是「涂出了界」，合并成一条会丢掉这个区分。
+     */
+    private fun captureBeforeAndAfterEnablingHighlight(): Triple<PixelMap, PixelMap, Rect> {
+        val highlight = mutableFloatStateOf(0f)
+        render(highlight)
+        val layout = node().textLayoutResult()
+        val off = pixels()
+
+        composeRule.runOnIdle { highlight.floatValue = 1f }
+        composeRule.waitForIdle()
+
+        return Triple(off, pixels(), firstRect(layout))
+    }
+
     @Test
     fun paragraphBackground_coversEveryWrappedLine() {
         render(mutableFloatStateOf(1f))
@@ -101,16 +124,7 @@ class InteractiveTextParagraphHighlightAndroidTest {
 
     @Test
     fun paragraphBackground_isActuallyPaintedInsideTheTextBounds() {
-        val highlight = mutableFloatStateOf(0f)
-        render(highlight)
-        val layout = node().textLayoutResult()
-        val off = pixels()
-
-        composeRule.runOnIdle { highlight.floatValue = 1f }
-        composeRule.waitForIdle()
-        val on = pixels()
-
-        val rect = textRangeBackgroundRects(layout, 0, paragraph.length).first()
+        val (off, on, rect) = captureBeforeAndAfterEnablingHighlight()
         val y = sampleY(rect, off, on)
         val xs = (rect.left.toInt() + 2 until rect.right.toInt() - 2)
             .filter { it in 0 until minOf(off.width, on.width) }
@@ -121,18 +135,9 @@ class InteractiveTextParagraphHighlightAndroidTest {
 
     @Test
     fun paragraphBackground_stopsAtTheLastGlyphOfTheLine() {
-        val highlight = mutableFloatStateOf(0f)
-        render(highlight)
-        val layout = node().textLayoutResult()
-        val off = pixels()
-
-        composeRule.runOnIdle { highlight.floatValue = 1f }
-        composeRule.waitForIdle()
-        val on = pixels()
-
         // 底纹是贴字形的：矩形右缘之外（同一行）不该被涂色，
         // 否则行尾会拖出一条到容器右边缘的色块。
-        val rect = textRangeBackgroundRects(layout, 0, paragraph.length).first()
+        val (off, on, rect) = captureBeforeAndAfterEnablingHighlight()
         val y = sampleY(rect, off, on)
         val rightOfText = (rect.right.toInt() + 2 until minOf(off.width, on.width)).take(32)
 
@@ -147,7 +152,7 @@ class InteractiveTextParagraphHighlightAndroidTest {
         val on = pixels()
 
         // 底纹若盖在字上，矩形内就只剩一种颜色。字形墨色 + 底纹至少是两种。
-        val rect = textRangeBackgroundRects(layout, 0, paragraph.length).first()
+        val rect = firstRect(layout)
         val y = rect.midY().coerceIn(0, on.height - 1)
         val xs = (rect.left.toInt() until rect.right.toInt()).filter { it in 0 until on.width }
         val distinctColors = xs.map { x -> on[x, y] }.toSet()

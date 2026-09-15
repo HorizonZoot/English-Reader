@@ -23,8 +23,9 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -75,14 +76,24 @@ class VocabularyViewModelTest {
     private fun offlineEntry(word: String, phonetic: String?, chinese: String) =
         OfflineLookupResult(DictionaryEntry(word = word, phonetic = phonetic, chinese = chinese, english = null))
 
-    private fun setupWith(rows: List<VocabularyWithSource>) {
+    /**
+     * 上游生词流。
+     *
+     * 用例只改它的值，不重建 mock 与 ViewModel：`stateIn` 在构造时就订阅了这个流实例，
+     * 构造后再改 mock 的返回值是无效的（指向的是另一个 flow 对象）。这也让本文件与
+     * ArticleListViewModelTest 的「@Before 建一次，用例只改上游」约定一致。
+     */
+    private val rowsFlow = MutableStateFlow<List<VocabularyWithSource>>(emptyList())
+
+    @Before
+    fun setup() {
         vocabularyRepository = mockk(relaxed = true)
         dictionaryRepository = mockk(relaxed = true)
         audioPlayer = mockk(relaxed = true)
         networkChecker = mockk(relaxed = true)
         ttsPlayer = mockk(relaxed = true)
         pronunciationAudioCache = mockk(relaxed = true)
-        every { vocabularyRepository.getAllVocabularyWithSource() } returns flowOf(rows)
+        every { vocabularyRepository.getAllVocabularyWithSource() } returns rowsFlow
         every { networkChecker.isOnline() } returns true
         viewModel = VocabularyViewModel(
             vocabularyRepository = vocabularyRepository,
@@ -94,14 +105,14 @@ class VocabularyViewModelTest {
         )
     }
 
-    /** 只关心分组时用这个重载：来源标题一并置空。 */
-    private fun setupWithWords(words: List<VocabularyEntity>) {
-        setupWith(words.map { VocabularyWithSource(it, articleTitle = null) })
+    /** 设置上游生词（含来源标题）。 */
+    private fun withRows(rows: List<VocabularyWithSource>) {
+        rowsFlow.value = rows
     }
 
-    @Before
-    fun setup() {
-        setupWith(emptyList<VocabularyWithSource>())
+    /** 只关心分组时用这个：来源标题一并置空。 */
+    private fun withWords(words: List<VocabularyEntity>) {
+        withRows(words.map { VocabularyWithSource(it, articleTitle = null) })
     }
 
     @Test
@@ -111,7 +122,7 @@ class VocabularyViewModelTest {
 
     @Test
     fun switchToAlphabet_groupsWordsByFirstLetter() = runTest {
-        setupWithWords(
+        withWords(
             listOf(
                 vocab("apple", 1),
                 vocab("banana", 2),
@@ -256,6 +267,7 @@ class VocabularyViewModelTest {
         }
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test
     fun restoreVocabulary_alreadyExists_isNotReportedAsFailure() = runTest {
         // UNIQUE(word, articleId) 冲突不是失败：词确实在生词本里，那正是用户要的结果。
@@ -273,7 +285,7 @@ class VocabularyViewModelTest {
 
     @Test
     fun details_resolvesPhoneticGlossAndSourceTitle() = runTest {
-        setupWith(listOf(row("Apple", id = 1L, articleTitle = "The Future of AI")))
+        withRows(listOf(row("Apple", id = 1L, articleTitle = "The Future of AI")))
         // 生词存的是原文大小写，查词典必须走 lowercase。
         coEvery { dictionaryRepository.lookupOffline("apple") } returns
             offlineEntry("apple", "/ˈæpl/", "n. 苹果；苹果树")
@@ -289,7 +301,7 @@ class VocabularyViewModelTest {
 
     @Test
     fun details_inflectedForm_reportsHeadword() = runTest {
-        setupWith(listOf(row("lives", id = 7L)))
+        withRows(listOf(row("lives", id = 7L)))
         coEvery { dictionaryRepository.lookupOffline("lives") } returns
             OfflineLookupResult(
                 entry = DictionaryEntry("live", "/lɪv/", "vi. 活；居住", null),
@@ -304,7 +316,7 @@ class VocabularyViewModelTest {
 
     @Test
     fun details_wordMissingFromDictionary_hasNoGlossButKeepsSource() = runTest {
-        setupWith(listOf(row("Zyxwvu", id = 3L, articleTitle = "Obscure Words")))
+        withRows(listOf(row("Zyxwvu", id = 3L, articleTitle = "Obscure Words")))
         coEvery { dictionaryRepository.lookupOffline("zyxwvu") } returns null
 
         val detail = awaitDetails().getValue(3L)

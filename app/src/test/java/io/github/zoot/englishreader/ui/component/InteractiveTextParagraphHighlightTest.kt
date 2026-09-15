@@ -111,11 +111,17 @@ class InteractiveTextParagraphHighlightTest {
     }
 
     @Test
-    fun textRangeBackgroundRects_coverEveryLineWithItsFullHeight() {
+    fun textRangeBackgroundRects_spanEachLaidOutLineWithItsFullHeight() {
+        // 本层能观察到的行数受限于桩字形：这个 fixture 在 Robolectric 下报
+        // `lineCount == 1`，所以「多行各自成一个矩形」在这里只被验到 1 行，
+        // **真实多行**由 InteractiveTextParagraphHighlightAndroidTest 的
+        // paragraphBackground_coversEveryWrappedLine 断言。
+        //
+        // 这条在 JVM 侧仍然有效的是：矩形数 == 行数、矩形贴合行高、宽度为正。
         val layout = layout()
         val rects = textRangeBackgroundRects(layout, 0, text.length)
 
-        // 空列表就是「高亮根本画不出来」。多行覆盖由 androidTest 验证（见类注释）。
+        // 空列表就是「高亮根本画不出来」。
         assertEquals(layout.lineCount, rects.size)
         rects.forEachIndexed { line, rect ->
             assertEquals(

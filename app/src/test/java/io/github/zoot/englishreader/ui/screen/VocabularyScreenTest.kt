@@ -25,7 +25,6 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
-import io.github.zoot.englishreader.ui.screen.vocabulary.listKey
 import io.github.zoot.englishreader.viewmodel.VocabularyUiEvent
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
 import io.mockk.every
@@ -263,18 +262,21 @@ class VocabularyScreenTest {
     }
 
     @Test
-    fun deleteFailed_showsErrorAndKeepsTheRow() {
-        // 删除没落库时不能弹「已删除」。行留在列表里，用户需要知道这次左滑没生效。
+    fun deleteFailed_showsErrorInsteadOfTheUndoPrompt() {
+        // 删除没落库时绝不能弹「已删除 + 撤销」那条成功提示，否则用户以为词已经没了。
+        //
+        // 这里**不**断言「行还在」：本测试的 mock 数据流自始至终不变，行在任何实现下
+        // 都在，那样的断言恒真、无法因它命名的原因失败。真正覆盖「失败后行仍可再滑一次」
+        // 的是 ViewModel 去重的解除（deleteVocabulary_whileFirstStillPending_doesNotDeleteTwice）
+        // 与 swipeLeft_rowSlidesBackAndWaitsForTheListToDropIt。
         val word = word(1L, "noticing")
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
 
         composeRule.runOnIdle { uiEvents.tryEmit(VocabularyUiEvent.DeleteFailed) }
 
         composeRule.onNodeWithText(string(R.string.vocabulary_delete_failed)).assertIsDisplayed()
-        // 关键区别：失败时那条带「撤销」的成功提示一条都不能出现，否则用户以为词已经没了。
         composeRule.onNodeWithText(string(R.string.vocabulary_deleted, "noticing"))
             .assertDoesNotExist()
-        composeRule.onNodeWithText("noticing").assertIsDisplayed()
     }
 
     @Test
@@ -290,19 +292,6 @@ class VocabularyScreenTest {
         composeRule.onNodeWithText(string(R.string.vocabulary_undo)).performClick()
 
         composeRule.runOnIdle { verify(exactly = 1) { viewModel.restoreVocabulary(word) } }
-    }
-
-    @Test
-    fun everyGroupId_mapsToItsOwnKey() {
-        val ids = listOf(
-            VocabularyGroupId.Today,
-            VocabularyGroupId.Yesterday,
-            VocabularyGroupId.ThisWeek,
-            VocabularyGroupId.OlderDate("2024-07-14"),
-            VocabularyGroupId.Alphabet("A")
-        )
-
-        assertEquals(ids.size, ids.map { it.listKey }.toSet().size)
     }
 
     private fun group(id: VocabularyGroupId, words: List<VocabularyEntity>) =

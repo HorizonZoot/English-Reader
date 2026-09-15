@@ -40,6 +40,9 @@ MAX_PARAGRAPH_CHARS = 8_000
 MAX_IMPORT_PARAGRAPHS = 1_200
 MAX_BOOK_CHAPTERS = 500
 
+# Parts are rejoined with a blank line, so each seam after the first costs 2 chars.
+PARAGRAPH_JOIN_CHARS = 2
+
 CANDIDATE_CEILINGS = (40_000, 50_000, 60_000, 80_000, 100_000, 200_000)
 
 BLOCK_TAGS = r"p|div|h[1-6]|li|blockquote|section|article|tr|dd|dt|pre|figcaption"
@@ -68,6 +71,10 @@ class BookMeasurement:
     chapters: list[int] = field(default_factory=list)
     paragraphs_per_chapter: list[int] = field(default_factory=list)
     paragraph_lengths: list[int] = field(default_factory=list)
+    # Paragraph lengths grouped by chapter. The flat lists above cannot answer
+    # "what would this chapter become if it were split", because packing is
+    # per-chapter and needs that chapter's own paragraph shape.
+    chapter_paragraphs: list[list[int]] = field(default_factory=list)
     error: str = ""
 
     @property
@@ -93,6 +100,71 @@ class BookMeasurement:
         if self.max_paragraph > MAX_PARAGRAPH_CHARS:
             return "ParagraphTooLong"
         return "PASS"
+
+    # ---- post-split projection (see project_split) ----
+
+    @property
+    def split_chapter_count(self) -> int:
+        return sum(len(parts) for parts in self.projected_parts)
+
+    @property
+    def projected_parts(self) -> list[list[int]]:
+        """Per source chapter, the part sizes it would be split into."""
+        return [pack_paragraphs(paragraphs) for paragraphs in self.chapter_paragraphs]
+
+    def split_verdict(self) -> str:
+        """Verdict after splitting. Only ceilings splitting cannot reach may reject."""
+        if self.split_chapter_count > MAX_BOOK_CHAPTERS:
+            return "BookTooManyChapters"
+        # A single sentence longer than the paragraph ceiling is the one residual
+        # ParagraphTooLong; this script has no sentence boundaries, so it cannot
+        # see that case. See the caveat in subdivide_paragraph's docstring.
+        for parts in self.projected_parts:
+            if any(part > MAX_CHAPTER_CHARS for part in parts):
+                return "ChapterTooLong"
+        return "PASS"
+
+
+def subdivide_paragraph(length: int) -> list[int]:
+    """Model paragraph-level (sentence-boundary) splitting for one paragraph.
+
+    IDEALIZED, and in one direction: real sentence boundaries do not divide a
+    paragraph evenly, so a real split yields parts of uneven size and never fewer
+    pieces than this. Part counts here are therefore a LOWER bound, which makes the
+    projected chapter count a lower bound too -- the direction that matters, because
+    the question this feeds is "does splitting cross MAX_BOOK_CHAPTERS".
+    """
+    if length <= MAX_PARAGRAPH_CHARS:
+        return [length]
+    pieces = -(-length // MAX_PARAGRAPH_CHARS)  # ceil
+    base, extra = divmod(length, pieces)
+    return [base + (1 if i < extra else 0) for i in range(pieces)]
+
+
+def pack_paragraphs(paragraph_lengths: list[int]) -> list[int]:
+    """Greedily pack whole paragraphs into parts of at most MAX_CHAPTER_CHARS.
+
+    Mirrors the production splitter: paragraphs are subdivided first (inner-first),
+    then packed without reordering, joined by a blank line. The two separator chars
+    are counted because the production code joins with "\\n\\n" and the result is
+    what gets measured against the ceiling.
+    """
+    units: list[int] = []
+    for length in paragraph_lengths:
+        units.extend(subdivide_paragraph(length))
+
+    parts: list[int] = []
+    current = 0
+    for unit in units:
+        addition = unit if current == 0 else unit + PARAGRAPH_JOIN_CHARS
+        if current and current + addition > MAX_CHAPTER_CHARS:
+            parts.append(current)
+            current = unit
+        else:
+            current += addition
+    if current:
+        parts.append(current)
+    return parts
 
 
 def split_paragraphs(markup: str) -> list[str]:
@@ -185,7 +257,9 @@ def measure_book(path: Path) -> BookMeasurement:
                     continue
                 result.chapters.append(chars)
                 result.paragraphs_per_chapter.append(len(paragraphs))
-                result.paragraph_lengths.extend(len(p) for p in paragraphs)
+                lengths = [len(p) for p in paragraphs]
+                result.paragraph_lengths.extend(lengths)
+                result.chapter_paragraphs.append(lengths)
 
             if not result.chapters:
                 result.error = "no readable chapters"
@@ -353,6 +427,57 @@ def main() -> int:
         print(f"\n--- verdict at current budgets (n={len(measured)}) ---")
         for name, count in sorted(verdicts.items(), key=lambda kv: -kv[1]):
             print(f"  {name:<22} {count:>3}  ({count / len(measured):5.0%})")
+
+        print(
+            f"\n--- projected after splitting at {MAX_CHAPTER_CHARS:,}"
+            f" (ceiling unchanged) ---"
+        )
+        print(
+            f"  {'book':<40} {'chaps':>6} {'->':>4} {'split':>6} "
+            f"{'growth':>7}  verdict"
+        )
+        for m in sorted(measured, key=lambda x: -x.split_chapter_count):
+            before = len(m.chapters)
+            after = m.split_chapter_count
+            print(
+                f"  {m.book:<40} {before:>6} {'->':>4} {after:>6} "
+                f"{after - before:>+7}  {m.split_verdict()}"
+            )
+
+        split_verdicts: dict[str, int] = {}
+        for m in measured:
+            v = m.split_verdict()
+            split_verdicts[v] = split_verdicts.get(v, 0) + 1
+        split_pass = split_verdicts.get("PASS", 0)
+        today_pass = verdicts.get("PASS", 0)
+        print(
+            f"\n  importable: {today_pass} of {len(measured)} today"
+            f"  ->  {split_pass} of {len(measured)} after splitting"
+            f"  ({split_pass / len(measured):.0%})"
+        )
+        for name, count in sorted(split_verdicts.items(), key=lambda kv: -kv[1]):
+            if name != "PASS":
+                print(f"  still rejected: {name:<22} {count:>3}")
+
+        worst = max(measured, key=lambda m: m.split_chapter_count)
+        print(
+            f"\n  MAX_BOOK_CHAPTERS = {MAX_BOOK_CHAPTERS}; "
+            f"largest projected book is {worst.book} at {worst.split_chapter_count} "
+            f"(was {len(worst.chapters)})"
+        )
+        crossing = [m for m in measured if m.split_chapter_count > MAX_BOOK_CHAPTERS]
+        if crossing:
+            print(
+                "  ⚠ splitting pushes these past the ceiling — de-aliasing "
+                "MAX_BOOK_CHAPTERS from MAX_SPINE_ITEMS is a prerequisite:"
+            )
+            for m in crossing:
+                print(f"      {m.book}: {m.split_chapter_count}")
+        else:
+            print(
+                "  no book crosses it. Part counts here are a LOWER bound "
+                "(see subdivide_paragraph), so treat a near miss as a miss."
+            )
 
     if args.csv:
         with Path(args.csv).open("w", newline="", encoding="utf-8") as handle:

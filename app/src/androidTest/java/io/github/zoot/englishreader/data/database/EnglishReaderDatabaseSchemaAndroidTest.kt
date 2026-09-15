@@ -34,8 +34,9 @@ class EnglishReaderDatabaseSchemaAndroidTest {
 
         // 版本号在这里硬编码是**故意的**：它让任何 schema 变更都必须显式改这一行，
         // 从而迫使改动者回答「迁移写了吗、导出的 schema 更新了吗、迁移测试加了吗」。
-        // v5 增加字符位置表，由 MIGRATION_4_5 和对应 MigrationTestHelper 用例覆盖。
-        assertEquals(5, sqlite.version)
+        // v6 增加可恢复全文翻译的三张表，由 MIGRATION_5_6、导出的 6.json 与
+        // EnglishReaderDatabaseMigrationAndroidTest 的两条 5→6 用例覆盖。
+        assertEquals(6, sqlite.version)
 
         val columns = sqlite.query("PRAGMA table_info(explanation_cache)").use { cursor ->
             val nameColumn = cursor.getColumnIndexOrThrow("name")

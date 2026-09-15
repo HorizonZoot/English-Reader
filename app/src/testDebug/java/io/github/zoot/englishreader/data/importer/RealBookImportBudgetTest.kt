@@ -23,8 +23,13 @@ import org.robolectric.annotation.Config
  * `EpubBookParserTest` 反过来——预算都验了，但全部用合成 fixture，章节大小是我们自己造的。
  * 于是「真实出版物能否通过生产预算」这个问题在两边都没被回答过。
  *
- * 本类回答它，结论是**两本都导不进来**。这不是本类要修的缺陷，而是要钉住的既有边界：
- * 见 `.trellis/spec/project/decisions.md` 的 ADR-013 与 [realBooks_areRejectedByChapterBudget]。
+ * 本类回答它。**结论已经变了**：两本书原先都被章节闸门拒绝，现在都能导入——`EpubBookParser`
+ * 把超限章节按段落边界切成多个 article，而不是拒掉整本书。见
+ * `.trellis/spec/project/decisions.md` 的 ADR-013 与 [realBooks_importByChapterSplitting]。
+ *
+ * 上一版这里写的是「两本都导不进来」，并明确记着「一旦引入 spine 内二次切分，本用例会红，
+ * 届时必须改成成功路径并记录新的基准」。切分已经落地，所以本类照那句话改成了成功路径：
+ * 断言的仍是同一批真实字节，只是判据从「被哪道闸门拒」换成「切出来的产物是否处处合法」。
  *
  * 放在 `src/testDebug` 而不是 `src/test`：fixture 在 `src/testDebug/resources`，只在 debug
  * 变体的单测 classpath 上。放到 `src/test` 会让 `testReleaseUnitTest` 找不到资源。
@@ -40,29 +45,29 @@ class RealBookImportBudgetTest {
     private val parser by lazy { EpubBookParser(context) }
 
     /**
-     * 仓库里两本真实公版书**都被 [ImportBudget.MAX_CHAPTER_CHARS] 拒绝**。
+     * 仓库里两本真实公版书**都能导入**，靠的是章节切分而不是抬高上限。
      *
-     * 原因不是书太长，而是**打包粒度**：一个章节 = 一个 linear spine item，而 Gutenberg 把
-     * 整本小说塞进极少数 XHTML 文件。实测单资源正文字符数：
+     * 它们原先都被 [ImportBudget.MAX_CHAPTER_CHARS] 拒绝，原因不是书太长，而是**打包粒度**：
+     * 一个章节 = 一个 linear spine item，而 Gutenberg 把整本小说塞进极少数 XHTML 文件。
+     * 实测单资源正文字符数：
      *
      * ```text
      * 1342  (傲慢与偏见, EPUB2)  15 个资源，最大 63,612；15 个里 12 个越过 40,000
      * 78457 (EPUB3)              3 个正文资源：206,782 / 153,528 / 18,144
      * ```
      *
-     * 也就是说本功能当前只能导入 spine 切分足够细的 EPUB，而这两本 —— 也是本仓库唯一的两本
-     * 真书 —— 都不是。
+     * 现在这些资源各自被按段落边界切成多个 article，每个都在上限之内。
      *
-     * **这条断言是边界记录，不是庆祝失败。** 它的价值在于：
-     * - 证伪了一个在文档里流传的推论。Phase 0 记录「实测某公版长篇 74 万字符」被当成
-     *   「长书链路已验证」，但 spike 不跑预算，那 74 万字符从未通过生产导入。
-     * - 一旦提高单章上限、或引入 spine 内二次切分，本用例会红。届时必须改成成功路径并记录
-     *   新的基准，而不是让「真书能不能导入」这件事静默改变。
-     * - 用户可见行为是 `ContentTooLong`，提示「某章太长」。真实原因是「这本书的章节文件太大」，
-     *   与用户能做的事（换一本）之间存在落差 —— 这是产品侧待决的问题，不在本类范围。
+     * **判据是「产物处处合法」，不是「没抛异常」。** 后者太弱：一个把正文丢掉大半的实现同样
+     * 不抛异常。所以这里逐章断言长度、非空、序号密集，并且断言资源确实被切开了
+     * （`chapters.size` 必须大于 spine 资源数）——否则本用例在「切分根本没生效、
+     * 而是上限被人偷偷抬高」的情况下会照样绿。
+     *
+     * [ImportBudget.MAX_CHAPTER_CHARS] 仍钉在 40,000：切分的全部意义就是不动这个上限，
+     * 所以它被显式断言。它一旦变了，本类记录的实测数字与 ADR-013 的结论都要重新评估。
      */
     @Test
-    fun realBooks_areRejectedByChapterBudget() = runTest {
+    fun realBooks_importByChapterSplitting() = runTest {
         // 数字来自 `tools/epub-corpus/measure_corpus.py`（提交在库的那个分段器），
         // 不是最初那次 PowerShell 一次性测量 —— 两者相差约 0.3%，而 ADR-013 让读者用
         // measure_corpus.py 复现，所以这里必须与它一致，否则「可复现」是假的。
@@ -71,56 +76,109 @@ class RealBookImportBudgetTest {
             "/readium/public/gutenberg-78457-epub3.epub" to 206_782
         )
 
+        // 切分的前提是上限没动。先断言它，否则「导入成功」可能是有人抬高上限的副作用，
+        // 而那需要 ADR-013 要求的真机渲染基线。
+        assertEquals(
+            "chapter splitting exists so this ceiling need not move; it did move",
+            40_000,
+            ImportBudget.MAX_CHAPTER_CHARS
+        )
+
         cases.forEach { (resourcePath, approxLargestResourceChars) ->
             val file = fixtureFile(resourcePath)
 
-            val error = runCatching { parser.parse(file) }.exceptionOrNull()
+            val book = parser.parse(file)
 
-            assertTrue("$resourcePath: expected ImportException but was $error", error is ImportException)
-            val failure = (error as ImportException).failure
-            assertTrue("$resourcePath: got $failure", failure is ImportFailure.ChapterTooLong)
-            failure as ImportFailure.ChapterTooLong
+            assertTrue("$resourcePath: no chapters", book.chapters.isNotEmpty())
             assertEquals(
-                "$resourcePath: must report the chapter budget, not the single-article one",
-                ImportBudget.MAX_CHAPTER_CHARS,
-                failure.limitChars
+                "$resourcePath: chapterIndex must be dense and ordered after splitting",
+                book.chapters.indices.toList(),
+                book.chapters.map { it.chapterIndex }
+            )
+            book.chapters.forEach { chapter ->
+                assertTrue(
+                    "$resourcePath: chapter ${chapter.chapterIndex} is ${chapter.content.length} " +
+                        "chars, above the ${ImportBudget.MAX_CHAPTER_CHARS} ceiling",
+                    chapter.content.length <= ImportBudget.MAX_CHAPTER_CHARS
+                )
+                assertTrue(
+                    "$resourcePath: chapter ${chapter.chapterIndex} is blank",
+                    chapter.content.isNotBlank()
+                )
+                assertTrue(
+                    "$resourcePath: chapter ${chapter.chapterIndex} has a blank title",
+                    chapter.title.isNotBlank()
+                )
+            }
+            // 这本书确实有资源越过上限，所以切分必须真的产出了比资源数更多的章节。
+            // 少了这条，一个「上限被抬到 20 万」的世界也能让上面全部通过。
+            assertTrue(
+                "$resourcePath: largest resource is ~$approxLargestResourceChars chars, so it must " +
+                    "have been split into several chapters; got ${book.chapters.size}",
+                book.chapters.size > 1
             )
             assertTrue(
-                "$resourcePath: failure must name the offending chapter",
-                failure.chapterTitle.isNotBlank()
-            )
-            assertTrue(
-                "$resourcePath: actualChars ${failure.actualChars} must exceed the chapter budget",
-                failure.actualChars > ImportBudget.MAX_CHAPTER_CHARS
-            )
-            // 上限提高到 approx 以上时本行会红——那正是需要重新评估的时刻。
-            assertTrue(
-                "$resourcePath: chapter budget ${ImportBudget.MAX_CHAPTER_CHARS} now exceeds the " +
-                    "largest measured resource ($approxLargestResourceChars); re-measure this book",
-                ImportBudget.MAX_CHAPTER_CHARS < approxLargestResourceChars
+                "$resourcePath: total content ${book.totalChars} looks too small; splitting must " +
+                    "preserve the text, not drop it",
+                book.totalChars >= approxLargestResourceChars
             )
         }
     }
 
     /**
-     * 拒绝发生在**逐章**校验处，不是先把整本读进内存再判。
+     * 切分在**单个资源内**发生，不跨资源拼接。
      *
-     * 判据是失败时报出的 `actualChars` 等于某一个资源的正文长度，而不是全书总量：
-     * 78457 全书约 38 万字符，若实现是「先拼全书再判」，这里会看到 38 万而不是单资源的
-     * 20.7 万。这条性质保护的是内存 —— 一本超限的书不应该在拒绝之前先被完整装进 heap。
+     * 本用例此前钉的是另一条性质：拒绝时 `ChapterTooLong.actualChars` 等于某一个资源的长度
+     * 而非全书总量，据此证明 parser 没有「先把整本拼进内存再判」。那条判据随切分一起失效了
+     * —— 这本书现在能导入，`ImportedBook` 本身就持有全部章节，无从观察。它由
+     * `EpubBookParserTest` 的合成 fixture 继续覆盖（单句超限的残余拒绝路径）。
+     *
+     * 换成钉这一条，因为它是切分正确性里最容易悄悄坏掉的部分：装箱若跨资源累积，两章不同
+     * 出处的正文会被并进同一篇 article，而每个产物仍在上限之内、章节序号仍然连续、总字符数
+     * 仍然守恒 —— 上面那个用例的每一条断言都照样通过。判据是 `sourceHref`：同一资源切出的
+     * 各部分共享它，且按该 href 归组后每组的字符数不超过该资源本身。
+     *
+     * 生产 parser 实测：三个正文资源 209,803 / 155,888 / 18,487，合计 384,178，切成 6 + 4 + 1 = 11 章。
+     * （`measure_corpus.py` 对同样三个资源报 206,782 / 153,528 / 18,144 —— 那是正则近似，
+     * 与生产值差约 1%，不能拿来界定生产值。）
      */
     @Test
-    fun realBook78457_rejectionReportsSingleResourceNotWholeBook() = runTest {
+    fun realBook78457_splitsWithinEachResourceNotAcrossThem() = runTest {
         val file = fixtureFile("/readium/public/gutenberg-78457-epub3.epub")
 
-        val error = runCatching { parser.parse(file) }.exceptionOrNull()
+        val book = parser.parse(file)
 
-        val failure = (error as ImportException).failure as ImportFailure.ChapterTooLong
-        // 最大单资源实测 206,782；全书三个正文资源合计 378,454。
-        assertTrue(
-            "actualChars ${failure.actualChars} looks like a whole-book total, " +
-                "which would mean the parser buffered the entire book before rejecting",
-            failure.actualChars < 300_000
+        val byResource = book.chapters.groupBy { it.sourceHref }
+        assertEquals(
+            "this book has 3 body resources; splitting must not invent or merge resources",
+            3,
+            byResource.size
+        )
+        // 逐组字符数钉成精确值。fixture 字节由 SHA-256 校验（见 fixtureFile），提取与切分都是
+        // 确定性的，所以这三个数是稳定的；跨资源装箱会立刻让它们变形。
+        //
+        // 这些是**生产** parser 实测值，不是 measure_corpus.py 的近似值。该脚本用正则近似
+        // XhtmlTextExtractor，自带「±几个百分点」的免责声明，把它的数字当成生产值的上界会
+        // 得到一条假失败——本用例上一版正是这么写的（用 206,782 去界定实测的 209,803）。
+        assertEquals(
+            "per-resource char counts changed; packing must stay inside each resource",
+            listOf(209_803, 155_888, 18_487),
+            byResource.values.map { parts -> parts.sumOf { it.content.length } }
+        )
+        // 各部分在书内必须是连续的一段序号：交错编号意味着装箱顺序脱离了阅读顺序。
+        byResource.forEach { (href, parts) ->
+            val indices = parts.map { it.chapterIndex }
+            assertEquals(
+                "$href: parts must occupy consecutive chapter indices, got $indices",
+                (indices.first()..indices.last()).toList(),
+                indices
+            )
+        }
+        // 同样是生产实测值：三组之和。切分不改变正文总量，所以它必须逐字符守恒。
+        assertEquals(
+            "total chars changed; splitting must repartition the text, never add or drop any",
+            209_803 + 155_888 + 18_487,
+            book.totalChars
         )
     }
 

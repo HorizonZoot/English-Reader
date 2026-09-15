@@ -301,18 +301,26 @@ class ConcurrentAndLargeImportTest {
     }
 
     /**
-     * 24 MiB 的插图密集 archive 走完 preflight 与 Readium，被章节预算拒。
+     * 24 MiB 的插图密集 archive 走完 preflight 与 Readium 并成功导入。
      *
      * 这条覆盖的是「大压缩包不会在预检阶段崩」：`gutenberg3-1342` 有 24 MiB，过得了
      * [ImportBudget.MAX_EPUB_ARCHIVE_BYTES]（32 MiB）与
-     * [ImportBudget.MAX_EPUB_TOTAL_INFLATED_BYTES]（24 MiB，只统计正文类资源，图片不计），
-     * 所以拒绝必须来自 [ImportFailure.ChapterTooLong] 而不是任何预检失败。
+     * [ImportBudget.MAX_EPUB_TOTAL_INFLATED_BYTES]（24 MiB，只统计正文类资源，图片不计）。
      *
      * 若它报 `BookArchiveTooLarge` 或 `InvalidEpub`，说明预检把插图算进了正文预算 ——
      * 那会让所有插图书都导不进来，而用户看到的是「文件已损坏」。
+     *
+     * ## 判据从「被章节预算拒」改成「导入成功」
+     *
+     * 本用例原先拿 [ImportFailure.ChapterTooLong] 当**探针**：只要拒绝来自章节预算而非预检，
+     * 就说明图片没被计入正文。章节切分让这本书变成可导入（它此前是 19 本 `ChapterTooLong`
+     * 之一），探针随之失效。
+     *
+     * 换成断言导入成功是**更强**的判据，不是退让：原判据只证明流程走到了正文预算那一步，
+     * 新判据证明它一路走完。预检若误算图片字节，这里同样第一时间红。
      */
     @Test
-    fun largeIllustratedArchive_reachesChapterBudgetNotPreflightFailure() = runBlocking {
+    fun largeIllustratedArchive_passesPreflightAndImports() = runBlocking {
         val file = corpusBook(LARGE_ARCHIVE)
         assumeTrue("$LARGE_ARCHIVE absent", file != null)
         requireNotNull(file)
@@ -326,17 +334,32 @@ class ConcurrentAndLargeImportTest {
             file.length() <= ImportBudget.MAX_EPUB_ARCHIVE_BYTES
         )
 
-        val error = runCatching { parser.parse(file) }.exceptionOrNull()
+        val result = runCatching { parser.parse(file) }
+        val error = result.exceptionOrNull()
         val failure = (error as? ImportException)?.failure
 
+        // 失败消息要能区分两种红：预检误算图片（本用例存在的理由），与切分回归（新增覆盖）。
         assertTrue(
-            "expected ChapterTooLong, got ${failure ?: error}. A preflight failure here would " +
-                "mean image bytes are being charged against the text budget, which would reject " +
-                "every illustrated book with a 'file is corrupt' style message.",
-            failure is ImportFailure.ChapterTooLong
+            "expected a successful import, got ${failure ?: error}. A preflight failure here " +
+                "would mean image bytes are being charged against the text budget, which would " +
+                "reject every illustrated book with a 'file is corrupt' style message. A " +
+                "ChapterTooLong would mean chapter splitting regressed.",
+            result.isSuccess
         )
+        val book = result.getOrThrow()
+        // 每个产物都必须在上限内：切分若只是把异常吞掉而没真正分块，这里会红。
+        book.chapters.forEach { chapter ->
+            assertTrue(
+                "chapter ${chapter.chapterIndex} is ${chapter.content.length} chars, " +
+                    "above the ${ImportBudget.MAX_CHAPTER_CHARS} ceiling",
+                chapter.content.length <= ImportBudget.MAX_CHAPTER_CHARS
+            )
+        }
 
-        println("LARGE-ARCHIVE ${file.name} bytes=${file.length()} verdict=ChapterTooLong")
+        println(
+            "LARGE-ARCHIVE ${file.name} bytes=${file.length()} " +
+                "chapters=${book.chapters.size} chars=${book.totalChars}"
+        )
     }
 
     /**

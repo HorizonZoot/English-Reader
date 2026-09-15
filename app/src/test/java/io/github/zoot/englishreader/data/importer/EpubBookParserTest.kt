@@ -307,6 +307,88 @@ class EpubBookParserTest {
     }
 
     /**
+     * 超限章节被切成多篇，且**两个**标题字段都带分片后缀。
+     *
+     * `navigationTitle` 必须一起加后缀，不能只给 `title` 加：`BookTocScreen` 显示的是
+     * `navigationTitle`，只改 `title` 会让一章切出的几部分在目录里显示成完全相同的几行，
+     * 用户无法区分。这条断言就是那个缺陷的判据。
+     *
+     * 同时钉住「未被切开的章节标题逐字不变」——后缀只在真的切开时出现，否则今天能导入的书
+     * 会凭空多出 `(1/1)` 之类的噪声。
+     */
+    @Test
+    fun parse_splitChapter_suffixesBothTitleFieldsAndLeavesUnsplitOnesVerbatim() = runTest {
+        // 13 段 × 3,000 字符 = 39,024（含分隔符）刚好在上限内，第 14 段起进第二篇。
+        val paragraph = "word ".repeat(600).trim()
+        val oversized = List(20) { "<p>$paragraph</p>" }.joinToString("")
+        val small = "<p>Short chapter body.</p>"
+
+        val book = parser.parse(
+            write(
+                epub(
+                    chapters = listOf("big.xhtml" to oversized, "small.xhtml" to small),
+                    navEntries = listOf("big.xhtml" to "Chapter LIV", "small.xhtml" to "Chapter LV")
+                )
+            )
+        )
+
+        val bigParts = book.chapters.filter { it.sourceHref.endsWith("big.xhtml") }
+        assertTrue("the oversized resource must be split, got ${bigParts.size}", bigParts.size > 1)
+        val total = bigParts.size
+        assertEquals(
+            "title must carry the part suffix",
+            (1..total).map { "Chapter LIV ($it/$total)" },
+            bigParts.map { it.title }
+        )
+        assertEquals(
+            "navigationTitle must carry it too, or the TOC shows identical rows",
+            (1..total).map { "Chapter LIV ($it/$total)" },
+            bigParts.map { it.navigationTitle }
+        )
+
+        val unsplit = book.chapters.single { it.sourceHref.endsWith("small.xhtml") }
+        assertEquals("unsplit title must stay verbatim", "Chapter LV", unsplit.title)
+        assertEquals("unsplit navigationTitle must stay verbatim", "Chapter LV", unsplit.navigationTitle)
+
+        assertEquals(
+            "chapterIndex must stay dense across the split",
+            book.chapters.indices.toList(),
+            book.chapters.map { it.chapterIndex }
+        )
+        book.chapters.forEach {
+            assertTrue(
+                "part ${it.chapterIndex} is ${it.content.length} chars, over the ceiling",
+                it.content.length <= ImportBudget.MAX_CHAPTER_CHARS
+            )
+        }
+    }
+
+    /**
+     * 无 NAV 标题的书被切开时，`navigationTitle` 保持 null，不被后缀「填充」成非 null。
+     *
+     * `BookTocScreen` 依赖 null 回退到「第 N 章 / 共 M 章」，序号本身已能区分各部分。
+     * 若这里给 null 补出一个 `" (1/2)"`，目录会显示成孤零零的括号序号，比回退更糟。
+     */
+    @Test
+    fun parse_splitChapterWithoutNavTitle_keepsNavigationTitleNull() = runTest {
+        val paragraph = "word ".repeat(600).trim()
+        val oversized = List(20) { "<p>$paragraph</p>" }.joinToString("")
+
+        val book = parser.parse(
+            write(epub(chapters = listOf("big.xhtml" to oversized), navEntries = emptyList()))
+        )
+
+        assertTrue("expected a split", book.chapters.size > 1)
+        book.chapters.forEach { assertNull(it.navigationTitle) }
+        // 回退标题按源资源编号，所以每一部分的 title 都基于 "Chapter 1"。
+        val total = book.chapters.size
+        assertEquals(
+            (1..total).map { "Chapter 1 ($it/$total)" },
+            book.chapters.map { it.title }
+        )
+    }
+
+    /**
      * 全书总量上限必须独立于单章上限生效。
      *
      * 这是 [ImportBudget.MAX_BOOK_TEXT_CHARS] 唯一的判据。构造的形状是刻意的：

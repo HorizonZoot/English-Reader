@@ -1,9 +1,18 @@
 # EPUB measurement corpus
 
 Reproduces the measurement behind [ADR-013](../../.trellis/spec/project/decisions.md):
-whole-book EPUB import currently accepts **34%** of real public-domain EPUBs (11 of 32), and
-`MAX_CHAPTER_CHARS` — not packaging granularity, and not any book-level ceiling — is
-what blocks the rest.
+`MAX_CHAPTER_CHARS` — not packaging granularity, and not any book-level ceiling — is what
+rejected most real books, and **splitting at paragraph boundaries** rather than raising that
+ceiling is what fixed it. Coverage went from **34%** (11 of 32) to **97%** (31 of 32) with
+every budget constant unchanged.
+
+The distributions below are the pre-splitting measurement and still describe the corpus shape;
+what changed is what the parser *does* with an over-ceiling chapter. The post-split projection
+(`--- projected after splitting ---`) models the new behavior, but treat its part counts as a
+**lower bound**: it divides an over-ceiling paragraph evenly, while real sentence boundaries do
+not, and it cannot see a paragraph with no sentence boundary at all. That blind spot is exactly
+why it projected 32 of 32 while the production parser reports 31 — *Ulysses* has a 21,381-char
+paragraph the splitter must leave intact. `CorpusImportSurveyTest` is the authority on coverage.
 
 ```powershell
 python tools/epub-corpus/fetch_corpus.py      # ~40 MiB into build/epub-corpus/
@@ -70,6 +79,10 @@ paragraph gate counts.
 The coverage table has two columns for that reason. **Quote the right one**
 (`all gates (importable)` = 34%); the left one (`chapter gate only` = 41%) answers a
 narrower question and was misread as coverage in an earlier revision of ADR-013.
+
+Both columns answer "what would the ceiling admit **without** splitting", which is now a
+counterfactual: they are what makes the case that splitting, not a higher ceiling, was the
+right lever. Present coverage is 31 of 32.
 
 `verdict` names the first budget that would reject the book, in the parser's own
 evaluation order (`BookTooManyChapters` → `ChapterTooLong` → `TooManyParagraphs` →

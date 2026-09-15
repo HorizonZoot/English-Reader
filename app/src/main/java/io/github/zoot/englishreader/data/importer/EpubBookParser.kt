@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.data.importer
 
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.zoot.englishreader.util.SentenceSplitter
 import java.io.File
 import java.security.MessageDigest
 import javax.inject.Inject
@@ -83,6 +84,8 @@ class EpubBookParser @Inject constructor(
 
         val chapters = mutableListOf<ImportedChapter>()
         var totalChars = 0
+        // 源资源序号，与 chapters.size 分开：一个资源可能切出多章，回退标题要按资源编号。
+        var sourceOrdinal = 0
 
         readingOrder.forEach { link ->
             coroutineContext.ensureActive()
@@ -110,44 +113,69 @@ class EpubBookParser @Inject constructor(
             val navigationTitle = path?.let { navigationTitles[it] }
             // 标题在预算校验**之前**解析：ChapterTooLong 要带上章节标题，
             // 否则用户只知道「有一章太长」却不知道是哪一章。
+            //
+            // 回退标题按**源资源**序号而非已产出章节数编号：切分后两者不再相等，用产出数会让
+            // 「第 3 个资源」在前面有资源被切开时显示成 Chapter 5。无一章被切时两者恒等，
+            // 故今天能导入的书标题逐字不变。
             val title = navigationTitle?.takeIf { it.isNotBlank() }
                 ?: link.title?.takeIf { it.isNotBlank() }
-                ?: fallbackChapterTitle(chapters.size)
+                ?: fallbackChapterTitle(sourceOrdinal)
+            sourceOrdinal++
 
-            if (content.length > ImportBudget.MAX_CHAPTER_CHARS) {
-                throw ImportException(
-                    ImportFailure.ChapterTooLong(
-                        chapterTitle = title,
-                        actualChars = content.length,
-                        limitChars = ImportBudget.MAX_CHAPTER_CHARS
-                    )
-                )
-            }
-
-            // 章节就是一条 ArticleEntity，由同一个 ReadingScreen 渲染，故段落数与单段长度
-            // 这两条**渲染**上限对它与对单篇文章同等适用。字符上限单独在上面按
-            // MAX_CHAPTER_CHARS 施加，不能整体复用 ImportBudgetValidator.validate——
-            // 那会把章节换成由单篇的 MAX_IMPORT_CHARS 管辖。
-            ImportBudgetValidator.validateParagraphStructure(content)
-
-            totalChars += content.length
-            if (totalChars > ImportBudget.MAX_BOOK_TEXT_CHARS) {
-                throw ImportException(
-                    ImportFailure.BookTooLong(
-                        actualChars = totalChars,
-                        limitChars = ImportBudget.MAX_BOOK_TEXT_CHARS
-                    )
-                )
-            }
-
-            chapters += ImportedChapter(
-                // 过滤后重新编号，保证 chapterIndex 连续。
-                chapterIndex = chapters.size,
-                title = title,
-                sourceHref = link.href.toString(),
-                navigationTitle = navigationTitle,
-                content = content
+            // 超限章节按段落边界切开，而不是把整本书拒掉。原先这里直接从 parse() 抛
+            // ChapterTooLong，于是一章超限整本进不来——32 本公版语料只有 11 本（34%）能导入。
+            // 每个产物仍在 MAX_CHAPTER_CHARS 以内，所以这不需要 ADR-013 要求的真机渲染基线。
+            val parts = ChapterSplitter.split(
+                content = content,
+                sentenceSplitter = SentenceSplitter::split
             )
+
+            parts.forEachIndexed { partIndex, part ->
+                // 切分不到句子以下，所以单个句子超过段落上限时这一部分仍可能超限。
+                // 那种正文只能拒绝：硬切会在句子中间断开，用户读到坏文本且无任何提示。
+                if (part.length > ImportBudget.MAX_CHAPTER_CHARS) {
+                    throw ImportException(
+                        ImportFailure.ChapterTooLong(
+                            chapterTitle = title,
+                            actualChars = part.length,
+                            limitChars = ImportBudget.MAX_CHAPTER_CHARS
+                        )
+                    )
+                }
+
+                // 章节就是一条 ArticleEntity，由同一个 ReadingScreen 渲染，故段落数与单段长度
+                // 这两条**渲染**上限对它与对单篇文章同等适用。字符上限单独在上面按
+                // MAX_CHAPTER_CHARS 施加，不能整体复用 ImportBudgetValidator.validate——
+                // 那会把章节换成由单篇的 MAX_IMPORT_CHARS 管辖。
+                ImportBudgetValidator.validateParagraphStructure(part)
+
+                totalChars += part.length
+                if (totalChars > ImportBudget.MAX_BOOK_TEXT_CHARS) {
+                    throw ImportException(
+                        ImportFailure.BookTooLong(
+                            actualChars = totalChars,
+                            limitChars = ImportBudget.MAX_BOOK_TEXT_CHARS
+                        )
+                    )
+                }
+
+                val split = parts.size > 1
+                chapters += ImportedChapter(
+                    // 过滤与切分后重新编号，保证 chapterIndex 连续。
+                    chapterIndex = chapters.size,
+                    // 只有真被切开时才加后缀：未切分的章节标题保持逐字不变。
+                    title = if (split) partTitle(title, partIndex + 1, parts.size) else title,
+                    sourceHref = link.href.toString(),
+                    // navigationTitle 也要带后缀，不能只给 title 加。
+                    // `BookTocScreen` 显示的是 navigationTitle（见该文件的 headlineContent），
+                    // 只给 title 加后缀会让一章切出的若干部分在目录里显示成完全相同的几行。
+                    // null 时不补：那种书 TOC 本来就回退到「第 N 章 / 共 M 章」，序号已能区分。
+                    navigationTitle = navigationTitle?.let {
+                        if (split) partTitle(it, partIndex + 1, parts.size) else it
+                    },
+                    content = part
+                )
+            }
         }
 
         if (chapters.isEmpty()) throw ImportException(ImportFailure.NoReadableChapters)
@@ -234,6 +262,15 @@ class EpubBookParser @Inject constructor(
         ByteArray(4) { i -> ((this shr ((3 - i) * 8)) and 0xFF).toByte() }
 
     private fun fallbackChapterTitle(index: Int): String = "Chapter ${index + 1}"
+
+    /**
+     * 被切开的章节各部分的标题。
+     *
+     * 用 `navigationTitle` 这个自由字符串承载「第几部分」，而不是给 Room 加层级结构：
+     * ADR-012 明确目录层级只解析、不持久化，加一层会把那个决定推翻。后缀只在 [total] > 1
+     * 时出现，所以未被切开的章节标题一个字符都不变。
+     */
+    private fun partTitle(base: String, part: Int, total: Int): String = "$base ($part/$total)"
 
     /**
      * OPF version → [BookFormat]。

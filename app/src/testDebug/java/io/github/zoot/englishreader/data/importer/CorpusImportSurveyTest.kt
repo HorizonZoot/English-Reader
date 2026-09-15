@@ -20,14 +20,28 @@ import org.robolectric.annotation.Config
  * ADR-013 的覆盖率数字来自 `tools/epub-corpus/measure_corpus.py` —— 那是正则近似
  * `XhtmlTextExtractor`，不是同一份代码，所以每个数字都带着「±几个百分点」的免责声明。
  * `RealBookImportBudgetTest` 用真实 parser，但只覆盖仓库里原有的 2 本。
- * 于是「32 本里 11 本可导入」这个结论从未被生产代码验证过。本类是它唯一的生产侧证据。
+ * 于是覆盖率这个结论从未被生产代码验证过。本类是它唯一的生产侧证据。
  *
- * 注意是 **11**，不是 13。13 是「只看章节闸门」那一列；另外 2 本过了章节闸门却死在段落闸门上。
- * 引用覆盖率时只能用 11/32 = 34%。
+ * 引用覆盖率时只能用本类实测的 **31/32 = 97%**。
  *
  * 本类跑完全部 32 本，把每本的实际 typed failure 与脚本预测逐本比对。**不一致就是发现**：
  * 要么近似有偏差（该改脚本与 ADR），要么 parser 有 bug（该改代码）。两种都比「数字看着差不多」
  * 有价值。
+ *
+ * ## 章节切分把这些数字整体换掉了（2026-09-15）
+ *
+ * 改动前：11/32（34%）可导入，19 本死在章节闸门、2 本死在段落闸门。原因是
+ * `EpubBookParser` 对超限章节直接从 `parse()` 抛 `ChapterTooLong` —— **一章超限整本被拒**。
+ * 现在超限章节按段落边界切开（见 [ChapterSplitter]），每个产物仍在
+ * [ImportBudget.MAX_CHAPTER_CHARS] 以内，所以这不需要 ADR-013 要求的真机渲染基线。
+ *
+ * 实测结果 **31/32**。唯一仍被拒的是 `gutenberg-4300`（*Ulysses*）：Molly Bloom 那段
+ * 21,381 字符的独白没有标点，分句器找不到任何边界，切分器于是原样输出并让段落闸门拒掉它。
+ * 切到句子以下（按字符硬切）会在正文中间断句 —— 那比拒绝更糟，用户读到坏文本且无提示。
+ *
+ * ⚠️ 这一本也是脚本与生产的**真实分歧点**：`measure_corpus.py` 把超长段落按均分建模
+ * （它没有分句器，ICU 只在 Android 上），所以它预测 32/32。分歧记在下面的 [predicted] 表里
+ * 而不是抹平 —— 脚本看不见「无句子边界」这种输入，这是它的已知盲区，不是 parser 的 bug。
  *
  * ## 语料**完全**缺失时跳过；数量不符则失败
  *
@@ -48,47 +62,56 @@ class CorpusImportSurveyTest {
     private val parser by lazy { EpubBookParser(context) }
 
     /**
-     * 脚本对每本书的预测判决。
+     * 每本书的**期望生产判决**。
      *
-     * 来自 `measure_corpus.py` 在 2026-08-30 的输出。摘要已由 `corpus.manifest` 钉住，
-     * 所以同样的字节应当得到同样的判决；比对不上就说明近似与生产代码在某处分叉。
+     * 语义在 2026-09-15 变了：切分之前这张表存的是 `measure_corpus.py` 的预测，用来把脚本近似
+     * 与生产代码对账。切分之后脚本对 `gutenberg-4300` 必然预测错（它没有分句器，把超长段落按
+     * 均分建模，于是预测 32/32 全过），所以这张表改存**实测的生产判决**，脚本的分歧写在注释里
+     * 而不是抹平。理由：那是脚本的已知盲区（看不见「无句子边界」这种输入），不是 parser 的 bug，
+     * 而把它塞进表里当成一致会让下一个人以为脚本能预测这种情况。
+     *
+     * 摘要已由 `corpus.manifest` 钉住，所以同样的字节应当得到同样的判决；比对不上就是回归。
      *
      * ⚠️ **这张表只在 [ImportBudget.MAX_CHAPTER_CHARS] == 40,000 时有效。** 判决是「哪道闸门
-     * 先拒」，闸门一动判决就全变 —— 实测把上限抬到 80,000，32 本里有 16 本判决改变
-     * （可导入从 11 变 25）。所以 [PINNED_CHAPTER_CEILING] 会先于逐本比对被断言，否则抬上限的人
-     * 会先看到「16 本预测不一致」，那条消息读起来像脚本坏了，而真相是这张表按定义过期了。
+     * 先拒」，闸门一动判决就全变。所以 [PINNED_CHAPTER_CEILING] 会先于逐本比对被断言，否则
+     * 抬上限的人会先看到一串「判决不一致」，那条消息读起来像代码坏了，而真相是这张表按定义过期了。
      */
     private val predicted = mapOf(
         "gutenberg-1080" to Verdict.PASS,
         "gutenberg-11" to Verdict.PASS,
         "gutenberg-120" to Verdict.PASS,
-        "gutenberg-1260" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg-1342" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg-158" to Verdict.PARAGRAPH_TOO_LONG,
+        "gutenberg-1260" to Verdict.PASS,
+        "gutenberg-1342" to Verdict.PASS,
+        "gutenberg-158" to Verdict.PASS,
         "gutenberg-16328" to Verdict.PASS,
-        "gutenberg-1661" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg-174" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg-205" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg-2542" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg-2701" to Verdict.CHAPTER_TOO_LONG,
+        "gutenberg-1661" to Verdict.PASS,
+        "gutenberg-174" to Verdict.PASS,
+        "gutenberg-205" to Verdict.PASS,
+        "gutenberg-2542" to Verdict.PASS,
+        "gutenberg-2701" to Verdict.PASS,
         "gutenberg-345" to Verdict.PASS,
-        "gutenberg-4300" to Verdict.CHAPTER_TOO_LONG,
+        // 唯一仍被拒的一本：Molly Bloom 的独白 21,381 字符、**整段没有句末标点**，
+        // 于是分句器给不出任何边界，ChapterSplitter 按设计原样输出它，由段落闸门拒绝。
+        // 切到句子以下需要按字符硬切，那会在词中间断开正文。
+        // `measure_corpus.py` 对这本预测 PASS —— 它没有分句器，把超长段落按均分建模，
+        // 看不见「无句子边界」这种输入。这是脚本的已知盲区，不是 parser 的 bug。
+        "gutenberg-4300" to Verdict.PARAGRAPH_TOO_LONG,
         "gutenberg-74" to Verdict.PASS,
-        "gutenberg-768" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg-84" to Verdict.CHAPTER_TOO_LONG,
+        "gutenberg-768" to Verdict.PASS,
+        "gutenberg-84" to Verdict.PASS,
         "gutenberg-98" to Verdict.PASS,
-        "gutenberg3-1342" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg3-1661" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg3-2701" to Verdict.CHAPTER_TOO_LONG,
-        "gutenberg3-84" to Verdict.CHAPTER_TOO_LONG,
+        "gutenberg3-1342" to Verdict.PASS,
+        "gutenberg3-1661" to Verdict.PASS,
+        "gutenberg3-2701" to Verdict.PASS,
+        "gutenberg3-84" to Verdict.PASS,
         "se-a-tale-of-two-cities" to Verdict.PASS,
-        "se-crime-and-punishment" to Verdict.CHAPTER_TOO_LONG,
+        "se-crime-and-punishment" to Verdict.PASS,
         "se-dracula" to Verdict.PASS,
-        "se-frankenstein" to Verdict.CHAPTER_TOO_LONG,
-        "se-moby-dick" to Verdict.CHAPTER_TOO_LONG,
-        "se-pride-and-prejudice" to Verdict.PARAGRAPH_TOO_LONG,
-        "se-the-adventures-of-sherlock-holmes" to Verdict.CHAPTER_TOO_LONG,
-        "se-the-picture-of-dorian-gray" to Verdict.CHAPTER_TOO_LONG,
+        "se-frankenstein" to Verdict.PASS,
+        "se-moby-dick" to Verdict.PASS,
+        "se-pride-and-prejudice" to Verdict.PASS,
+        "se-the-adventures-of-sherlock-holmes" to Verdict.PASS,
+        "se-the-picture-of-dorian-gray" to Verdict.PASS,
         "se-the-time-machine" to Verdict.PASS,
         "se-war-and-peace" to Verdict.PASS
     )
@@ -212,13 +235,16 @@ class CorpusImportSurveyTest {
         // predicted 的键集和每个取值都一致，于是 passing 必然等于 predicted 里的 PASS 数，
         // 这条断言不可能独立失败。若有人为了让测试变绿而把某本改成 PASS，期望值会跟着动。
         //
-        // 字面量 11 与 32 是 ADR-013、context.md、prd.md 共同引用的那两个数。行为一变，
-        // 这里先红，而且报的是「文档要一起改」而不是「测试要改」。
+        // 字面量 31 与 32 是 ADR-013、context.md、prd.md、README.md 共同引用的那两个数。
+        // 行为一变，这里先红，而且报的是「文档要一起改」而不是「测试要改」。
         assertEquals("corpus size changed; ADR-013 quotes 32", 32, books.size)
         assertEquals(
-            "importable count changed from 11; ADR-013 / context.md / prd.md all quote " +
-                "11 of 32 = 34%. Update those documents in the same commit as this number.",
-            11,
+            "importable count changed from 31; ADR-013 / context.md / prd.md / README.md all " +
+                "quote 31 of 32 = 97%. Update those documents in the same commit as this number. " +
+                "A drop back toward 11 means chapter splitting regressed; the one remaining " +
+                "rejection is gutenberg-4300 (Ulysses), whose 21,381-char soliloquy has no " +
+                "sentence boundary to split on.",
+            31,
             passing
         )
     }
@@ -272,12 +298,12 @@ class CorpusImportSurveyTest {
         // 最严重的回归会被报成 **skipped**，而本类的 KDoc 恰恰声称 skip 与 pass 可区分。
         // 与 Phase 5 记的 `tests=0` 陷阱同型：「没跑」和「跑过了」不能长得一样。
         assertEquals(
-            "importable book count changed from 11. The corpus is complete (asserted above), so " +
-                "this is a code change, not a corpus problem. Two likely causes: a budget ceiling " +
-                "moved (check MAX_CHAPTER_CHARS, currently ${ImportBudget.MAX_CHAPTER_CHARS} -- at " +
-                "80,000 this count becomes 25), or the parser changed. Either way ADR-013, " +
-                "context.md and prd.md quote this number.",
-            11,
+            "importable book count changed from 31. The corpus is complete (asserted above), so " +
+                "this is a code change, not a corpus problem. Two likely causes: chapter " +
+                "splitting regressed (see ChapterSplitter), or a budget ceiling moved (check " +
+                "MAX_CHAPTER_CHARS, currently ${ImportBudget.MAX_CHAPTER_CHARS}). Either way " +
+                "ADR-013, context.md, prd.md and README.md quote this number.",
+            31,
             checked
         )
         println("CORPUS-SURVEY-USABLE verified=$checked importable book(s)")
@@ -285,9 +311,13 @@ class CorpusImportSurveyTest {
 
     private companion object {
         /**
-         * [predicted] 与 11/32 这个覆盖率共同绑定的章节上限。
+         * [predicted] 与 31/32 这个覆盖率共同绑定的章节上限。
          *
          * 单独提出来是为了让「这些数字随上限而变」在代码里可见，而不是靠读 KDoc 记住。
+         *
+         * 切分之后这道上限的含义变了，但**没有失效**：它不再决定「哪本书被拒」，而是决定
+         * 「每本书被切成几段」。所以判决表对它的依赖比切分前弱，段落上限的依赖反而更强——
+         * 唯一剩下的拒绝就来自段落闸门。
          */
         const val PINNED_CHAPTER_CEILING = 40_000
     }

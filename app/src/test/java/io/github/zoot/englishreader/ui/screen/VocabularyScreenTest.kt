@@ -4,8 +4,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.down
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.moveBy
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -26,6 +30,7 @@ import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -167,6 +172,23 @@ class VocabularyScreenTest {
     }
 
     @Test
+    fun swipeLeft_rowStaysOnScreenUntilTheListActuallyDropsIt() {
+        // 删除是异步的（Room 写完才回流）。行不该在手势结束时就自己飞出屏幕——
+        // 那样列表里会先出现一块空白，而删除万一失败，那一行就再也回不来了。
+        val word = word(1L, "noticing")
+        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
+
+        composeRule.onNodeWithTag("vocabulary-word-1").performTouchInput { swipeLeft() }
+
+        val bounds = composeRule.onNodeWithText("noticing").getBoundsInRoot()
+        composeRule.onNodeWithText("noticing").assertIsDisplayed()
+        assertTrue(
+            "row slid off-screen (right=${bounds.right}) before the list dropped it",
+            bounds.right > 0.dp
+        )
+    }
+
+    @Test
     fun detailsArrivingAfterFirstFrame_fillInTheRow() {
         // 释义是异步解析的：列表先渲染，词典结果后到。若行内容读的是首帧捕获的
         // map，释义永远不会出现——这条测试盯的就是那个。
@@ -188,6 +210,23 @@ class VocabularyScreenTest {
         }
 
         composeRule.onNodeWithText("vt. 注意, 注意到").assertIsDisplayed()
+    }
+
+    @Test
+    fun swipeLeft_rowFollowsTheFingerMidGesture() {
+        // backgroundContent 清空之后这条必须验：SwipeToDismissBox 的拖动锚点由内容尺寸
+        // 推导，背景为空时若推导出零距离，滑动就会「不跟手」——手势有效但没有任何反馈。
+        val word = word(1L, "noticing")
+        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
+        val before = composeRule.onNodeWithText("noticing").getBoundsInRoot()
+
+        composeRule.onNodeWithTag("vocabulary-word-1").performTouchInput {
+            down(center)
+            moveBy(Offset(-120f, 0f))
+        }
+
+        val dragged = composeRule.onNodeWithText("noticing").getBoundsInRoot()
+        assertTrue("row did not follow the drag: $before -> $dragged", dragged.left < before.left)
     }
 
     @Test

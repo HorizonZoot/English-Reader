@@ -13,7 +13,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Description
@@ -25,7 +24,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -367,10 +365,11 @@ private fun GroupHeader(
  *  - 只允许从右往左滑（[SwipeToDismissBox] 的 StartToEnd 关掉），避免方向上的误触；
  *  - [consumed] 保证一次手势只派发一次删除——`confirmValueChange` 会在目标值
  *    来回穿越阈值时被反复调用；
- *  - 垃圾桶默认是系统灰，随滑动进度渐变到红色——静止的红图标是最抢视觉的元素之一，
- *    而这里只有真正在删除时才需要警告色；
- *  - 自定义无障碍操作是滑动手势在 TalkBack 下的等价入口，没有它这个界面
- *    对读屏用户就是「只能看不能删」。
+ *  - 滑动过程中**不画任何东西**。早先在右侧放了一个垃圾桶，随进度由灰变红；它虽然在
+ *    静止时被行内容盖住，却让「这次滑动会删掉这一行」缺少明确的视觉结果。现在直接让
+ *    行本身滑走，就是这个手势最直白的结果；
+ *  - 自定义无障碍操作是滑动手势在 TalkBack 下的等价入口。手势对读屏用户不可达，
+ *    去掉它这个界面就变成「只能看不能删」——所以图标可以删，这个不能删。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -399,9 +398,6 @@ private fun SwipeToDeleteWordRow(
         }
     )
 
-    val errorColor = MaterialTheme.colorScheme.error
-    val iconTint = lerp(NeutralIconGray, errorColor, dismissState.progress)
-
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = false,
@@ -415,22 +411,7 @@ private fun SwipeToDeleteWordRow(
                     }
                 )
             },
-        backgroundContent = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background)
-                    .padding(end = 4.dp),
-                contentAlignment = Alignment.CenterEnd
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = null,
-                    tint = iconTint,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-        }
+        backgroundContent = {}
     ) {
         WordRow(
             word = word,

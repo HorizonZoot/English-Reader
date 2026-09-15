@@ -1445,13 +1445,7 @@ class ReadingViewModel @Inject constructor(
         }
     }
 
-    /**
-     * 构造有道 dictvoice 发音 URL（离线词典命中时补音频）。
-     *
-     * 接口：https://dict.youdao.com/dictvoice?audio=<word>&type=2
-     * type=2 为美式发音（1 为英式）。国内可访问，MediaPlayer 可直接播放。
-     * word 经 URL 编码，保证含空格/特殊字符的短语也能安全拼接。
-     */
+    /** 构造有道 dictvoice 发音 URL（离线词典命中时补音频）。格式见 [WordAudioUrl]。 */
     private fun buildYoudaoAudioUrl(word: String): String = WordAudioUrl.forWord(word)
 
     /**

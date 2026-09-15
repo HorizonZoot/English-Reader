@@ -44,6 +44,18 @@ class VocabularyViewModel @Inject constructor(
     private val timeGrouper = TimeGrouper()
     private val alphabetGrouper = AlphabetGrouper()
 
+    // 单一事件流，界面只需一个 collector（详见 VocabularyUiEvent 的说明）。
+    private val _uiEvent = Channel<VocabularyUiEvent>(Channel.BUFFERED)
+    val uiEvent: Flow<VocabularyUiEvent> = _uiEvent.receiveAsFlow()
+
+    /**
+     * 正在删除的生词 id。
+     *
+     * 只在主线程访问（[deleteVocabulary] 同步登记、协程 `finally` 里移除，
+     * `viewModelScope` 默认 `Dispatchers.Main.immediate`），故用普通 MutableSet。
+     */
+    private val deletesInFlight = mutableSetOf<Long>()
+
     // 生词 + 来源文章标题。标题由 SQL LEFT JOIN 一次取回，界面不必再逐条回查文章。
     private val vocabularyWithSource: StateFlow<List<VocabularyWithSource>> =
         vocabularyRepository.getAllVocabularyWithSource()
@@ -113,14 +125,31 @@ class VocabularyViewModel @Inject constructor(
         }
     }
 
+    /**
+     * 删除一条生词。
+     *
+     * [VocabularyUiEvent.Deleted] 在写库返回**之后**才发，界面据此才弹「已删除 + 撤销」：
+     * 提前弹会在失败时谎报成功，而生词没有别的找回途径。失败发
+     * [VocabularyUiEvent.DeleteFailed]，行留在列表里。
+     *
+     * [deletesInFlight] 按 id 去重，检查与登记都在**调用方线程**上同步完成：
+     * `viewModelScope.launch` 的协程体要等调度，放在体内检查时同一帧的两次调用会都通过。
+     * 左滑手势的 `confirmValueChange` 可能在目标值来回穿越阈值时被反复调用，去重放在
+     * 这里而不是界面，是因为它跨重组存活，也能被单测直接盯住。
+     */
     fun deleteVocabulary(vocabulary: VocabularyEntity) {
+        if (!deletesInFlight.add(vocabulary.id)) return
         viewModelScope.launch {
             try {
                 vocabularyRepository.deleteVocabulary(vocabulary)
+                _uiEvent.trySend(VocabularyUiEvent.Deleted(vocabulary))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e("VocabularyViewModel", "Vocabulary delete failed", e)
+                _uiEvent.trySend(VocabularyUiEvent.DeleteFailed)
+            } finally {
+                deletesInFlight.remove(vocabulary.id)
             }
         }
     }
@@ -133,7 +162,9 @@ class VocabularyViewModel @Inject constructor(
      * 新保存的生词会复用同一个 id，撤销删除就会主键冲突或覆盖掉那行新词。
      *
      * `UNIQUE(word, articleId)` 冲突（[io.github.zoot.englishreader.data.repository.VocabularyInsertResult.AlreadyExists]）
-     * 静默忽略：用户在这期间又把同一个词加回了生词本，那正是他想要的结果。
+     * 不算失败：用户在这期间又把同一个词加回了生词本，那正是他想要的结果，
+     * 词确实在生词本里，不该报错。只有抛异常（真的没写进去）才发
+     * [VocabularyUiEvent.RestoreFailed]——撤销失败必须说出来，否则用户以为词回来了。
      */
     fun restoreVocabulary(vocabulary: VocabularyEntity) {
         viewModelScope.launch {
@@ -143,6 +174,7 @@ class VocabularyViewModel @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 Log.e("VocabularyViewModel", "Vocabulary restore failed", e)
+                _uiEvent.trySend(VocabularyUiEvent.RestoreFailed)
             }
         }
     }
@@ -155,10 +187,6 @@ class VocabularyViewModel @Inject constructor(
      */
     private val _loadingAudioWordId = MutableStateFlow<Long?>(null)
     val loadingAudioWordId: StateFlow<Long?> = _loadingAudioWordId.asStateFlow()
-
-    /** 系统 TTS 也不可用时的一次性提示，界面据此弹 Snackbar。 */
-    private val _audioUnavailable = Channel<Unit>(Channel.CONFLATED)
-    val audioUnavailable: Flow<Unit> = _audioUnavailable.receiveAsFlow()
 
     private var playAudioJob: Job? = null
     private var audioGeneration = 0
@@ -235,8 +263,8 @@ class VocabularyViewModel @Inject constructor(
     }
 
     private fun speakViaTts(word: String) {
-        // trySend：CONFLATED channel 永不阻塞，回调可能同步触发，无需起协程。
-        ttsPlayer.speak(word) { _audioUnavailable.trySend(Unit) }
+        // trySend：Channel 有缓冲、永不阻塞，回调可能同步触发，无需起协程。
+        ttsPlayer.speak(word) { _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable) }
     }
 
     override fun onCleared() {

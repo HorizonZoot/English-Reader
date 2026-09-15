@@ -5,11 +5,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.down
-import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.moveBy
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -23,12 +26,13 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
 import io.github.zoot.englishreader.ui.screen.vocabulary.listKey
+import io.github.zoot.englishreader.viewmodel.VocabularyUiEvent
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.emptyFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -60,13 +64,16 @@ class VocabularyScreenTest {
     private val loadingAudioWordIdState = MutableStateFlow<Long?>(null)
     private val openedArticles = mutableListOf<Pair<Long, String>>()
 
+    /** 一次性事件用无重放的 SharedFlow 模拟 Channel：测试自行 tryEmit 触发界面反应。 */
+    private val uiEvents = MutableSharedFlow<VocabularyUiEvent>(extraBufferCapacity = 4)
+
     private val viewModel = mockk<VocabularyViewModel>(relaxed = true).also { model ->
         every { model.groups } returns groupsState
         every { model.details } returns detailsState
         every { model.groupType } returns groupTypeState
         every { model.vocabulary } returns vocabularyState
         every { model.loadingAudioWordId } returns loadingAudioWordIdState
-        every { model.audioUnavailable } returns emptyFlow()
+        every { model.uiEvent } returns uiEvents
     }
 
     @Test
@@ -172,20 +179,46 @@ class VocabularyScreenTest {
     }
 
     @Test
-    fun swipeLeft_rowStaysOnScreenUntilTheListActuallyDropsIt() {
-        // 删除是异步的（Room 写完才回流）。行不该在手势结束时就自己飞出屏幕——
-        // 那样列表里会先出现一块空白，而删除万一失败，那一行就再也回不来了。
+    fun swipeLeft_rowSlidesBackAndWaitsForTheListToDropIt() {
+        // 删除是异步的（Room 写完才回流）。行必须滑回原位等列表移除它，不能停在
+        // dismissed 锚点上：删除万一没落库，Flow 不回流、行也滑不回来（StartToEnd 已关、
+        // Settled 又被 confirmValueChange 拒），那一行就永久卡在屏幕外。
+        //
+        // 断言比「还有一个像素可见」严格得多：必须回到滑动前的确切位置。此前那版
+        // 只断言 right > 0，而行实际左移了 272dp、只剩 24dp 残边——照样通过。
         val word = word(1L, "noticing")
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
+        val before = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
 
         composeRule.onNodeWithTag("vocabulary-word-1").performTouchInput { swipeLeft() }
 
-        val bounds = composeRule.onNodeWithText("noticing").getBoundsInRoot()
+        val after = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
         composeRule.onNodeWithText("noticing").assertIsDisplayed()
-        assertTrue(
-            "row slid off-screen (right=${bounds.right}) before the list dropped it",
-            bounds.right > 0.dp
-        )
+        assertEquals("row must slide back to where it started", before.left, after.left)
+        assertEquals(before.right, after.right)
+    }
+
+    @Test
+    fun wordNode_exposesDeleteAsACustomAccessibilityAction() {
+        // 左滑手势对读屏不可达，自定义操作是唯一的删除入口。它必须挂在读屏真正会
+        // 聚焦的节点上——即因 clickable 而合并子节点、带 contentDescription 的单词行。
+        // 挂在外层 SwipeToDismissBox（不合并、无文本）上时读屏遍历会跳过它。
+        val word = word(1L, "noticing")
+        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
+
+        val actions = composeRule
+            .onNodeWithContentDescription(string(R.string.word_play_pronunciation, "noticing"))
+            .fetchSemanticsNode()
+            .config
+            .getOrNull(SemanticsActions.CustomActions)
+            .orEmpty()
+
+        val delete = actions.firstOrNull { it.label == string(R.string.delete_vocabulary) }
+        assertTrue("delete action missing on the focusable word node", delete != null)
+
+        composeRule.runOnUiThread { delete!!.action() }
+
+        verify(exactly = 1) { viewModel.deleteVocabulary(word) }
     }
 
     @Test
@@ -218,15 +251,45 @@ class VocabularyScreenTest {
         // 推导，背景为空时若推导出零距离，滑动就会「不跟手」——手势有效但没有任何反馈。
         val word = word(1L, "noticing")
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
-        val before = composeRule.onNodeWithText("noticing").getBoundsInRoot()
+        val before = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
 
         composeRule.onNodeWithTag("vocabulary-word-1").performTouchInput {
             down(center)
             moveBy(Offset(-120f, 0f))
         }
 
-        val dragged = composeRule.onNodeWithText("noticing").getBoundsInRoot()
+        val dragged = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
         assertTrue("row did not follow the drag: $before -> $dragged", dragged.left < before.left)
+    }
+
+    @Test
+    fun deleteFailed_showsErrorAndKeepsTheRow() {
+        // 删除没落库时不能弹「已删除」。行留在列表里，用户需要知道这次左滑没生效。
+        val word = word(1L, "noticing")
+        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
+
+        composeRule.runOnIdle { uiEvents.tryEmit(VocabularyUiEvent.DeleteFailed) }
+
+        composeRule.onNodeWithText(string(R.string.vocabulary_delete_failed)).assertIsDisplayed()
+        // 关键区别：失败时那条带「撤销」的成功提示一条都不能出现，否则用户以为词已经没了。
+        composeRule.onNodeWithText(string(R.string.vocabulary_deleted, "noticing"))
+            .assertDoesNotExist()
+        composeRule.onNodeWithText("noticing").assertIsDisplayed()
+    }
+
+    @Test
+    fun deleted_offersUndoThatRestoresThatWord() {
+        // 「已删除 + 撤销」由 ViewModel 在写库返回后发的事件驱动，不是左滑当场弹。
+        val word = word(1L, "noticing")
+        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
+
+        composeRule.runOnIdle { uiEvents.tryEmit(VocabularyUiEvent.Deleted(word)) }
+
+        composeRule.onNodeWithText(string(R.string.vocabulary_deleted, "noticing"))
+            .assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.vocabulary_undo)).performClick()
+
+        composeRule.runOnIdle { verify(exactly = 1) { viewModel.restoreVocabulary(word) } }
     }
 
     @Test

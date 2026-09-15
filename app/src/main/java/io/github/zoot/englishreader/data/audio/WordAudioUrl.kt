@@ -14,7 +14,7 @@ import java.net.URLEncoder
 object WordAudioUrl {
 
     /**
-     * `type=2` 是英式发音，`type=1` 是美式。阅读页原本就用 2，保持不变。
+     * `type=2` 是美式发音，`type=1` 是英式。阅读页原本就用 2，保持不变。
      */
     fun forWord(word: String): String {
         val encoded = URLEncoder.encode(word, "UTF-8")

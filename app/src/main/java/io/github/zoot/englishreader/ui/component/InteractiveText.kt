@@ -109,6 +109,11 @@ fun InteractiveText(
     val underlineColor = MaterialTheme.colorScheme.primary
     // 整段高亮走同一套观感：贴字形的底纹 + 虚线框，和「选中」完全一致，
     // 而不是给整段套一个色块——那看起来像卡片，不像选中。
+    //
+    // 底纹画在**绘制阶段**而不是写成 AnnotatedString 的 SpanStyle：强度由
+    // animateFloatAsState 驱动，每帧都是一个新颜色值，若参与 annotatedText 的
+    // remember key，渐隐的每一帧都会重建整段 AnnotatedString 并触发重新布局
+    // （长段落上是阅读页热路径）。绘制阶段只重绘，不重排。
     val paragraphHighlightColor = if (paragraphHighlight > 0f) {
         highlightColor.copy(alpha = highlightColor.alpha * paragraphHighlight)
     } else {
@@ -275,14 +280,10 @@ fun InteractiveText(
     // 配不同列表），只键 text 会用旧列表拼出与当前句子不一致的 annotatedText。
     val annotatedText = remember(
         text, sentences, highlightedSentenceIndex, selectedWord, selectedWordStartOffset,
-        selectedWordEndOffset, sentenceIndexOffset, highlightColor, paragraphHighlightColor
+        selectedWordEndOffset, sentenceIndexOffset, highlightColor
     ) {
         buildAnnotatedString {
             append(text)
-            // 整段先铺底纹，句子/单词的高亮随后覆盖在其上。
-            if (paragraphHighlightColor != Color.Transparent) {
-                addStyle(SpanStyle(background = paragraphHighlightColor), 0, text.length)
-            }
             sentences.forEach { sentence ->
                 if (sentence.index + sentenceIndexOffset == highlightedSentenceIndex) {
                     addStyle(SpanStyle(background = highlightColor), sentence.startOffset, sentence.endOffset)
@@ -327,6 +328,17 @@ fun InteractiveText(
             .then(accessibilityModifier)
             .readingTextViewport(visibleViewport)
             .drawWithContent {
+                // 整段底纹画在文字**之前**：它是背景，盖在字上会把正文糊掉。
+                // 句子/单词的高亮仍是 AnnotatedString 的 SpanStyle，由 drawContent
+                // 连同文字一起画出，因此天然叠在这层之上。
+                if (paragraphHighlightColor != Color.Transparent) {
+                    drawTextRangeBackground(
+                        layout = textLayoutResult,
+                        startOffset = 0,
+                        endOffset = text.length,
+                        color = paragraphHighlightColor
+                    )
+                }
                 drawContent()
                 // 整段的虚线框画在最底层：它标的是「这一段」，句子/单词的框叠在其上。
                 if (paragraphHighlightColor != Color.Transparent) {
@@ -634,6 +646,65 @@ private fun findGlyphOffsetAtPosition(
                 !layoutResult.layoutInput.text[candidate].isWhitespace() &&
                 layoutResult.getBoundingBox(candidate).contains(position)
         }
+}
+
+/**
+ * 计算某段字符区间在每一行上要填充的背景矩形，效果等同于 `SpanStyle(background = color)`。
+ *
+ * 存在的理由是**动画**：随帧变化的颜色若写进 AnnotatedString，每帧都会重建文本并
+ * 触发重新布局；画在绘制阶段则只是重绘。
+ *
+ * 行高取 `getLineTop/getLineBottom`（与 SpanStyle 的背景一致覆盖整行行高），左右取该行
+ * 首末非空白字形的边界，因此仍是贴着字形的底纹，不会在行尾拖出一条到容器右边缘的色块。
+ * 拆成纯函数是为了能在 JVM 侧用真实 TextLayoutResult 验证几何——绘制本身测不到，
+ * 而「画出来是空的」正是这个改动最容易犯的错。
+ */
+internal fun textRangeBackgroundRects(
+    layout: TextLayoutResult,
+    startOffset: Int,
+    endOffset: Int
+): List<Rect> {
+    val textLength = layout.layoutInput.text.length
+    if (endOffset <= startOffset || textLength == 0) return emptyList()
+
+    val safeStart = startOffset.coerceIn(0, textLength)
+    val safeEnd = endOffset.coerceIn(safeStart, textLength)
+    if (safeEnd <= safeStart) return emptyList()
+
+    val rects = mutableListOf<Rect>()
+    val firstLine = layout.getLineForOffset(safeStart)
+    val lastLine = layout.getLineForOffset(safeEnd - 1)
+    for (line in firstLine..lastLine) {
+        val lineStart = maxOf(safeStart, layout.getLineStart(line))
+        val lineEnd = minOf(safeEnd, layout.getLineEnd(line, visibleEnd = true))
+        val firstOffset = (lineStart until lineEnd)
+            .firstOrNull { !layout.layoutInput.text[it].isWhitespace() }
+        val lastOffset = (lineEnd - 1 downTo lineStart)
+            .firstOrNull { !layout.layoutInput.text[it].isWhitespace() }
+        if (firstOffset == null || lastOffset == null) continue
+
+        val left = layout.getBoundingBox(firstOffset).left
+        val right = layout.getBoundingBox(lastOffset).right
+        if (right <= left) continue
+        val top = layout.getLineTop(line)
+        rects += Rect(left, top, right, layout.getLineBottom(line))
+    }
+    return rects
+}
+
+/**
+ * 逐行填充某段字符区间的背景。几何由 [textRangeBackgroundRects] 给出。
+ */
+private fun DrawScope.drawTextRangeBackground(
+    layout: TextLayoutResult?,
+    startOffset: Int,
+    endOffset: Int,
+    color: Color
+) {
+    layout ?: return
+    textRangeBackgroundRects(layout, startOffset, endOffset).forEach { rect ->
+        drawRect(color = color, topLeft = rect.topLeft, size = rect.size)
+    }
 }
 
 private fun DrawScope.drawDashedTextRange(

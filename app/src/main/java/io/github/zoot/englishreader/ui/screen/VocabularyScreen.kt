@@ -51,8 +51,8 @@ import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.ui.theme.LocalSegmentedControlColors
 import io.github.zoot.englishreader.ui.theme.NeutralIconGray
 import io.github.zoot.englishreader.ui.theme.SegmentedControlColors
+import io.github.zoot.englishreader.viewmodel.VocabularyUiEvent
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
-import kotlinx.coroutines.launch
 
 // 分段控件尺寸：整体 38dp 高、19dp 圆角（正圆端），滑块比轨道内缩 2dp。
 private val SegmentHeight = 38.dp
@@ -78,29 +78,41 @@ fun VocabularyScreen(
     val loadingAudioWordId by viewModel.loadingAudioWordId.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
-    // 真人音与缓存都拿不到时回落系统 TTS；TTS 也没有引擎才算真失败，那必须说出来——
-    // 用户是主动点了一下，静默无声会被当成「这个功能没做」。
+    // 单一 collector 顺序消费所有一次性事件：showSnackbar 挂起到消息消失，
+    // 因此连续事件天然串行，不会互相抢占 Snackbar 宿主。
     LaunchedEffect(viewModel) {
-        viewModel.audioUnavailable.collect {
-            snackbarHostState.showSnackbar(context.getString(R.string.tts_unavailable))
-        }
-    }
-
-    // 删除后给一次撤销机会：左滑是易误触的手势，而误删一条生词没有任何其它找回途径。
-    val onDelete: (VocabularyEntity) -> Unit = remember(viewModel, snackbarHostState, context) {
-        { word ->
-            viewModel.deleteVocabulary(word)
-            scope.launch {
-                val result = snackbarHostState.showSnackbar(
-                    message = context.getString(R.string.vocabulary_deleted, word.word),
-                    actionLabel = context.getString(R.string.vocabulary_undo)
-                )
-                if (result == SnackbarResult.ActionPerformed) {
-                    viewModel.restoreVocabulary(word)
+        viewModel.uiEvent.collect { event ->
+            when (event) {
+                // 「已删除 + 撤销」只在删除**确实落库后**才弹（事件由 ViewModel 在写库
+                // 返回后发出）。左滑是易误触的手势，而误删一条生词没有别的找回途径。
+                is VocabularyUiEvent.Deleted -> {
+                    val result = snackbarHostState.showSnackbar(
+                        message = context.getString(
+                            R.string.vocabulary_deleted,
+                            event.vocabulary.word
+                        ),
+                        actionLabel = context.getString(R.string.vocabulary_undo)
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        viewModel.restoreVocabulary(event.vocabulary)
+                    }
                 }
+
+                VocabularyUiEvent.DeleteFailed -> snackbarHostState.showSnackbar(
+                    context.getString(R.string.vocabulary_delete_failed)
+                )
+
+                VocabularyUiEvent.RestoreFailed -> snackbarHostState.showSnackbar(
+                    context.getString(R.string.vocabulary_restore_failed)
+                )
+
+                // 真人音与缓存都拿不到时回落系统 TTS；TTS 也没有引擎才算真失败，
+                // 那必须说出来——用户是主动点了一下，静默无声会被当成「功能没做」。
+                VocabularyUiEvent.AudioUnavailable -> snackbarHostState.showSnackbar(
+                    context.getString(R.string.tts_unavailable)
+                )
             }
         }
     }
@@ -158,7 +170,7 @@ fun VocabularyScreen(
                                         isPreparingAudio = loadingAudioWordId == word.id,
                                         onPlayAudio = { viewModel.playWordAudio(word) },
                                         onOpenArticle = onOpenArticle,
-                                        onDelete = { onDelete(word) }
+                                        onDelete = { viewModel.deleteVocabulary(word) }
                                     )
                                 }
                             }
@@ -363,13 +375,14 @@ private fun GroupHeader(
  *
  * 删除是**破坏性且不可逆**的操作，所以：
  *  - 只允许从右往左滑（[SwipeToDismissBox] 的 StartToEnd 关掉），避免方向上的误触；
- *  - [consumed] 保证一次手势只派发一次删除——`confirmValueChange` 会在目标值
- *    来回穿越阈值时被反复调用；
+ *  - `confirmValueChange` 派发删除后返回 **false**，行滑回原位，由列表数据回流把它
+ *    移除。返回 true 会让行停在 dismissed 锚点上：删除万一没落库，Flow 不回流、
+ *    行也滑不回来（StartToEnd 已关、`Settled` 又被拒），那一行就永久卡在屏幕外——
+ *    `swipeLeft_rowSlidesBackAndWaitsForTheListToDropIt` 盯的就是这个；
+ *  - 重复派发的去重在 ViewModel（按 id），不在这里：它跨重组存活，也可单测；
  *  - 滑动过程中**不画任何东西**。早先在右侧放了一个垃圾桶，随进度由灰变红；它虽然在
- *    静止时被行内容盖住，却让「这次滑动会删掉这一行」缺少明确的视觉结果。现在直接让
- *    行本身滑走，就是这个手势最直白的结果；
- *  - 自定义无障碍操作是滑动手势在 TalkBack 下的等价入口。手势对读屏用户不可达，
- *    去掉它这个界面就变成「只能看不能删」——所以图标可以删，这个不能删。
+ *    静止时被行内容盖住，却是整屏最抢眼的元素，而行本身跟手滑动已经说明了这个手势
+ *    要做什么。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -381,36 +394,18 @@ private fun SwipeToDeleteWordRow(
     onOpenArticle: (articleId: Long, word: String) -> Unit,
     onDelete: () -> Unit
 ) {
-    var consumed by remember { mutableStateOf(false) }
-    val deleteActionLabel = stringResource(R.string.delete_vocabulary)
-
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.EndToStart) {
-                if (!consumed) {
-                    consumed = true
-                    onDelete()
-                }
-                true
-            } else {
-                false
-            }
+            if (value == SwipeToDismissBoxValue.EndToStart) onDelete()
+            // 一律不接受新状态：行滑回原位，等列表把它移除。
+            false
         }
     )
 
     SwipeToDismissBox(
         state = dismissState,
         enableDismissFromStartToEnd = false,
-        modifier = Modifier
-            .testTag("vocabulary-word-${word.id}")
-            .semantics {
-                customActions = listOf(
-                    CustomAccessibilityAction(deleteActionLabel) {
-                        onDelete()
-                        true
-                    }
-                )
-            },
+        modifier = Modifier.testTag("vocabulary-word-${word.id}"),
         backgroundContent = {}
     ) {
         WordRow(
@@ -418,7 +413,8 @@ private fun SwipeToDeleteWordRow(
             detail = detail,
             isPreparingAudio = isPreparingAudio,
             onPlayAudio = onPlayAudio,
-            onOpenArticle = onOpenArticle
+            onOpenArticle = onOpenArticle,
+            onDelete = onDelete
         )
     }
 }
@@ -440,7 +436,8 @@ private fun WordRow(
     detail: VocabularyWordDetail?,
     isPreparingAudio: Boolean,
     onPlayAudio: () -> Unit,
-    onOpenArticle: (articleId: Long, word: String) -> Unit
+    onOpenArticle: (articleId: Long, word: String) -> Unit,
+    onDelete: () -> Unit
 ) {
     // clickable 会合并子节点语义，读屏只会念出单词本身「noticing，按钮」——听不出按下去
     // 会做什么。用 contentDescription 覆盖成动作描述。
@@ -449,6 +446,7 @@ private fun WordRow(
     } else {
         stringResource(R.string.word_play_pronunciation, word.word)
     }
+    val deleteActionLabel = stringResource(R.string.delete_vocabulary)
 
     Column(
         modifier = Modifier
@@ -457,11 +455,25 @@ private fun WordRow(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         // 单词本身就是播放按钮：喇叭图标只是可点区域的提示，不是独立的第二次点击目标。
+        //
+        // 删除的自定义无障碍操作必须挂在**这个**节点上：它因 clickable 而合并子节点、
+        // 有 contentDescription，是读屏真正会聚焦的元素，自定义操作也只出现在当前
+        // 获得焦点的节点的局部菜单里。挂在外层 SwipeToDismissBox 上不行——那个节点
+        // 既不合并子节点也没有文本，读屏遍历会直接跳过它，删除入口等于不存在。
+        // 左滑手势对读屏用户不可达，这是他们唯一的删除入口。
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(role = Role.Button, onClick = onPlayAudio)
-                .semantics { contentDescription = playDescription },
+                .semantics {
+                    contentDescription = playDescription
+                    customActions = listOf(
+                        CustomAccessibilityAction(deleteActionLabel) {
+                            onDelete()
+                            true
+                        }
+                    )
+                },
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {

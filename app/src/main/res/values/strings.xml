@@ -227,6 +227,8 @@
     <string name="vocabulary_headword_note">→ %1$s</string>
     <string name="vocabulary_deleted">已删除“%1$s”</string>
     <string name="vocabulary_undo">撤销</string>
+    <string name="vocabulary_delete_failed">删除失败，这个词还在生词本里</string>
+    <string name="vocabulary_restore_failed">撤销失败，这个词没能恢复</string>
 
     <!-- Reading screen - empty state -->
     <string name="article_empty_content">这篇文章没有可显示的内容</string>

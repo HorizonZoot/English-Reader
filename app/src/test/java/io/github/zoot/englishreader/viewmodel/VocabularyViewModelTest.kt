@@ -8,6 +8,7 @@ import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.entity.VocabularyWithSource
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
 import io.github.zoot.englishreader.data.repository.OfflineLookupResult
+import io.github.zoot.englishreader.data.repository.VocabularyInsertResult
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
@@ -21,8 +22,10 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -170,6 +173,65 @@ class VocabularyViewModelTest {
     }
 
     @Test
+    fun deleteVocabulary_afterPersisting_emitsDeletedWithThatWord() = runTest {
+        val entity = vocab("delete-me", 99)
+
+        viewModel.uiEvent.test {
+            viewModel.deleteVocabulary(entity)
+
+            // 撤销要用这个实体重新插入，所以事件必须带着它。
+            assertEquals(VocabularyUiEvent.Deleted(entity), awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun deleteVocabulary_writeFails_reportsFailureInsteadOfSuccess() = runTest {
+        val entity = vocab("delete-me", 99)
+        coEvery { vocabularyRepository.deleteVocabulary(entity) } throws RuntimeException("db down")
+
+        viewModel.uiEvent.test {
+            viewModel.deleteVocabulary(entity)
+
+            // 没落库就绝不能报「已删除」——那条 Snackbar 还带撤销，用户会以为词已经没了。
+            assertEquals(VocabularyUiEvent.DeleteFailed, awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun deleteVocabulary_whileFirstStillPending_doesNotDeleteTwice() = runTest {
+        // 左滑的 confirmValueChange 可能在目标值来回穿越阈值时被反复调用，所以去重必须
+        // 真的挡住「前一次还没写完」的第二次调用。
+        //
+        // 判据必须让第一次删除**可观察地挂起**：`MainDispatcherRule` 用的是
+        // UnconfinedTestDispatcher，launch 会 eager 跑到底（连 finally 摘除 id 一起），
+        // 直接连调两次时根本不存在在途窗口，那样的测试验不到任何东西。
+        val entity = vocab("delete-me", 99)
+        val firstWriteStarted = CompletableDeferred<Unit>()
+        val releaseFirstWrite = CompletableDeferred<Unit>()
+        var writeCount = 0
+        coEvery { vocabularyRepository.deleteVocabulary(entity) } coAnswers {
+            if (++writeCount == 1) {
+                firstWriteStarted.complete(Unit)
+                releaseFirstWrite.await()
+            }
+        }
+
+        viewModel.deleteVocabulary(entity)
+        firstWriteStarted.await()
+
+        // 第一次仍挂在写库里，此时的重复派发必须被丢弃。
+        viewModel.deleteVocabulary(entity)
+        coVerify(exactly = 1) { vocabularyRepository.deleteVocabulary(entity) }
+
+        // 放行后去重登记必须解除：删掉再撤销、再删同一个 id 还得能删。
+        releaseFirstWrite.complete(Unit)
+        viewModel.deleteVocabulary(entity)
+        coVerify(exactly = 2) { vocabularyRepository.deleteVocabulary(entity) }
+    }
+
+    @Test
     fun restoreVocabulary_zeroesIdBeforeInsert() = runTest {
         val entity = vocab("restore-me", 99)
 
@@ -178,6 +240,35 @@ class VocabularyViewModelTest {
         // 带原 id 插入会写成显式主键，可能覆盖删除后新建的行。
         coVerify(exactly = 1) { vocabularyRepository.insertVocabulary(entity.copy(id = 0)) }
         coVerify(exactly = 0) { vocabularyRepository.insertVocabulary(entity) }
+    }
+
+    @Test
+    fun restoreVocabulary_writeFails_reportsFailure() = runTest {
+        val entity = vocab("restore-me", 99)
+        coEvery { vocabularyRepository.insertVocabulary(any()) } throws RuntimeException("db down")
+
+        viewModel.uiEvent.test {
+            viewModel.restoreVocabulary(entity)
+
+            // 撤销失败必须说出来，否则用户以为词回来了，实际没有。
+            assertEquals(VocabularyUiEvent.RestoreFailed, awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun restoreVocabulary_alreadyExists_isNotReportedAsFailure() = runTest {
+        // UNIQUE(word, articleId) 冲突不是失败：词确实在生词本里，那正是用户要的结果。
+        val entity = vocab("restore-me", 99)
+        coEvery { vocabularyRepository.insertVocabulary(any()) } returns
+            VocabularyInsertResult.AlreadyExists
+
+        viewModel.uiEvent.test {
+            viewModel.restoreVocabulary(entity)
+            runCurrent()
+
+            expectNoEvents()
+        }
     }
 
     @Test

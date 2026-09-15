@@ -36,8 +36,10 @@ import org.robolectric.annotation.Config
  * [ImportBudget.MAX_CHAPTER_CHARS] 以内，所以这不需要 ADR-013 要求的真机渲染基线。
  *
  * 实测结果 **31/32**。唯一仍被拒的是 `gutenberg-4300`（*Ulysses*）：Molly Bloom 那段
- * 21,381 字符的独白没有标点，分句器找不到任何边界，切分器于是原样输出并让段落闸门拒掉它。
- * 切到句子以下（按字符硬切）会在正文中间断句 —— 那比拒绝更糟，用户读到坏文本且无提示。
+ * 21,381 字符的独白，ICU 报 `sentences=1` —— 整段就是一个句子，**没有内部边界可切**
+ * （不是「没有标点」：ICU 找到了一句，只是那一句就是全段）。切分器于是原样输出，
+ * 由段落闸门拒掉它。切到句子以下（按字符硬切）会在正文中间断句 —— 那比拒绝更糟，
+ * 用户读到坏文本且无提示。
  *
  * ⚠️ 这一本也是脚本与生产的**真实分歧点**：`measure_corpus.py` 把超长段落按均分建模
  * （它没有分句器，ICU 只在 Android 上），所以它预测 32/32。分歧记在下面的 [predicted] 表里
@@ -90,8 +92,9 @@ class CorpusImportSurveyTest {
         "gutenberg-2542" to Verdict.PASS,
         "gutenberg-2701" to Verdict.PASS,
         "gutenberg-345" to Verdict.PASS,
-        // 唯一仍被拒的一本：Molly Bloom 的独白 21,381 字符、**整段没有句末标点**，
-        // 于是分句器给不出任何边界，ChapterSplitter 按设计原样输出它，由段落闸门拒绝。
+        // 唯一仍被拒的一本：Molly Bloom 的独白 21,381 字符，ICU 实测报 `sentences=1`
+        // —— 整段就是一个句子，没有内部边界可切，ChapterSplitter 按设计原样输出它，
+        // 由段落闸门拒绝。
         // 切到句子以下需要按字符硬切，那会在词中间断开正文。
         // `measure_corpus.py` 对这本预测 PASS —— 它没有分句器，把超长段落按均分建模，
         // 看不见「无句子边界」这种输入。这是脚本的已知盲区，不是 parser 的 bug。

@@ -1425,11 +1425,31 @@ class ReadingViewModel @Inject constructor(
 
     /**
      * 用系统 TTS 朗读，语言包/引擎不可用时发 [ttsUnavailable] 事件（UI 映射为本地化提示）。
+     *
+     * 联网授权从设置读取，与整句朗读同一个开关：单词兜底原先硬编码「只用本地语音」，于是
+     * 即便用户已经开启联网 TTS，查词兜底也只能用那套机械的离线拼接音。授权仍然由用户掌握，
+     * 这里只是不再替他否决。
+     *
+     * ## 为什么要占用 [playWordAudioJob] 与代次
+     *
+     * 读偏好是 suspend，所以本函数必须起协程；而**游离的协程会绕开 [stopAudio]**——它靠
+     * `playWordAudioJob?.cancel()` 取消在途请求。用户关掉弹窗后，一个没人持有的协程仍会恢复
+     * 并调 `speakWord`，于是机器音在弹窗消失之后才响。这正是本文件 `playWordAudioJob` 声明处
+     * 记着的那个坑（「原来那个协程不被任何字段持有」），不能重新引入。
+     *
+     * 代次校验与 cancel 各挡一格，理由同 [playWordAudio]：cancel 只在挂起点生效，已越过
+     * `first()` 的那次只能靠代次作废。
      */
     private fun speakViaTts(word: String) {
-        ttsPlayer.speak(word) {
-            // trySend：CONFLATED channel 永不阻塞，回调可能在主线程同步触发，无需起协程。
-            _ttsUnavailable.trySend(Unit)
+        val generation = ++audioRequestGeneration
+        playWordAudioJob?.cancel()
+        playWordAudioJob = viewModelScope.launch {
+            val allowNetwork = settingsPreferences.allowNetworkTts.first()
+            if (generation != audioRequestGeneration) return@launch
+            ttsPlayer.speakWord(word, allowNetwork) {
+                // trySend：CONFLATED channel 永不阻塞，回调可能在主线程同步触发，无需起协程。
+                _ttsUnavailable.trySend(Unit)
+            }
         }
     }
 

@@ -332,7 +332,7 @@ class TtsPlayerTest {
         val engine = engine(TextToSpeech.LANG_AVAILABLE, setOf(localVoice, networkVoice))
         player.speakReading("Reading.", TtsReadingSettings("test.engine/network", 2f), true) {}
         initialize()
-        player.speak("word")
+        player.speakWord("word", allowNetwork = false)
 
         io.mockk.verifyOrder {
             engine.setVoice(networkVoice)
@@ -374,7 +374,7 @@ class TtsPlayerTest {
         every { engine.setSpeechRate(any()) } returns TextToSpeech.ERROR
         val unavailable = mutableListOf<Boolean>()
 
-        player.speak("word") { unavailable += true }
+        player.speakWord("word", allowNetwork = false) { unavailable += true }
         initialize()
 
         assertTrue(unavailable.isEmpty())

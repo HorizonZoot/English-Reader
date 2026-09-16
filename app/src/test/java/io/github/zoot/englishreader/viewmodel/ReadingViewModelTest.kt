@@ -1011,7 +1011,7 @@ class ReadingViewModelTest {
         viewModel.lookupWord("success")
 
         coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
-        verify(exactly = 0) { ttsPlayer.speak(any(), any()) }
+        verify(exactly = 0) { ttsPlayer.speakWord(any(), any(), any()) }
     }
 
     /**
@@ -1035,7 +1035,7 @@ class ReadingViewModelTest {
         coVerify(exactly = 1) {
             audioPlayer.play(url = local.absolutePath, onComplete = any(), onError = any())
         }
-        verify(exactly = 0) { ttsPlayer.speak(any(), any()) }
+        verify(exactly = 0) { ttsPlayer.speakWord(any(), any(), any()) }
     }
 
     /**
@@ -1052,7 +1052,7 @@ class ReadingViewModelTest {
         viewModel.playWordAudio("lives", "https://dict.youdao.com/dictvoice?audio=lives&type=2", silent = false)
         advanceUntilIdle()
 
-        verify(exactly = 1) { ttsPlayer.speak(eq("lives"), any()) }
+        verify(exactly = 1) { ttsPlayer.speakWord(eq("lives"), any(), any()) }
         coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
         coVerify(exactly = 0) { pronunciationAudioCache.download(any(), any()) }
     }
@@ -1486,7 +1486,7 @@ class ReadingViewModelTest {
         advanceUntilIdle()
 
         assertFalse("loading state must clear on error", viewModel.isLoadingAudio.value)
-        verify(exactly = 1) { ttsPlayer.speak(eq("lives"), any()) }
+        verify(exactly = 1) { ttsPlayer.speakWord(eq("lives"), any(), any()) }
     }
 
     @Test
@@ -1600,7 +1600,7 @@ class ReadingViewModelTest {
         assertEquals("alpha", viewModel.selectedWord.value)
         assertNull(viewModel.wordDefinition.value)
         coVerify(exactly = 0) { dictionaryRepository.lookupOffline(any()) }
-        verify(exactly = 0) { ttsPlayer.speak(any(), any()) }
+        verify(exactly = 0) { ttsPlayer.speakWord(any(), any(), any()) }
     }
 
     @Test

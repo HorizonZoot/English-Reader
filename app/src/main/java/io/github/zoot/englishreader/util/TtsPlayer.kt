@@ -115,9 +115,26 @@ class TtsPlayer internal constructor(
 
     private class VoiceSelection(val voice: Voice?, val capability: TtsCapability)
 
-    /** Word pronunciation retains its local-only fallback. */
-    fun speak(text: String, onUnavailable: () -> Unit = {}) {
-        speakInternal(text, TtsReadingSettings(), allowNetwork = false, applySpeechRateStrictly = false) { result ->
+    /**
+     * 单词发音的 TTS 兜底。
+     *
+     * [allowNetwork] 必须由调用方从 `SettingsPreferences.allowNetworkTts` 读出来传进来，
+     * 不能像原先那样硬编码 `false`：那让单词发音永远只能用本地语音，而 Google 的本地语音是
+     * 老式拼接音，网络语音才是神经网络音。用户既然已经为整句朗读授权了联网，单词没有理由
+     * 被排除在外——同一个开关，同一个用户意图。
+     *
+     * 传 `false` 时行为与改动前完全一致（只挑本地语音），所以未授权的用户不受影响。
+     *
+     * 不叫 `speak` 而另起名字，是为了避开与三参 `speak(text, allowNetwork, onResult)` 的重载
+     * 歧义：两者的尾随 lambda 一个是 `() -> Unit`、一个是 `(TtsPlaybackResult) -> Unit`，
+     * 空 lambda `{}` 对两者都成立，编译器选哪个取决于调用点写法，那种脆弱性不值得省一个名字。
+     */
+    fun speakWord(
+        text: String,
+        allowNetwork: Boolean,
+        onUnavailable: () -> Unit = {}
+    ) {
+        speakInternal(text, TtsReadingSettings(), allowNetwork, applySpeechRateStrictly = false) { result ->
             if (result is TtsPlaybackResult.Failed) onUnavailable()
         }
     }
@@ -289,7 +306,13 @@ class TtsPlayer internal constructor(
                 ?: voices.none { !it.isNetworkConnectionRequired })
             val decision = TtsVoicePolicy.select(
                 voices.map {
-                    TtsVoiceCandidate(id(it), it.locale.language, it.locale.country, it.isNetworkConnectionRequired)
+                    TtsVoiceCandidate(
+                        id(it),
+                        it.locale.language,
+                        it.locale.country,
+                        it.isNetworkConnectionRequired,
+                        it.quality
+                    )
                 },
                 allowNetwork,
                 networkAvailable = needsNetwork && networkChecker.isOnline(),

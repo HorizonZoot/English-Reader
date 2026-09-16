@@ -9,6 +9,7 @@ import io.github.zoot.englishreader.data.entity.VocabularyWithSource
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
 import io.github.zoot.englishreader.data.repository.OfflineLookupResult
 import io.github.zoot.englishreader.data.repository.VocabularyInsertResult
+import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
@@ -55,6 +56,7 @@ class VocabularyViewModelTest {
     private lateinit var networkChecker: NetworkChecker
     private lateinit var ttsPlayer: TtsPlayer
     private lateinit var pronunciationAudioCache: PronunciationAudioCache
+    private lateinit var settingsPreferences: SettingsPreferences
     private lateinit var viewModel: VocabularyViewModel
 
     private fun vocab(word: String, id: Long): VocabularyEntity =
@@ -93,15 +95,20 @@ class VocabularyViewModelTest {
         networkChecker = mockk(relaxed = true)
         ttsPlayer = mockk(relaxed = true)
         pronunciationAudioCache = mockk(relaxed = true)
+        settingsPreferences = mockk(relaxed = true)
         every { vocabularyRepository.getAllVocabularyWithSource() } returns rowsFlow
         every { networkChecker.isOnline() } returns true
+        // 默认未授权联网 TTS：与产品默认值一致（SettingsPreferences.allowNetworkTts 缺省 false），
+        // 于是既有用例断言的仍是「单词发音只用本地语音」这个改动前的行为。
+        every { settingsPreferences.allowNetworkTts } returns MutableStateFlow(false)
         viewModel = VocabularyViewModel(
             vocabularyRepository = vocabularyRepository,
             dictionaryRepository = dictionaryRepository,
             audioPlayer = audioPlayer,
             networkChecker = networkChecker,
             ttsPlayer = ttsPlayer,
-            pronunciationAudioCache = pronunciationAudioCache
+            pronunciationAudioCache = pronunciationAudioCache,
+            settingsPreferences = settingsPreferences
         )
     }
 
@@ -376,7 +383,41 @@ class VocabularyViewModelTest {
         viewModel.playWordAudio(entity)
 
         coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
-        verify(exactly = 1) { ttsPlayer.speak("noticing", any()) }
+        verify(exactly = 1) { ttsPlayer.speakWord("noticing", any(), any()) }
+    }
+
+    /**
+     * 已授权联网 TTS 时，单词兜底必须把 `true` 传下去。
+     *
+     * 改动前 `TtsPlayer.speak` 把 `allowNetwork` 硬编码成 false，于是单词发音永远只能用本地
+     * 语音——那是 Google 的老式拼接音，而网络语音才是神经网络音。用户既然已经为整句朗读开了
+     * 这个开关，单词没有理由被排除在外。
+     *
+     * 断言必须用 `eq(true)` 而不是 `any()`：上面那条 `fallsBackToTts` 用例正是用 `any()`，
+     * 所以它在「授权被丢弃、永远传 false」的实现下照样绿。
+     */
+    @Test
+    fun playWordAudio_networkTtsAuthorized_passesTheConsentThrough() = runTest {
+        every { settingsPreferences.allowNetworkTts } returns MutableStateFlow(true)
+        coEvery { pronunciationAudioCache.get("noticing") } returns null
+        every { networkChecker.isOnline() } returns false
+
+        viewModel.playWordAudio(vocab("noticing", 1L))
+
+        verify(exactly = 1) { ttsPlayer.speakWord("noticing", eq(true), any()) }
+    }
+
+    /** 未授权时仍然只用本地语音——这一路不得绕过用户的同意。 */
+    @Test
+    fun playWordAudio_networkTtsNotAuthorized_keepsWordFallbackLocalOnly() = runTest {
+        // setup 里默认就是 false（与产品默认一致），这里显式写出来让判据自解释。
+        every { settingsPreferences.allowNetworkTts } returns MutableStateFlow(false)
+        coEvery { pronunciationAudioCache.get("noticing") } returns null
+        every { networkChecker.isOnline() } returns false
+
+        viewModel.playWordAudio(vocab("noticing", 1L))
+
+        verify(exactly = 1) { ttsPlayer.speakWord("noticing", eq(false), any()) }
     }
 
     @Test

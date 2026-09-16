@@ -7,6 +7,7 @@ import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
 import io.github.zoot.englishreader.data.audio.WordAudioUrl
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.entity.VocabularyWithSource
+import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.ui.screen.vocabulary.AlphabetGrouper
@@ -38,7 +39,8 @@ class VocabularyViewModel @Inject constructor(
     private val audioPlayer: AudioPlayer,
     private val networkChecker: NetworkChecker,
     private val ttsPlayer: TtsPlayer,
-    private val pronunciationAudioCache: PronunciationAudioCache
+    private val pronunciationAudioCache: PronunciationAudioCache,
+    private val settingsPreferences: SettingsPreferences
 ) : ViewModel() {
 
     private val timeGrouper = TimeGrouper()
@@ -262,9 +264,19 @@ class VocabularyViewModel @Inject constructor(
         }
     }
 
-    private fun speakViaTts(word: String) {
+    /**
+     * 用系统 TTS 兜底朗读。
+     *
+     * 联网语音的授权**每次现读**，不缓存：用户可能刚在设置里关掉它，而缓存值会让这一次朗读
+     * 仍然走网络——那是把「已撤销的同意」当成有效同意。`allowNetworkTts` 默认 false，
+     * 所以未表态的用户仍然只用本地语音。
+     */
+    private suspend fun speakViaTts(word: String) {
+        val allowNetwork = settingsPreferences.allowNetworkTts.first()
         // trySend：Channel 有缓冲、永不阻塞，回调可能同步触发，无需起协程。
-        ttsPlayer.speak(word) { _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable) }
+        ttsPlayer.speakWord(word, allowNetwork) {
+            _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable)
+        }
     }
 
     override fun onCleared() {

@@ -302,7 +302,7 @@ class ReadingTtsViewModelTest {
 
         assertEquals("First. ", calls.single().text)
         assertEquals(ReadingTtsPhase.PLAYING, vm.readingTtsState.value.phase)
-        verify(exactly = 0) { player.speak("old", any()) }
+        verify(exactly = 0) { player.speakWord("old", any(), any()) }
     }
 
     @Test

@@ -47,6 +47,11 @@
     <string name="library_section_title">我的阅读</string>
     <string name="library_more_actions">%1$s 的更多操作</string>
     <string name="library_importing">正在导入</string>
+    <!-- 导入状态指示器。与 library_importing（按钮的无障碍描述）分开：这三条是屏幕中央
+         显示给所有用户看的正文，省略号是刻意的「进行中」暗示。 -->
+    <string name="import_status_importing">正在导入…</string>
+    <string name="import_status_succeeded">导入完成</string>
+    <string name="import_status_failed">导入失败</string>
     <string name="import_choose_method">选择一种方式，开始阅读。</string>
     <string name="import_from_file">从文件导入</string>
     <string name="import_file_formats">TXT / Markdown / EPUB</string>

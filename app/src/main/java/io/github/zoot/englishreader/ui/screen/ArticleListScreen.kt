@@ -39,6 +39,8 @@ import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.importer.ImportFormatDetector
+import io.github.zoot.englishreader.ui.component.ImportOutcome
+import io.github.zoot.englishreader.ui.component.ImportStatusOverlay
 import io.github.zoot.englishreader.ui.dialog.ImportDialog
 import io.github.zoot.englishreader.ui.dialog.PasteTextDialog
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
@@ -64,6 +66,9 @@ fun ArticleListScreen(
     var showPasteDialog by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    // 导入终态闩锁。由下面那个既有 collector 顺带置位，而不是新起一个 uiEvent collector——
+    // 理由见该 collector 自己的注释（第二个 collector 会放大 Snackbar 的顺序竞争）。
+    var importOutcome by remember { mutableStateOf<ImportOutcome?>(null) }
 
     // 文件选择器：用 OpenDocument 而非 GetContent——前者接受 MIME 数组、明确走系统文档
     // 选择器，适合多格式；GetContent 在部分 ROM 上不走 SAF，可能路由到图库。
@@ -78,6 +83,16 @@ fun ArticleListScreen(
     // 单一事件流：不再为「导入成功」加第三个 collector（会放大 Snackbar 顺序竞争）
     LaunchedEffect(Unit) {
         viewModel.uiEvent.collect { event ->
+            // 先记终态再弹 Snackbar：showSnackbar 会挂起到 Snackbar 消失，放在它之后
+            // 指示器就得等整条 Snackbar 播完才收尾。删除失败与导入无关，不动闩锁。
+            when (event) {
+                is ArticleListUiEvent.ImportSucceeded,
+                is ArticleListUiEvent.BookImportSucceeded -> importOutcome = ImportOutcome.SUCCESS
+
+                is ArticleListUiEvent.ImportFailed -> importOutcome = ImportOutcome.FAILURE
+
+                is ArticleListUiEvent.DeleteFailed -> Unit
+            }
             val message = when (event) {
                 is ArticleListUiEvent.ImportSucceeded -> ErrorMessageMapper.mapImportSuccess(
                     context,
@@ -194,9 +209,12 @@ fun ArticleListScreen(
             contentAlignment = Alignment.TopCenter
         ) {
             if (libraryItems.isEmpty()) {
-                // 空态带一行格式说明：整本 EPUB 只覆盖约三分之一的真实公版书
-                // （见 ADR-013），单靠失败提示要用户连试几本才明白，而那时候
-                // 他们更可能认为是 app 坏了而不是版本不合。
+                // 空态带一行格式说明：让用户一眼知道支持哪些格式，否则挑错文件时
+                // 更可能认为是 app 坏了而不是格式不合。
+                //
+                // 这里原先写着「整本 EPUB 只覆盖约三分之一的真实公版书」——那是按段落
+                // 边界切分之前的数字。现在 32 本真实语料里 31 本可导入（97%，见 ADR-013），
+                // 唯一失败的《尤利西斯》是因为那段 21,381 字符的独白没有任何句子边界可切。
                 Column(
                     modifier = Modifier
                         .align(Alignment.Center)
@@ -267,6 +285,16 @@ fun ArticleListScreen(
                     }
                 }
             }
+
+            // 覆盖在内容之上、不拦触摸：导入期间用户仍可滚动书库或进入已有书。
+            // 放在这个 Box 的最后一个子节点，所以画在列表之上；Center 对齐与本 Box
+            // 的 TopCenter 默认值无关。
+            ImportStatusOverlay(
+                isImporting = isImporting,
+                outcome = importOutcome,
+                onOutcomeShown = { importOutcome = null },
+                modifier = Modifier.align(Alignment.Center)
+            )
         }
     }
 }
@@ -307,15 +335,10 @@ private fun LibraryHeader(isImporting: Boolean, onImport: () -> Unit) {
                         .size(48.dp)
                         .semantics { contentDescription = importDescription }
                 ) {
-                    if (isImporting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = LocalContentColor.current
-                        )
-                    } else {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                    }
+                    // 导入中不在按钮里再放一个 spinner：屏幕中央的 ImportStatusOverlay 已经
+                    // 在表达「正在工作」，两处同时转正是那种廉价的加载感。按钮仍然禁用，
+                    // 且 contentDescription 会切成「正在导入」，无障碍信息不丢。
+                    Icon(Icons.Default.Add, contentDescription = null)
                 }
             }
             Text(

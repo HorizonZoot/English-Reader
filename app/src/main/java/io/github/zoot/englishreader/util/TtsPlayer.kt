@@ -99,6 +99,7 @@ class TtsPlayer internal constructor(
         val allowNetwork: Boolean,
         val settings: TtsReadingSettings,
         val applySpeechRateStrictly: Boolean,
+        val fallBackWhenPreferredUnusable: Boolean,
         val callback: (TtsPlaybackResult) -> Unit
     )
 
@@ -125,16 +126,37 @@ class TtsPlayer internal constructor(
      *
      * 传 `false` 时行为与改动前完全一致（只挑本地语音），所以未授权的用户不受影响。
      *
+     * [voiceId] 同理，必须由调用方从 `SettingsPreferences.ttsReadingSettings` 读出来传进来。
+     * 原先这里传 `TtsReadingSettings()`，即 `voiceId = null`，于是**用户在设置里挑的语音对单词
+     * 发音完全无效**。那在 09-10 引入语音设置时是刻意缩小爆炸半径（见该任务 `prd.md:61`），但
+     * 与自动选择的「离线优先」叠加后会变成用户听得见的割裂：好语音基本都是网络语音，于是一个
+     * 已授权联网、且明确挑了网络神经语音的用户，整句是神经音、点单词却掉回本地拼接音。
+     *
+     * 本参数**不是**整个 [TtsReadingSettings]：语速刻意不跟随。那个滑杆是为连续阅读调的，
+     * 2.0x 的单句朗读合理，2.0x 的单个词只会听不清；单词恒用 `DEFAULT_RATE`。
+     * 没有默认值是刻意的——两个生产调用点都必须显式表态，否则「单词无视你选的语音」这个 bug
+     * 会被一个省略的实参悄悄写回来。
+     *
+     * 选中的语音当前用不了时**退回自动选择而不是报错**，理由见
+     * [TtsVoicePolicy.select] 的 `fallBackWhenPreferredUnusable`。
+     *
      * 不叫 `speak` 而另起名字，是为了避开与三参 `speak(text, allowNetwork, onResult)` 的重载
      * 歧义：两者的尾随 lambda 一个是 `() -> Unit`、一个是 `(TtsPlaybackResult) -> Unit`，
      * 空 lambda `{}` 对两者都成立，编译器选哪个取决于调用点写法，那种脆弱性不值得省一个名字。
      */
     fun speakWord(
         text: String,
+        voiceId: String?,
         allowNetwork: Boolean,
         onUnavailable: () -> Unit = {}
     ) {
-        speakInternal(text, TtsReadingSettings(), allowNetwork, applySpeechRateStrictly = false) { result ->
+        speakInternal(
+            text,
+            TtsReadingSettings(voiceId = voiceId),
+            allowNetwork,
+            applySpeechRateStrictly = false,
+            fallBackWhenPreferredUnusable = true
+        ) { result ->
             if (result is TtsPlaybackResult.Failed) onUnavailable()
         }
     }
@@ -150,13 +172,21 @@ class TtsPlayer internal constructor(
         settings: TtsReadingSettings,
         allowNetwork: Boolean,
         onResult: (TtsPlaybackResult) -> Unit
-    ) = speakInternal(text, settings, allowNetwork, applySpeechRateStrictly = true, onResult)
+    ) = speakInternal(
+        text,
+        settings,
+        allowNetwork,
+        applySpeechRateStrictly = true,
+        fallBackWhenPreferredUnusable = false,
+        onResult = onResult
+    )
 
     private fun speakInternal(
         text: String,
         settings: TtsReadingSettings,
         allowNetwork: Boolean,
         applySpeechRateStrictly: Boolean,
+        fallBackWhenPreferredUnusable: Boolean,
         onResult: (TtsPlaybackResult) -> Unit
     ) = onMain {
         if (text.isBlank()) return@onMain
@@ -166,6 +196,7 @@ class TtsPlayer internal constructor(
             allowNetwork,
             settings.normalized(),
             applySpeechRateStrictly,
+            fallBackWhenPreferredUnusable,
             onResult
         )
         if (engineReady) {
@@ -281,13 +312,19 @@ class TtsPlayer internal constructor(
         val refresh = pendingRefresh
         pendingRefresh = null
         if (refresh != null) {
-            inspectVoice(refresh.allowNetwork, refresh.settings.voiceId)
+            // 严格语义：设置页要看到「你选的语音现在到底能不能用」的真实结论，
+            // 退回自动选择会让面板显示 Ready 而用户以为自己选的那个生效了。
+            inspectVoice(refresh.allowNetwork, refresh.settings.voiceId, fallBackWhenPreferredUnusable = false)
             refresh.callback(voiceSnapshot)
         }
         if (request != null && generation == speechGeneration) speakWithCurrentEngine(request)
     }
 
-    private fun inspectVoice(allowNetwork: Boolean, preferredId: String?): VoiceSelection {
+    private fun inspectVoice(
+        allowNetwork: Boolean,
+        preferredId: String?,
+        fallBackWhenPreferredUnusable: Boolean
+    ): VoiceSelection {
         val engine = tts
         if (!engineReady || engine == null) {
             voiceSnapshot = TtsVoiceSnapshot(capability = capability)
@@ -316,7 +353,8 @@ class TtsPlayer internal constructor(
                 },
                 allowNetwork,
                 networkAvailable = needsNetwork && networkChecker.isOnline(),
-                preferredId = preferredId
+                preferredId = preferredId,
+                fallBackWhenPreferredUnusable = fallBackWhenPreferredUnusable
             )
             val current = when (decision.availability) {
                 TtsVoiceAvailability.LOCAL -> TtsCapability.Ready(TtsVoiceMode.LOCAL)
@@ -346,7 +384,11 @@ class TtsPlayer internal constructor(
     }
 
     private fun speakWithCurrentEngine(request: PendingSpeak) {
-        val selection = inspectVoice(request.allowNetwork, request.settings.voiceId)
+        val selection = inspectVoice(
+            request.allowNetwork,
+            request.settings.voiceId,
+            request.fallBackWhenPreferredUnusable
+        )
         val voice = selection.voice
         val ready = selection.capability as? TtsCapability.Ready
         val engine = tts

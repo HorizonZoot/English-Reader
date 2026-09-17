@@ -332,7 +332,7 @@ class TtsPlayerTest {
         val engine = engine(TextToSpeech.LANG_AVAILABLE, setOf(localVoice, networkVoice))
         player.speakReading("Reading.", TtsReadingSettings("test.engine/network", 2f), true) {}
         initialize()
-        player.speakWord("word", allowNetwork = false)
+        player.speakWord("word", voiceId = null, allowNetwork = false)
 
         io.mockk.verifyOrder {
             engine.setVoice(networkVoice)
@@ -374,12 +374,67 @@ class TtsPlayerTest {
         every { engine.setSpeechRate(any()) } returns TextToSpeech.ERROR
         val unavailable = mutableListOf<Boolean>()
 
-        player.speakWord("word", allowNetwork = false) { unavailable += true }
+        player.speakWord("word", voiceId = null, allowNetwork = false) { unavailable += true }
         initialize()
 
         assertTrue(unavailable.isEmpty())
         verify { engine.speak("word", TextToSpeech.QUEUE_FLUSH, null, any()) }
     }
+    /** 单词发音使用传入的 voiceId，而不是自动选择的那个。 */
+    @Test
+    fun speakWord_chosenVoice_isUsedInsteadOfAutomaticSelection() {
+        val engine = engine(TextToSpeech.LANG_AVAILABLE, setOf(localVoice, networkVoice))
+
+        player.speakWord("word", voiceId = "test.engine/network", allowNetwork = true)
+        initialize()
+
+        verify { engine.setVoice(networkVoice) }
+        verify { engine.speak("word", TextToSpeech.QUEUE_FLUSH, null, any()) }
+    }
+
+    /**
+     * 选中的网络语音因未授权用不了时，单词发音退回本地语音**并且照样出声**。
+     *
+     * 对照 `speakReading_explicitNetworkWithLocalAvailable_checksConsentConnectivityAndVoice`：
+     * 同样的输入，整句朗读报 `NETWORK_VOICE_DISABLED` 且不提交文本。两者的差别是刻意的——
+     * 阅读页有恢复对话框可以让用户选择，单词发音只有一条 snackbar，而它本身就是兜底路径。
+     */
+    @Test
+    fun speakWord_chosenNetworkVoiceWithoutConsent_fallsBackToLocalAndStillSpeaks() {
+        val engine = engine(TextToSpeech.LANG_AVAILABLE, setOf(localVoice, networkVoice))
+        val unavailable = mutableListOf<Boolean>()
+
+        player.speakWord("word", voiceId = "test.engine/network", allowNetwork = false) {
+            unavailable += true
+        }
+        initialize()
+
+        assertTrue(unavailable.isEmpty())
+        verify { engine.setVoice(localVoice) }
+        verify { engine.speak("word", TextToSpeech.QUEUE_FLUSH, null, any()) }
+        verify(exactly = 0) { engine.setVoice(networkVoice) }
+    }
+
+    /**
+     * **退回不得放宽同意。** 选中网络语音、未授权、且机器上只有网络语音时，
+     * 必须报不可用而不是「反正要退回，就用网络语音吧」。
+     *
+     * 上一条用例在「退回实现成直接挑 network.first()」的写法下照样绿，只有这条会红。
+     */
+    @Test
+    fun speakWord_fallbackWithNoLocalVoice_neverSpeaksOverNetworkWithoutConsent() {
+        val engine = engine(TextToSpeech.LANG_MISSING_DATA, setOf(networkVoice))
+        val unavailable = mutableListOf<Boolean>()
+
+        player.speakWord("word", voiceId = "test.engine/network", allowNetwork = false) {
+            unavailable += true
+        }
+        initialize()
+
+        assertEquals(listOf(true), unavailable)
+        verify(exactly = 0) { engine.speak(any(), any(), any(), any()) }
+    }
+
     private fun engine(languageResult: Int, voices: Set<Voice>): TextToSpeech {
         val engine = mockk<TextToSpeech>(relaxed = true)
         every { engine.setLanguage(Locale.US) } returns languageResult

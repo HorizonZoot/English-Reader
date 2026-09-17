@@ -1430,6 +1430,14 @@ class ReadingViewModel @Inject constructor(
      * 即便用户已经开启联网 TTS，查词兜底也只能用那套机械的离线拼接音。授权仍然由用户掌握，
      * 这里只是不再替他否决。
      *
+     * 语音同样现读：原先单词发音传 `TtsReadingSettings()`，用户在设置里挑的语音对它完全无效。
+     * 叠加「离线优先」后这会变成听得见的割裂——好语音基本都是网络语音，于是已授权且挑了网络
+     * 神经语音的用户，整句是神经音、点单词却掉回本地拼接音。语速**不**跟随（见
+     * [TtsPlayer.speakWord]）。
+     *
+     * 两个偏好各读一次而不是 `combine`：它们只喂给同一次 `speakWord` 调用，没有跨字段一致性
+     * 要求，而下面那道代次校验已经挡住「读偏好期间这次请求作废」这一格。
+     *
      * ## 为什么要占用 [playWordAudioJob] 与代次
      *
      * 读偏好是 suspend，所以本函数必须起协程；而**游离的协程会绕开 [stopAudio]**——它靠
@@ -1445,8 +1453,9 @@ class ReadingViewModel @Inject constructor(
         playWordAudioJob?.cancel()
         playWordAudioJob = viewModelScope.launch {
             val allowNetwork = settingsPreferences.allowNetworkTts.first()
+            val voiceId = settingsPreferences.ttsReadingSettings.first().voiceId
             if (generation != audioRequestGeneration) return@launch
-            ttsPlayer.speakWord(word, allowNetwork) {
+            ttsPlayer.speakWord(word, voiceId, allowNetwork) {
                 // trySend：CONFLATED channel 永不阻塞，回调可能在主线程同步触发，无需起协程。
                 _ttsUnavailable.trySend(Unit)
             }

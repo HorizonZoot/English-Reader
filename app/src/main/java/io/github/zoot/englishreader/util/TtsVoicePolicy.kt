@@ -35,20 +35,41 @@ data class TtsVoiceDecision(
 
 /** Keeps voice selection deterministic and testable without constructing Android TextToSpeech. */
 object TtsVoicePolicy {
+    /**
+     * 选出该用哪个英语语音，或说明为什么选不出来。
+     *
+     * @param fallBackWhenPreferredUnusable [preferredId] 当前用不了时，是否退回自动选择。
+     *
+     * 默认 `false`（整句朗读的语义）：用户明确挑的语音用不了时必须**报出来**，因为阅读页有恢复
+     * 对话框，可以让用户「仅本句联网」或去系统设置装语言包——静默换个语音只会让他以为设置没生效。
+     *
+     * 单词发音传 `true`。它本身就是兜底路径（真人音频优先，TTS 只在离线/无缓存/播放失败时才出场），
+     * 且失败时只有一条 snackbar、没有恢复入口。用户可以在没开联网授权的情况下选中一个网络语音
+     * （`ReadingViewModel.setReadingVoice` 只校验语音存在，不校验授权），那时严格语义会让单词发音
+     * 从「用本地语音响一下」退化成「弹一条错误」——对兜底路径来说这是纯损失。
+     *
+     * 退回**不会**放宽同意：走的是下面同一套桶逻辑，网络桶照样要过 [allowNetwork] 与
+     * [networkAvailable]。preferred 是网络语音、授权关闭、且机器上没有可用本地语音时，
+     * 结果仍是 `NETWORK_DISABLED`，不会因为「退回」就把文本发往网络。
+     */
     fun select(
         candidates: List<TtsVoiceCandidate>,
         allowNetwork: Boolean,
         networkAvailable: Boolean,
-        preferredId: String? = null
+        preferredId: String? = null,
+        fallBackWhenPreferredUnusable: Boolean = false
     ): TtsVoiceDecision {
         val english = candidates.filter { it.language.equals("en", ignoreCase = true) }
         english.firstOrNull { it.id == preferredId }?.let { preferred ->
-            return when {
+            val decision = when {
                 !preferred.networkRequired -> TtsVoiceDecision(TtsVoiceAvailability.LOCAL, preferred.id)
                 !allowNetwork -> TtsVoiceDecision(TtsVoiceAvailability.NETWORK_DISABLED)
                 !networkAvailable -> TtsVoiceDecision(TtsVoiceAvailability.NETWORK_UNAVAILABLE)
                 else -> TtsVoiceDecision(TtsVoiceAvailability.NETWORK, preferred.id)
             }
+            // 判据用 `selectedId != null` 而不是枚举「哪些 availability 算失败」：新增失败态时
+            // 这里不必跟着改，而「选出了语音」与「没选出语音」本来就是这个函数的二分。
+            if (decision.selectedId != null || !fallBackWhenPreferredUnusable) return decision
         }
         val local = english.filterNot { it.networkRequired }.sortedWith(voiceComparator)
         if (local.isNotEmpty()) {

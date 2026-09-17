@@ -270,11 +270,16 @@ class VocabularyViewModel @Inject constructor(
      * 联网语音的授权**每次现读**，不缓存：用户可能刚在设置里关掉它，而缓存值会让这一次朗读
      * 仍然走网络——那是把「已撤销的同意」当成有效同意。`allowNetworkTts` 默认 false，
      * 所以未表态的用户仍然只用本地语音。
+     *
+     * 语音也现读，理由见 [TtsPlayer.speakWord]：设置页挑的语音原先对单词发音完全无效，
+     * 与自动选择的「离线优先」叠加后，已授权并挑了网络神经语音的用户会在生词本里听到
+     * 本地拼接音。语速不跟随——那个滑杆是为连续阅读调的。
      */
     private suspend fun speakViaTts(word: String) {
         val allowNetwork = settingsPreferences.allowNetworkTts.first()
+        val voiceId = settingsPreferences.ttsReadingSettings.first().voiceId
         // trySend：Channel 有缓冲、永不阻塞，回调可能同步触发，无需起协程。
-        ttsPlayer.speakWord(word, allowNetwork) {
+        ttsPlayer.speakWord(word, voiceId, allowNetwork) {
             _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable)
         }
     }

@@ -11,6 +11,7 @@ import io.github.zoot.englishreader.data.repository.OfflineLookupResult
 import io.github.zoot.englishreader.data.repository.VocabularyInsertResult
 import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
+import io.github.zoot.englishreader.model.TtsReadingSettings
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
@@ -101,6 +102,11 @@ class VocabularyViewModelTest {
         // 默认未授权联网 TTS：与产品默认值一致（SettingsPreferences.allowNetworkTts 缺省 false），
         // 于是既有用例断言的仍是「单词发音只用本地语音」这个改动前的行为。
         every { settingsPreferences.allowNetworkTts } returns MutableStateFlow(false)
+        // **必须显式打桩。** relaxed mock 对返回 `Flow` 的属性给的是一个永不发射的 mock Flow，
+        // `speakViaTts` 里的 `.first()` 会就此永久挂起——于是 `speakWord` 根本不会被调用，
+        // 失败信息显示成「was not called」而不是「挂住了」，很容易被误读成产线代码漏了调用。
+        // 与 `ReadingViewModelFixture` 对 `pronunciationAudioCache.get` 的那条注释同一类问题。
+        every { settingsPreferences.ttsReadingSettings } returns MutableStateFlow(TtsReadingSettings())
         viewModel = VocabularyViewModel(
             vocabularyRepository = vocabularyRepository,
             dictionaryRepository = dictionaryRepository,
@@ -383,7 +389,7 @@ class VocabularyViewModelTest {
         viewModel.playWordAudio(entity)
 
         coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
-        verify(exactly = 1) { ttsPlayer.speakWord("noticing", any(), any()) }
+        verify(exactly = 1) { ttsPlayer.speakWord("noticing", any(), any(), any()) }
     }
 
     /**
@@ -404,7 +410,7 @@ class VocabularyViewModelTest {
 
         viewModel.playWordAudio(vocab("noticing", 1L))
 
-        verify(exactly = 1) { ttsPlayer.speakWord("noticing", eq(true), any()) }
+        verify(exactly = 1) { ttsPlayer.speakWord("noticing", any(), eq(true), any()) }
     }
 
     /** 未授权时仍然只用本地语音——这一路不得绕过用户的同意。 */
@@ -417,7 +423,7 @@ class VocabularyViewModelTest {
 
         viewModel.playWordAudio(vocab("noticing", 1L))
 
-        verify(exactly = 1) { ttsPlayer.speakWord("noticing", eq(false), any()) }
+        verify(exactly = 1) { ttsPlayer.speakWord("noticing", any(), eq(false), any()) }
     }
 
     @Test
@@ -427,5 +433,27 @@ class VocabularyViewModelTest {
         viewModel.playWordAudio(vocab("Noticing", 1L))
 
         coVerify(exactly = 1) { pronunciationAudioCache.get("noticing") }
+    }
+
+    /**
+     * 用户在设置里挑的语音必须传到单词兜底。
+     *
+     * 改动前 `speakWord` 收到的是 `TtsReadingSettings()`，即 `voiceId = null`：设置页挑的语音
+     * 对单词发音完全无效。与自动选择的「离线优先」叠加后会变成听得见的割裂——好语音基本都是
+     * 网络语音，于是已授权且挑了网络神经语音的用户，在生词本里点词仍然是本地拼接音。
+     *
+     * 断言必须用 `eq("engine/neural")` 而非 `any()`：上面那几条既有用例都用 `any()` 占位，
+     * 所以它们在「voiceId 被丢弃、永远传 null」的实现下照样绿。
+     */
+    @Test
+    fun playWordAudio_passesTheChosenReadingVoiceThrough() = runTest {
+        every { settingsPreferences.ttsReadingSettings } returns
+            MutableStateFlow(TtsReadingSettings(voiceId = "engine/neural"))
+        coEvery { pronunciationAudioCache.get("noticing") } returns null
+        every { networkChecker.isOnline() } returns false
+
+        viewModel.playWordAudio(vocab("noticing", 1L))
+
+        verify(exactly = 1) { ttsPlayer.speakWord("noticing", eq("engine/neural"), any(), any()) }
     }
 }

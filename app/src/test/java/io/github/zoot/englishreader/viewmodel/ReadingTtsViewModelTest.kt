@@ -302,7 +302,7 @@ class ReadingTtsViewModelTest {
 
         assertEquals("First. ", calls.single().text)
         assertEquals(ReadingTtsPhase.PLAYING, vm.readingTtsState.value.phase)
-        verify(exactly = 0) { player.speakWord("old", any(), any()) }
+        verify(exactly = 0) { player.speakWord("old", any(), any(), any()) }
     }
 
     @Test
@@ -371,5 +371,28 @@ class ReadingTtsViewModelTest {
         vm.recheckVoiceSettings()
         runCurrent()
         coVerify(exactly = 1) { preferences.clearTtsVoiceIf("gone") }
+    }
+
+    /**
+     * 查词兜底也要用用户挑的语音。
+     *
+     * 改动前 `speakWord` 收到的是 `TtsReadingSettings()`（`voiceId = null`），于是设置页挑的
+     * 语音只对整句朗读生效。叠加自动选择的「离线优先」后就是用户听得见的割裂：好语音基本都是
+     * 网络语音，已授权并挑了网络神经语音的人，整句是神经音、长按查词却掉回本地拼接音。
+     *
+     * 断言用 `eq("engine/neural")` 而非 `any()`：本文件既有的那条
+     * `continuousReading_oldWordAudioFailure_cannotStartWordFallback` 用的是 `any()`，
+     * 在「voiceId 被丢弃」的实现下照样绿。
+     */
+    @Test
+    fun wordFallback_usesTheVoiceChosenForReading() = runTest {
+        every { preferences.ttsReadingSettings } returns
+            MutableStateFlow(TtsReadingSettings(voiceId = "engine/neural"))
+        val vm = loadedViewModel()
+        // audioUrl 为空 → 这条结果没有真人音可播，直接走 TTS 兜底。
+        vm.playWordAudio("lives", audioUrl = null)
+        runCurrent()
+
+        verify(exactly = 1) { player.speakWord("lives", eq("engine/neural"), any(), any()) }
     }
 }

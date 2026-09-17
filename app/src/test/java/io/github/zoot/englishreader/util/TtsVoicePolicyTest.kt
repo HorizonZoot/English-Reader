@@ -147,4 +147,136 @@ class TtsVoicePolicyTest {
         assertEquals(TtsVoiceAvailability.NONE, result.availability)
         assertNull(result.selectedId)
     }
+
+    // ---- preferredId 用不了时的退回（单词发音语义） ----
+
+    /**
+     * 用户挑了网络语音却没开联网授权时，单词发音退回本地语音而不是报错。
+     *
+     * 这个状态是可达的：`ReadingViewModel.setReadingVoice` 只校验语音存在于快照，不校验授权。
+     * 整句朗读在这种状态下报 `NETWORK_DISABLED` 是对的——阅读页有恢复对话框，能让用户「仅本句
+     * 联网」或去装语言包。但单词发音只有一条 snackbar、没有恢复入口，且它本身就是兜底路径
+     * （真人音频优先），所以把「能用本地语音响一下」换成「弹一条错误」是纯损失。
+     */
+    @Test
+    fun select_preferredNetworkVoiceWithoutConsent_fallsBackToLocalInsteadOfFailing() {
+        val candidates = listOf(
+            TtsVoiceCandidate("net", "en", "US", true, quality = 500),
+            TtsVoiceCandidate("local", "en", "US", false, quality = 100)
+        )
+
+        val result = TtsVoicePolicy.select(
+            candidates,
+            allowNetwork = false,
+            networkAvailable = false,
+            preferredId = "net",
+            fallBackWhenPreferredUnusable = true
+        )
+
+        assertEquals(TtsVoiceAvailability.LOCAL, result.availability)
+        assertEquals("local", result.selectedId)
+    }
+
+    /** 同一输入，不开退回（整句朗读语义）时必须仍然报错——默认值不能被改掉。 */
+    @Test
+    fun select_preferredNetworkVoiceWithoutConsent_stillFailsWhenFallbackNotRequested() {
+        val candidates = listOf(
+            TtsVoiceCandidate("net", "en", "US", true),
+            TtsVoiceCandidate("local", "en", "US", false)
+        )
+
+        val strict = TtsVoicePolicy.select(candidates, false, false, preferredId = "net")
+
+        assertEquals(TtsVoiceAvailability.NETWORK_DISABLED, strict.availability)
+        assertNull(strict.selectedId)
+    }
+
+    /**
+     * **退回不得放宽同意。** preferred 是网络语音、授权关闭、且机器上没有可用本地语音时，
+     * 结果仍须是 `NETWORK_DISABLED`。
+     *
+     * 没有这条判据，把退回实现成「失败就挑 network.first()」的写法照样能让上面那条用例绿，
+     * 而那种实现会在用户明确关闭联网的情况下把文本发往网络。
+     */
+    @Test
+    fun select_fallbackWithNoLocalVoice_neverBypassesNetworkConsent() {
+        val candidates = listOf(
+            TtsVoiceCandidate("net-a", "en", "US", true, quality = 500),
+            TtsVoiceCandidate("net-b", "en", "GB", true, quality = 400)
+        )
+
+        val result = TtsVoicePolicy.select(
+            candidates,
+            allowNetwork = false,
+            networkAvailable = false,
+            preferredId = "net-a",
+            fallBackWhenPreferredUnusable = true
+        )
+
+        assertEquals(TtsVoiceAvailability.NETWORK_DISABLED, result.availability)
+        assertNull(result.selectedId)
+    }
+
+    /** 已授权但当前离线：同样退回本地，而不是把「离线」报成失败。 */
+    @Test
+    fun select_preferredNetworkVoiceWhileOffline_fallsBackToLocal() {
+        val candidates = listOf(
+            TtsVoiceCandidate("net", "en", "US", true),
+            TtsVoiceCandidate("local", "en", "GB", false)
+        )
+
+        val result = TtsVoicePolicy.select(
+            candidates,
+            allowNetwork = true,
+            networkAvailable = false,
+            preferredId = "net",
+            fallBackWhenPreferredUnusable = true
+        )
+
+        assertEquals(TtsVoiceAvailability.LOCAL, result.availability)
+        assertEquals("local", result.selectedId)
+    }
+
+    /**
+     * 开了退回也不影响「选中的语音本来就能用」这一路：仍然用用户挑的那个，
+     * 不会因为有更高质量的语音就改主意。
+     */
+    @Test
+    fun select_usablePreferredVoice_isUnaffectedByTheFallbackFlag() {
+        val candidates = listOf(
+            TtsVoiceCandidate("chosen", "en", "GB", false, quality = 100),
+            TtsVoiceCandidate("better", "en", "US", false, quality = 500)
+        )
+
+        val result = TtsVoicePolicy.select(
+            candidates,
+            allowNetwork = false,
+            networkAvailable = false,
+            preferredId = "chosen",
+            fallBackWhenPreferredUnusable = true
+        )
+
+        assertEquals(TtsVoiceAvailability.LOCAL, result.availability)
+        assertEquals("chosen", result.selectedId)
+    }
+
+    /** 已授权且在线时，选中的网络语音正常生效——退回标记不该顺手把网络语音也降级掉。 */
+    @Test
+    fun select_preferredNetworkVoiceWithConsentAndConnectivity_isUsedEvenWithFallbackAllowed() {
+        val candidates = listOf(
+            TtsVoiceCandidate("net", "en", "US", true),
+            TtsVoiceCandidate("local", "en", "US", false)
+        )
+
+        val result = TtsVoicePolicy.select(
+            candidates,
+            allowNetwork = true,
+            networkAvailable = true,
+            preferredId = "net",
+            fallBackWhenPreferredUnusable = true
+        )
+
+        assertEquals(TtsVoiceAvailability.NETWORK, result.availability)
+        assertEquals("net", result.selectedId)
+    }
 }

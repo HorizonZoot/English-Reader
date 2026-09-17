@@ -191,13 +191,15 @@ class TtsPlayer internal constructor(
     ) = onMain {
         if (text.isBlank()) return@onMain
         stop()
+        // 命名实参：下面两个 Boolean 相邻且语义相反，位置传参时一次字段重排就会静默翻转
+        // 二者（整句变成可退回、单词变成语速严格），且照样编译。
         val request = PendingSpeak(
-            text,
-            allowNetwork,
-            settings.normalized(),
-            applySpeechRateStrictly,
-            fallBackWhenPreferredUnusable,
-            onResult
+            text = text,
+            allowNetwork = allowNetwork,
+            settings = settings.normalized(),
+            applySpeechRateStrictly = applySpeechRateStrictly,
+            fallBackWhenPreferredUnusable = fallBackWhenPreferredUnusable,
+            callback = onResult
         )
         if (engineReady) {
             speakWithCurrentEngine(request)

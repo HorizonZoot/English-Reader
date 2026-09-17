@@ -177,7 +177,15 @@ class TtsVoicePolicyTest {
         assertEquals("local", result.selectedId)
     }
 
-    /** 同一输入，不开退回（整句朗读语义）时必须仍然报错——默认值不能被改掉。 */
+    /**
+     * 同一输入，不开退回（整句朗读语义）时必须仍然报错——默认值不能被改掉。
+     *
+     * **与 [select_explicitVoice_overridesAutomaticButNeverConsent] 的第三条断言同分支、同判据**
+     * （那里也是 preferred 网络语音 + 未授权 + 有本地语音 + 省略标记 → `NETWORK_DISABLED`；
+     * `networkAvailable` 在 `!allowNetwork` 之后才被读，所以取值不影响走向）。不是漏看的重复：
+     * 留着是为了命名——把默认值翻成 `true` 的人看到本用例变红即知破了什么，而看到那条
+     * 「explicitVoice」变红只会一头雾水。
+     */
     @Test
     fun select_preferredNetworkVoiceWithoutConsent_stillFailsWhenFallbackNotRequested() {
         val candidates = listOf(

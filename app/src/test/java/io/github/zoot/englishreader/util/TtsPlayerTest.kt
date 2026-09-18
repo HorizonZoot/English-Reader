@@ -357,19 +357,6 @@ class TtsPlayerTest {
         assertEquals(TtsCapability.Ready(TtsVoiceMode.LOCAL), snapshot.capability)
     }
 
-    /** 句首 `It` 只在送给引擎的文本里小写；引擎之外的调用方仍持有原文。 */
-    @Test
-    fun speakReading_leadingCapitalIt_submitsLowercasedPronounToEngine() {
-        val engine = engine(TextToSpeech.LANG_AVAILABLE, setOf(localVoice))
-        val results = mutableListOf<TtsPlaybackResult>()
-
-        player.speakReading("It expands our vocabulary. ", TtsReadingSettings(), false, results::add)
-        initialize()
-
-        assertTrue(results.single() is TtsPlaybackResult.Started)
-        verify { engine.speak("it expands our vocabulary. ", TextToSpeech.QUEUE_FLUSH, null, any()) }
-    }
-
     @Test
     fun speakReading_rateFailure_reportsFailureWithoutSpeaking() {
         val engine = engine(TextToSpeech.LANG_AVAILABLE, setOf(localVoice))

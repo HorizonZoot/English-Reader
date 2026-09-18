@@ -56,8 +56,11 @@ class UpdateRepository internal constructor(
             if (!networkChecker.isOnline()) {
                 return@withLock if (manual) UpdateCheckResult.Failed else UpdateCheckResult.Skipped
             }
-            val release = apiService.getLatestRelease()
-            val result = if (AppVersion.isNewer(release.tagName, localVersionName)) {
+            val releases = apiService.getPublishedReleases()
+            // Moshi accepts a JSON null element despite the non-null declaration; it is not "no releases".
+            val release = releases.firstOrNull()
+            check(releases.isEmpty() || release != null) { "Null release element" }
+            val result = if (release != null && AppVersion.isNewer(release.tagName, localVersionName)) {
                 UpdateCheckResult.UpdateAvailable(release.tagName, release.name, release.body, release.htmlUrl)
             } else {
                 UpdateCheckResult.UpToDate

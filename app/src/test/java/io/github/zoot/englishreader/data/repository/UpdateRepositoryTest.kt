@@ -67,8 +67,43 @@ class UpdateRepositoryTest {
         fixture.enqueueRelease()
         fixture.repository().check(manual = true)
         val request = fixture.server.takeRequest(1, java.util.concurrent.TimeUnit.SECONDS)
-        assertEquals("/repos/HorizonZoot/English-Reader/releases/latest", request?.path)
+        assertEquals("/repos/HorizonZoot/English-Reader/releases?per_page=1", request?.path)
         assertEquals("application/vnd.github+json", request?.getHeader("Accept"))
+    }
+
+    @Test
+    fun check_samePublishedPrerelease_returnsUpToDate() = runTest {
+        fixture.enqueueRelease(tag = "v0.1.1-beta")
+
+        val result = fixture.repository(localVersion = "0.1.1-beta").check(manual = true)
+
+        assertEquals(UpdateCheckResult.UpToDate, result)
+        assertEquals(1, fixture.server.requestCount)
+        fixture.verifyCheckRecorded(1)
+    }
+
+    @Test
+    fun check_noPublishedReleases_returnsUpToDateAndRecordsSuccess() = runTest {
+        fixture.enqueueNoReleases()
+
+        val result = fixture.repository().check(manual = false)
+
+        assertEquals(UpdateCheckResult.UpToDate, result)
+        assertEquals(1, fixture.server.requestCount)
+        fixture.verifyCheckRecorded(1)
+        assertEquals(fixture.now, fixture.lastCheck.value)
+    }
+
+    @Test
+    fun check_nullPublishedRelease_returnsFailedWithoutRecordingSuccess() = runTest {
+        fixture.enqueueNullRelease()
+
+        val result = fixture.repository().check(manual = true)
+
+        assertEquals(UpdateCheckResult.Failed, result)
+        assertEquals(1, fixture.server.requestCount)
+        fixture.verifyCheckRecorded(0)
+        assertEquals(0L, fixture.lastCheck.value)
     }
 
     @Test

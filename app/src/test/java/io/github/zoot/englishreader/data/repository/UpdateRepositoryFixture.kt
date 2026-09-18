@@ -85,7 +85,16 @@ internal class UpdateRepositoryFixture {
             append(""""draft":false,"prerelease":true,"assets":[{"name":"app.apk"}],""")
             append(""""html_url":"$htmlUrl"}""")
         }
-        server.enqueue(MockResponse().setResponseCode(200).setBody(json))
+        // 发布列表返回数组，且包含已发布的 prerelease；/latest 不会返回它们。
+        server.enqueue(MockResponse().setResponseCode(200).setBody("[$json]"))
+    }
+
+    fun enqueueNoReleases() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("[]"))
+    }
+
+    fun enqueueNullRelease() {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("[null]"))
     }
 
     fun enqueueStatus(code: Int) {

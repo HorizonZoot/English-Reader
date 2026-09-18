@@ -2,14 +2,20 @@ package io.github.zoot.englishreader.data.repository
 
 import io.github.zoot.englishreader.data.repository.UpdateRepositoryFixture.Companion.DAY_MILLIS
 import io.mockk.every
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
@@ -79,16 +85,38 @@ class UpdateRepositoryTest {
     fun check_cancelledRequest_propagatesCancellationAndDoesNotRecordSuccess() = runTest {
         fixture.enqueueTimeout()
         val repository = fixture.repository()
-        val request = async { repository.check(manual = false) }
+        var returnedResult: UpdateCheckResult? = null
+        val request = async {
+            repository.check(manual = false).also { returnedResult = it }
+        }
         runCurrent()
         assertTrue(withContext(kotlinx.coroutines.Dispatchers.IO) {
             fixture.server.takeRequest(1, java.util.concurrent.TimeUnit.SECONDS) != null
         })
         request.cancelAndJoin()
         assertTrue(request.isCancelled)
+        assertNull("Cancelled check must not return a normal result", returnedResult)
         fixture.verifyCheckRecorded(0)
         fixture.enqueueRelease()
         assertTrue(repository.check(manual = true) is UpdateCheckResult.UpdateAvailable)
+    }
+
+    @Test
+    fun check_upstreamCancellation_propagatesSameExceptionWithoutRecordingSuccess() = runTest {
+        val cancellation = CancellationException("preference read cancelled")
+        every { fixture.preferences.lastUpdateCheckAt } returns flow { throw cancellation }
+        val repository = fixture.repository()
+
+        try {
+            repository.check(manual = false)
+            fail("CancellationException must propagate")
+        } catch (actual: CancellationException) {
+            assertSame(cancellation, actual)
+        }
+
+        assertTrue(coroutineContext.isActive)
+        assertEquals(0, fixture.server.requestCount)
+        fixture.verifyCheckRecorded(0)
     }
 
     @Test

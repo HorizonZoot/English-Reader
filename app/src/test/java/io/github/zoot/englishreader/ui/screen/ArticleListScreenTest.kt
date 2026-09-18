@@ -14,6 +14,7 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -214,8 +215,12 @@ class ArticleListScreenTest {
         composeRule.mainClock.autoAdvance = false
         render(items = emptyList(), isImporting = true)
 
-        // 阈值之内就结束——指示器一帧都不该出现。
-        composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS - 100)
+        // 导入仍在进行时逐帧检查；只看结束后的隐藏态会漏掉「先闪现、再隐藏」。
+        val startedAt = composeRule.mainClock.currentTime
+        while (composeRule.mainClock.currentTime - startedAt < APPEAR_THRESHOLD_MS - 100) {
+            composeRule.mainClock.advanceTimeBy(FRAME_MS)
+            composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
+        }
         importingState.value = false
         composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + FRAME_MS)
 
@@ -246,14 +251,24 @@ class ArticleListScreenTest {
         composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + FRAME_MS)
         composeRule.onNodeWithText(string(R.string.import_status_importing)).assertExists()
 
+        val completedAt = composeRule.mainClock.currentTime
         importingState.value = false
         uiEvents.tryEmit(ArticleListUiEvent.BookImportSucceeded(book.id, book.title, 12))
         composeRule.mainClock.advanceTimeBy(GLYPH_SETTLE_MS)
 
         composeRule.onNodeWithText(string(R.string.import_status_succeeded)).assertExists()
+        composeRule.onNodeWithText(string(R.string.import_status_importing)).assertDoesNotExist()
 
-        // 收尾播完后不留残影。
-        composeRule.mainClock.advanceTimeBy(TERMINAL_TOTAL_MS)
+        // 从成功事件起最多 400ms；另留两帧给状态重组和退场动画起帧，不叠加字形等待。
+        val finishDeadlineMs = 400L + 2 * FRAME_MS
+        while (composeRule.mainClock.currentTime - completedAt < finishDeadlineMs) {
+            composeRule.mainClock.advanceTimeBy(FRAME_MS)
+            composeRule.onNodeWithText(string(R.string.import_status_importing)).assertDoesNotExist()
+            // 淡出期间节点仍在组合中，每一帧都必须保留成功内容。
+            if (composeRule.onAllNodesWithTag(IMPORT_STATUS_TEST_TAG).fetchSemanticsNodes().isNotEmpty()) {
+                composeRule.onNodeWithText(string(R.string.import_status_succeeded)).assertExists()
+            }
+        }
         composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
     }
 

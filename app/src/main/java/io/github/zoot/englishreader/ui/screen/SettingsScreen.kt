@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Cached
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.VolumeUp
@@ -30,6 +32,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -67,6 +70,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import io.github.zoot.englishreader.BuildConfig
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.audio.PronunciationCacheStats
 import io.github.zoot.englishreader.data.dictionary.DictionaryPackFailure
@@ -78,8 +82,11 @@ import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.model.TtsSystemAction
 import io.github.zoot.englishreader.ui.component.messageRes
 import io.github.zoot.englishreader.util.TtsCapability
+import io.github.zoot.englishreader.viewmodel.ManualCheckOutcome
 import io.github.zoot.englishreader.viewmodel.ProfileActionResult
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import java.text.NumberFormat
 
 private val SettingsBlue = Color(0xFF007AFF)
@@ -92,6 +99,9 @@ private val SettingsButtonShape = RoundedCornerShape(12.dp)
 fun SettingsScreen(
     onOpenAiProfile: () -> Unit = {},
     onOpenCacheManagement: () -> Unit = {},
+    onCheckForUpdate: () -> Unit = {},
+    checkingForUpdate: Boolean = false,
+    manualUpdateOutcomes: Flow<ManualCheckOutcome> = emptyFlow(),
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val fontSize by viewModel.fontSizeOption.collectAsStateWithLifecycle()
@@ -143,6 +153,18 @@ fun SettingsScreen(
         }
     }
 
+    // 手动检查的反馈走本页既有的 Snackbar，不新建反馈通道。
+    // 自动检查**不会**产生这些事件——那一路必须完全静默。
+    LaunchedEffect(manualUpdateOutcomes) {
+        manualUpdateOutcomes.collect { outcome ->
+            val message = when (outcome) {
+                ManualCheckOutcome.UP_TO_DATE -> R.string.update_check_up_to_date
+                ManualCheckOutcome.FAILED -> R.string.update_check_failed
+            }
+            snackbarHostState.showSnackbar(context.getString(message))
+        }
+    }
+
     Scaffold(
         topBar = { CenterAlignedTopAppBar(title = { Text(stringResource(R.string.settings_title)) }) },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -171,9 +193,68 @@ fun SettingsScreen(
                 onRefresh = viewModel::refreshTtsCapability,
                 onSystemAction = viewModel::openTtsSystemAction
             )
+            AboutSection(
+                onCheckForUpdate = onCheckForUpdate,
+                checking = checkingForUpdate
+            )
         }
     }
 }
+
+/**
+ * 最小「关于」区：应用名 + 当前版本 + 手动检查更新。
+ *
+ * 版本号取 `BuildConfig.VERSION_NAME`，与 [io.github.zoot.englishreader.data.repository.UpdateRepository]
+ * 判断新旧时用的是**同一个来源**。若这里改成 `PackageManager` 之类的第二来源，就可能出现
+ * 「关于页显示 A、比较用的是 B」这种无法排查的错位。
+ *
+ * 检查中禁用整行而不是只换文案：`onClick == null` 时 [SettingsActionRow] 连右侧箭头一起去掉，
+ * 视觉上就是「此刻点不了」，不需要额外的 disabled 配色。
+ */
+@Composable
+internal fun AboutSection(
+    onCheckForUpdate: () -> Unit,
+    checking: Boolean
+) {
+    SettingsGroup(title = stringResource(R.string.settings_about)) {
+        SettingsActionRow(
+            icon = {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            title = stringResource(R.string.app_name),
+            supporting = stringResource(R.string.settings_about_version, BuildConfig.VERSION_NAME)
+        )
+        SettingsActionRow(
+            icon = {
+                if (checking) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Icon(
+                        Icons.Outlined.Refresh,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            title = stringResource(
+                if (checking) R.string.settings_check_update_checking else R.string.settings_check_update
+            ),
+            onClick = if (checking) null else onCheckForUpdate,
+            testTag = CHECK_UPDATE_TEST_TAG
+        )
+    }
+}
+
+/** 手动检查入口的稳定测试锚点。 */
+internal const val CHECK_UPDATE_TEST_TAG = "settings-check-update"
 
 @Composable
 internal fun TtsSettingsSection(

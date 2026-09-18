@@ -52,6 +52,19 @@
     <string name="import_status_importing">正在导入…</string>
     <string name="import_status_succeeded">导入完成</string>
     <string name="import_status_failed">导入失败</string>
+
+    <!-- 版本更新检测 -->
+    <string name="settings_about">关于</string>
+    <string name="settings_about_version">版本 %1$s</string>
+    <string name="settings_check_update">检查更新</string>
+    <string name="settings_check_update_checking">正在检查…</string>
+    <string name="update_check_up_to_date">已是最新版本</string>
+    <string name="update_check_failed">检查更新失败，请稍后再试</string>
+    <string name="update_dialog_title">发现新版本</string>
+    <string name="update_dialog_action_update">立即更新</string>
+    <string name="update_dialog_action_later">稍后</string>
+    <string name="update_dialog_no_notes">本次更新没有提供说明。</string>
+    <string name="update_open_release_failed">无法打开浏览器</string>
     <string name="import_choose_method">选择一种方式，开始阅读。</string>
     <string name="import_from_file">从文件导入</string>
     <string name="import_file_formats">TXT / Markdown / EPUB</string>

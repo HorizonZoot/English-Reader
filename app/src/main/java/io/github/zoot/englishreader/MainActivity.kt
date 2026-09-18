@@ -52,6 +52,7 @@ import io.github.zoot.englishreader.ui.screen.BookTocScreen
 import io.github.zoot.englishreader.ui.screen.ReadingScreen
 import io.github.zoot.englishreader.ui.screen.SettingsScreen
 import io.github.zoot.englishreader.ui.screen.SettingsCacheManagementScreen
+import io.github.zoot.englishreader.ui.dialog.UpdateDialog
 import io.github.zoot.englishreader.ui.screen.VocabularyScreen
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
@@ -60,6 +61,7 @@ import io.github.zoot.englishreader.util.TestDataGenerator
 import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
 import io.github.zoot.englishreader.viewmodel.ReadingViewModel
+import io.github.zoot.englishreader.viewmodel.UpdateViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -173,6 +175,13 @@ fun EnglishReaderNavigation() {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+
+    // 更新检查的 VM 取在这里——本处位于任何 composable() 目的地**之外**，于是解析到
+    // Activity 作用域的 ViewModelStore：旋屏时实例被保留，其 init 里的自动检查不会重跑。
+    // 放进某个目的地里取则会随返回栈条目重建，等于每次进那个页面都检查一次。
+    val updateViewModel: UpdateViewModel = hiltViewModel()
+    val pendingUpdate by updateViewModel.pendingUpdate.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     Scaffold(
         // 各目的地页面自行负责顶部应用栏和系统栏 insets。外层外壳只预留导航栏的位置；
@@ -297,6 +306,27 @@ fun EnglishReaderNavigation() {
             }
         }
     ) { padding ->
+        // 弹窗挂在 NavHost 之上：它要能盖在任意目的地上，且不因用户导航到别处而成为孤儿。
+        pendingUpdate?.let { update ->
+            UpdateDialog(
+                versionName = update.versionName,
+                releaseNotes = update.releaseNotes,
+                onUpdate = {
+                    // 只打开 Release 页面，不下载、不安装。跳转失败要说出来，否则点了
+                    // 没反应像是按钮坏了。
+                    if (!openReleasePage(context, update.releaseUrl)) {
+                        Toast.makeText(
+                            context,
+                            context.getString(R.string.update_open_release_failed),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    updateViewModel.dismissUpdate()
+                },
+                onDismiss = updateViewModel::dismissUpdate
+            )
+        }
+
         NavHost(
             navController = navController,
             startDestination = "article_list",
@@ -363,9 +393,15 @@ fun EnglishReaderNavigation() {
         composable("settings") {
             val viewModel: SettingsViewModel = hiltViewModel()
             TtsSystemActions(viewModel.ttsSystemActions)
+            // 手动检查复用 shell 的那个 UpdateViewModel 实例（不是在这里另取一个）：
+            // 同实例才能让手动发现的更新走上面那个弹窗宿主。
+            val checkingUpdate by updateViewModel.checkingManually.collectAsStateWithLifecycle()
             SettingsScreen(
                 onOpenAiProfile = { navController.navigate("settings/ai-profile") },
                 onOpenCacheManagement = { navController.navigate("settings/cache") },
+                onCheckForUpdate = updateViewModel::checkManually,
+                checkingForUpdate = checkingUpdate,
+                manualUpdateOutcomes = updateViewModel.manualOutcomes,
                 viewModel = viewModel
             )
         }
@@ -401,6 +437,31 @@ internal fun openTtsSystemAction(context: Context, action: TtsSystemAction): Boo
         TtsSystemAction.OPEN_SETTINGS -> "com.android.settings.TTS_SETTINGS"
         TtsSystemAction.INSTALL_DATA -> TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA
     })
+    return try {
+        context.startActivity(intent)
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
+    } catch (_: SecurityException) {
+        false
+    }
+}
+
+/**
+ * 在浏览器里打开 GitHub Release 页面。返回是否成功派发。
+ *
+ * 守卫写法与上面的 [openTtsSystemAction] 一致：没有浏览器的设备（部分精简 ROM、
+ * 企业管控设备）会抛 [ActivityNotFoundException]，被策略拦截会抛 [SecurityException]，
+ * 两者都不能让 app 崩掉——这只是一个更新入口，失败了告知用户即可。
+ *
+ * 这是本 app 唯一的对外跳转；**不做**任何下载或安装，后续动作全部交给浏览器。
+ */
+internal fun openReleasePage(context: Context, url: String): Boolean {
+    val uri = Uri.parse(url)
+    if (uri.scheme != "https" || uri.host != "github.com" || uri.userInfo != null ||
+        (uri.port != -1 && uri.port != 443) || uri.path?.contains("/releases/tag/") != true
+    ) return false
+    val intent = Intent(Intent.ACTION_VIEW, uri)
     return try {
         context.startActivity(intent)
         true

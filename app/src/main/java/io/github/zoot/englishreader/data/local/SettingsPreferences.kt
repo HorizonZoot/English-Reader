@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
@@ -82,6 +83,7 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
         private val ALLOW_NETWORK_TTS_KEY = booleanPreferencesKey("allow_network_tts")
         private val TTS_VOICE_KEY = stringPreferencesKey("reading_tts_voice")
         private val TTS_RATE_KEY = floatPreferencesKey("reading_tts_rate")
+        private val LAST_UPDATE_CHECK_KEY = longPreferencesKey("last_update_check_at")
     }
 
     // DataStore 读盘失败会抛 IOException（官方约定），.catch 回退默认值而非让异常
@@ -141,6 +143,19 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
 
     suspend fun setAllowNetworkTts(allowed: Boolean) {
         dataStore.edit { preferences -> preferences[ALLOW_NETWORK_TTS_KEY] = allowed }
+    }
+
+    /**
+     * 上次**成功**完成更新检查的时刻（epoch millis）；`0` 表示从未检查过。
+     *
+     * 只负责存取，24h 的判断在 `UpdateRepository`——这里不该知道节流窗口有多长。
+     */
+    val lastUpdateCheckAt: Flow<Long> = dataStore.data
+        .catch { e -> if (e is IOException) emit(emptyPreferences()) else throw e }
+        .map { preferences -> preferences[LAST_UPDATE_CHECK_KEY] ?: 0L }
+
+    suspend fun setLastUpdateCheckAt(epochMillis: Long) {
+        dataStore.edit { preferences -> preferences[LAST_UPDATE_CHECK_KEY] = epochMillis }
     }
 
     suspend fun setReadingMode(mode: ReadingMode) {

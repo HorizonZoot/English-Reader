@@ -239,13 +239,20 @@ class TtsPlayer internal constructor(
             voices = backend.voices() + voiceSnapshot.voices.filter { it.mode != TtsVoiceMode.LOCAL_MODEL },
             capability = capability
         )
+        var localStarted = false
         backend.speak(request.text, voiceId, request.settings.speechRate) { result ->
             onMain {
                 if (generation != speechGeneration) return@onMain
-                if (result is TtsPlaybackResult.Failed && request.fallBackWhenPreferredUnusable) {
+                if (result is TtsPlaybackResult.Started) localStarted = true
+                val canFallBack = request.fallBackWhenPreferredUnusable || request.settings.voiceId == null
+                if (result is TtsPlaybackResult.Failed && !localStarted && canFallBack) {
                     enqueueSystemSpeech(PendingSpeak(
-                        request.text, request.allowNetwork, TtsReadingSettings(),
-                        request.applySpeechRateStrictly, true, request.callback
+                        text = request.text,
+                        allowNetwork = request.allowNetwork,
+                        settings = request.settings.copy(voiceId = null),
+                        applySpeechRateStrictly = request.applySpeechRateStrictly,
+                        fallBackWhenPreferredUnusable = true,
+                        callback = request.callback
                     ))
                 } else {
                     if (result is TtsPlaybackResult.Failed) {

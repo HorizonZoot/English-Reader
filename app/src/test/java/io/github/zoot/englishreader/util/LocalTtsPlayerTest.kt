@@ -85,6 +85,67 @@ class LocalTtsPlayerTest {
         assertEquals(0, initializations)
     }
 
+    @Test fun speakReading_automaticModelFailsBeforeAudio_usesSystemVoiceWithOriginalTextAndRate() {
+        val voice = Voice("offline", Locale.US, 300, 100, false, emptySet())
+        every { engine.voices } returns setOf(voice)
+        every { engine.defaultEngine } returns "system"
+        every { engine.setLanguage(any()) } returns TextToSpeech.LANG_AVAILABLE
+        val results = mutableListOf<TtsPlaybackResult>()
+        val text = "  It is a complete sentence.  "
+
+        player.speakReading(text, TtsReadingSettings(speechRate = 1.6f), false, results::add)
+        assertEquals(0, initializations)
+        local.callbacks.single()(TtsPlaybackResult.Failed(TtsFailureReason.MODEL_UNAVAILABLE))
+        assertEquals(1, initializations)
+        onInit!!.onInit(TextToSpeech.SUCCESS)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(TtsVoiceMode.LOCAL, (results.single() as TtsPlaybackResult.Started).mode)
+        verify { engine.setVoice(voice) }
+        verify { engine.setSpeechRate(1.6f) }
+        verify { engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, any()) }
+        verify(exactly = 0) { network.isOnline() }
+    }
+
+    @Test fun speakReading_modelFailsWithOnlyNetworkVoice_doesNotBypassConsent() {
+        val voice = Voice("network", Locale.US, 500, 100, true, emptySet())
+        every { engine.voices } returns setOf(voice)
+        every { engine.defaultEngine } returns "system"
+        every { engine.setLanguage(any()) } returns TextToSpeech.LANG_AVAILABLE
+        val results = mutableListOf<TtsPlaybackResult>()
+
+        player.speak("Sentence.", false, results::add)
+        local.callbacks.single()(TtsPlaybackResult.Failed(TtsFailureReason.MODEL_UNAVAILABLE))
+        onInit!!.onInit(TextToSpeech.SUCCESS)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(listOf(TtsPlaybackResult.Failed(TtsFailureReason.NETWORK_VOICE_DISABLED)), results)
+        verify(exactly = 0) { engine.speak(any(), any(), any(), any()) }
+        verify(exactly = 0) { network.isOnline() }
+    }
+
+    @Test fun speakReading_localAudioAlreadyStarted_doesNotRestartSentenceOnSystemEngine() {
+        val results = mutableListOf<TtsPlaybackResult>()
+        player.speak("Sentence.", false, results::add)
+        val callback = local.callbacks.single()
+        callback(TtsPlaybackResult.Started("local", TtsVoiceMode.LOCAL_MODEL))
+        callback(TtsPlaybackResult.Failed(TtsFailureReason.SYNTHESIS_FAILED))
+
+        assertEquals(0, initializations)
+        assertEquals(2, results.size)
+        assertEquals(TtsPlaybackResult.Failed(TtsFailureReason.SYNTHESIS_FAILED), results.last())
+    }
+
+    @Test fun speakReading_stoppedBeforeLocalFailure_doesNotStartFallback() {
+        val results = mutableListOf<TtsPlaybackResult>()
+        player.speak("Sentence.", false, results::add)
+        player.stop()
+        local.callbacks.single()(TtsPlaybackResult.Failed(TtsFailureReason.MODEL_UNAVAILABLE))
+
+        assertTrue(results.isEmpty())
+        assertEquals(0, initializations)
+    }
+
     @Test fun refresh_systemNeverInitializes_stillOffersLocalVoiceAndKeepsIncompleteCatalog() {
         val snapshots = mutableListOf<TtsVoiceSnapshot>()
         player.refreshVoices(TtsReadingSettings(), false, snapshots::add)

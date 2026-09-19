@@ -129,7 +129,7 @@
     <string name="reading_voice_sample" translatable="false">Reading a little every day makes learning English easier.</string>
     <string name="reading_voice_reset">恢复默认</string>
     <string name="reading_voice_auto">自动选择</string>
-    <string name="reading_voice_auto_hint">默认使用内置 Jen，完全离线。也可选择其他已安装音色。</string>
+    <string name="reading_voice_auto_hint">优先使用内置 Jen；出声前失败时回退系统语音。网络语音仍需授权。</string>
     <string name="reading_voice_option">音色 %1$d · %2$s</string>
     <string name="reading_voice_local">离线</string>
     <string name="reading_voice_quality">%1$s · 质量 %2$d</string>

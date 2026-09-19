@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tts_spike_title">离线语音实验</string>
+    <string name="tts_spike_description">libritts · 离线合成。模型需先通过开发工具放入本实验包的专用目录。</string>
+    <string name="tts_spike_sentence" translatable="false">It expands our vocabulary, improves our focus, and enhances our imagination.</string>
+    <string name="tts_spike_speaker">说话人 %1$d</string>
+    <string name="tts_spike_single">单句测试</string>
+    <string name="tts_spike_repeat">连续朗读 5 分钟</string>
+    <string name="tts_spike_stop">停止</string>
+    <string name="tts_spike_idle">准备就绪</string>
+    <string name="tts_spike_loading">加载模型中</string>
+    <string name="tts_spike_synthesizing">合成中</string>
+    <string name="tts_spike_playing">播放中</string>
+    <string name="tts_spike_finished">测试完成</string>
+    <string name="tts_spike_stopped">已停止</string>
+    <string name="tts_spike_model_missing">模型文件不完整，请先放入已校验的 libritts 模型。</string>
+    <string name="tts_spike_unsupported">此实验仅支持 arm64-v8a 设备。</string>
+    <string name="tts_spike_model_failed">模型加载失败，请检查模型文件与运行库。</string>
+    <string name="tts_spike_synthesis_failed">合成失败。</string>
+    <string name="tts_spike_audio_failed">音频播放失败。</string>
+    <string name="tts_spike_load_time">本次模型加载：%1$d ms</string>
+    <string name="tts_spike_request_time">点击到首次音频块（含加载）：%1$d ms</string>
+    <string name="tts_spike_block_time">最近一句首块延迟：%1$d ms</string>
+    <string name="tts_spike_max_block_time">最大首块延迟：%1$d ms</string>
+    <string name="tts_spike_rtf">最近一句合成 RTF：%1$.3f</string>
+    <string name="tts_spike_max_rtf">最大合成 RTF：%1$.3f</string>
+    <string name="tts_spike_progress">已完成 %1$d 句 · %2$d 秒</string>
+    <string name="tts_spike_stop_time">停止调用耗时：%1$d ms</string>
+    <string name="tts_spike_thermal">最高热状态：%1$d（0 为正常，3 及以上为严重）</string>
+    <string name="tts_spike_measurement_note">RTF 扣除了回调内写入音频与等待播放缓冲的时间。停止调用耗时不是实测静音延迟，读音和停止效果仍需试听确认。首次测试包含模型加载；后续测试复用已加载模型。</string>
+    <string name="tts_spike_licenses">运行库：sherpa-onnx（Apache-2.0）、ONNX Runtime（MIT）、espeak-ng（GPL-3.0）。模型数据集：LibriTTS-R（CC BY 4.0）。</string>
+</resources>

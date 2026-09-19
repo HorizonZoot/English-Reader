@@ -1,5 +1,8 @@
 # Proguard rules for English Reader
 
+# sherpa-onnx JNI resolves configuration classes and fields by name.
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+
 # Keep Hilt generated components
 -keep class dagger.hilt.** { *; }
 -keep class javax.inject.** { *; }

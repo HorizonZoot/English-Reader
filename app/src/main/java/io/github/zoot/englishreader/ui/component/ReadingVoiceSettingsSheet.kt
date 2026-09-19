@@ -221,12 +221,15 @@ internal fun ReadingVoiceSettingsContent(
             )
             state.snapshot.voices.forEachIndexed { index, voice ->
                 val mode = stringResource(
-                    if (voice.mode == TtsVoiceMode.LOCAL) R.string.reading_voice_local
-                    else R.string.reading_voice_network
+                    when (voice.mode) {
+                        TtsVoiceMode.LOCAL -> R.string.reading_voice_local
+                        TtsVoiceMode.NETWORK -> R.string.reading_voice_network
+                        TtsVoiceMode.LOCAL_MODEL -> R.string.tts_model_offline
+                    }
                 )
                 val qualitySummary = stringResource(R.string.reading_voice_quality, mode, voice.quality)
                 VoiceChoice(
-                    title = stringResource(
+                    title = voice.nameRes?.let { stringResource(it) } ?: stringResource(
                         R.string.reading_voice_option,
                         index + 1,
                         Locale.forLanguageTag(voice.localeTag).getDisplayName(Locale.getDefault())
@@ -237,7 +240,7 @@ internal fun ReadingVoiceSettingsContent(
                         qualitySummary
                     },
                     selected = state.settings.voiceId == voice.id,
-                    enabled = voice.mode == TtsVoiceMode.LOCAL || state.allowNetwork,
+                    enabled = voice.mode != TtsVoiceMode.NETWORK || state.allowNetwork,
                     onClick = { onVoiceChange(voice.id) },
                     modifier = Modifier.testTag("reading-voice-option-$index")
                 )

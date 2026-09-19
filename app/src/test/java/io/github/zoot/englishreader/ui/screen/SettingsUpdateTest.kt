@@ -12,6 +12,7 @@ import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
 import io.github.zoot.englishreader.util.TtsCapability
 import io.github.zoot.englishreader.viewmodel.ManualCheckOutcome
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
+import io.github.zoot.englishreader.viewmodel.TtsModelsViewModel
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.channels.Channel
@@ -32,6 +33,10 @@ class SettingsUpdateTest {
     private val checking = mutableStateOf(false)
     private val outcomes = Channel<ManualCheckOutcome>(Channel.BUFFERED)
     private var clicks = 0
+    private val voiceModels = mockk<TtsModelsViewModel>(relaxed = true).also {
+        every { it.states } returns MutableStateFlow(emptyMap())
+        every { it.events } returns emptyFlow()
+    }
     private val model = mockk<SettingsViewModel>(relaxed = true).also {
         every { it.fontSizeOption } returns MutableStateFlow(FontSizeOption.DEFAULT)
         every { it.themeOption } returns MutableStateFlow(ThemeOption.DEFAULT)
@@ -53,7 +58,8 @@ class SettingsUpdateTest {
                     onCheckForUpdate = { clicks++; checking.value = true },
                     checkingForUpdate = checking.value,
                     manualUpdateOutcomes = events,
-                    viewModel = model
+                    viewModel = model,
+                    modelsViewModel = voiceModels
                 )
             }
         }

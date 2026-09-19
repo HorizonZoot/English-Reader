@@ -357,7 +357,7 @@ fun EnglishReaderNavigation() {
         ) { backStackEntry ->
             val articleId = backStackEntry.arguments?.getLong("articleId") ?: 0L
             val viewModel: ReadingViewModel = hiltViewModel()
-            TtsSystemActions(viewModel.ttsSystemActions)
+            TtsSystemActions(viewModel.ttsSystemActions) { navController.navigate("settings") }
             ReadingScreen(
                 articleId = articleId,
                 onBack = { navController.popBackStack() },
@@ -420,11 +420,13 @@ fun EnglishReaderNavigation() {
 }
 
 @Composable
-private fun TtsSystemActions(actions: Flow<TtsSystemAction>) {
+private fun TtsSystemActions(actions: Flow<TtsSystemAction>, onOpenVoiceModels: () -> Unit = {}) {
     val context = LocalContext.current
     LaunchedEffect(actions) {
         actions.collect { action ->
-            if (!openTtsSystemAction(context, action)) {
+            if (action == TtsSystemAction.OPEN_VOICE_MODELS) {
+                onOpenVoiceModels()
+            } else if (!openTtsSystemAction(context, action)) {
                 Toast.makeText(context, R.string.tts_system_action_unavailable, Toast.LENGTH_LONG).show()
             }
         }
@@ -436,6 +438,7 @@ internal fun openTtsSystemAction(context: Context, action: TtsSystemAction): Boo
         // Android exposes this settings action at runtime, but not as an SDK 34 constant.
         TtsSystemAction.OPEN_SETTINGS -> "com.android.settings.TTS_SETTINGS"
         TtsSystemAction.INSTALL_DATA -> TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA
+        TtsSystemAction.OPEN_VOICE_MODELS -> return false
     })
     return try {
         context.startActivity(intent)

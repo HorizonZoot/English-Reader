@@ -85,6 +85,8 @@ import io.github.zoot.englishreader.util.TtsCapability
 import io.github.zoot.englishreader.viewmodel.ManualCheckOutcome
 import io.github.zoot.englishreader.viewmodel.ProfileActionResult
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
+import io.github.zoot.englishreader.viewmodel.TtsModelsViewModel
+import io.github.zoot.englishreader.ui.component.LocalVoiceModelsSection
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import java.text.NumberFormat
@@ -102,13 +104,15 @@ fun SettingsScreen(
     onCheckForUpdate: () -> Unit = {},
     checkingForUpdate: Boolean = false,
     manualUpdateOutcomes: Flow<ManualCheckOutcome> = emptyFlow(),
-    viewModel: SettingsViewModel = hiltViewModel()
+    viewModel: SettingsViewModel = hiltViewModel(),
+    modelsViewModel: TtsModelsViewModel = hiltViewModel()
 ) {
     val fontSize by viewModel.fontSizeOption.collectAsStateWithLifecycle()
     val theme by viewModel.themeOption.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val activeProfileId by viewModel.activeProfileId.collectAsStateWithLifecycle()
     val dictionaryPackState by viewModel.dictionaryPackState.collectAsStateWithLifecycle()
+    val modelStates by modelsViewModel.states.collectAsStateWithLifecycle()
     val ttsCapability by viewModel.ttsCapability.collectAsStateWithLifecycle()
     val allowNetworkTts by viewModel.allowNetworkTts.collectAsStateWithLifecycle()
     val savingTtsPreference by viewModel.savingTtsPreference.collectAsStateWithLifecycle()
@@ -135,6 +139,10 @@ fun SettingsScreen(
     }
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    LaunchedEffect(modelsViewModel) {
+        modelsViewModel.refresh()
+        modelsViewModel.events.collect { snackbarHostState.showSnackbar(context.getString(it)) }
+    }
 
     LaunchedEffect(viewModel) {
         viewModel.ttsPreferenceErrors.collect {
@@ -185,6 +193,7 @@ fun SettingsScreen(
                 onCancelDictionaryPack = viewModel::cancelDictionaryPackInstall,
                 onRemoveDictionaryPack = viewModel::removeDictionaryPack
             )
+            LocalVoiceModelsSection(modelStates, modelsViewModel::install, modelsViewModel::cancel, modelsViewModel::remove)
             TtsSettingsSection(
                 capability = ttsCapability,
                 allowNetwork = allowNetworkTts,

@@ -373,6 +373,24 @@ class ReadingTtsViewModelTest {
         coVerify(exactly = 1) { preferences.clearTtsVoiceIf("gone") }
     }
 
+    @Test
+    fun voiceSettings_modelUnavailable_keepsExplicitPreferenceForRepair() = runTest {
+        val vm = loadedViewModel()
+        val voiceId = "model/kokoro-int8-en-v0_19/1"
+        every { preferences.ttsReadingSettings } returns MutableStateFlow(TtsReadingSettings(voiceId = voiceId))
+        every { player.refreshVoices(any(), any(), any()) } answers {
+            thirdArg<(TtsVoiceSnapshot) -> Unit>()(TtsVoiceSnapshot(
+                capability = TtsCapability.ModelUnavailable,
+                catalogLoaded = true
+            ))
+        }
+        vm.openVoiceSettings()
+        runCurrent()
+        assertEquals(voiceId, vm.voiceSettings.value.settings.voiceId)
+        assertEquals(TtsCapability.ModelUnavailable, vm.voiceSettings.value.snapshot.capability)
+        coVerify(exactly = 0) { preferences.clearTtsVoiceIf(any()) }
+    }
+
     /**
      * 查词兜底也要用用户挑的语音。
      *

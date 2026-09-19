@@ -64,9 +64,6 @@ android {
     }
 
     buildTypes {
-        debug {
-            applicationIdSuffix = ".ttsspike"
-        }
         release {
             isMinifyEnabled = true
             // 资源压缩依赖代码压缩（isMinifyEnabled 必须为 true），它会移除未被引用的资源。
@@ -83,7 +80,7 @@ android {
     }
 
     packaging {
-        // Compress native libraries to keep the opt-in model runtime within the APK budget.
+        // Compress native libraries to keep the offline voice runtime within the APK budget.
         jniLibs.useLegacyPackaging = true
     }
 
@@ -132,9 +129,10 @@ tasks.withType<Test>().configureEach {
 }
 
 dependencies {
-    // Spike: https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
+    // https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-1.13.8.aar
     // SHA-256: 633c24321e06b1fe79feafa03ea16cbc0f8a286641e2da3559bac91bdb13bd96
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
+    implementation(libs.commons.compress)
 
     implementation(libs.core.ktx)
     implementation(libs.lifecycle.runtime.ktx)

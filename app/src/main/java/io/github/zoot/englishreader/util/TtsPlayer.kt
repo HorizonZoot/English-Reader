@@ -7,20 +7,23 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.util.Log
+import androidx.annotation.StringRes
 import io.github.zoot.englishreader.model.TtsReadingSettings
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
+import io.github.zoot.englishreader.data.tts.TtsModelCatalog
 
-enum class TtsVoiceMode { LOCAL, NETWORK }
+enum class TtsVoiceMode { LOCAL, NETWORK, LOCAL_MODEL }
 
 /** Opaque, engine-scoped identity. UI displays locale/mode and an ordinal, never the key. */
 data class TtsVoiceOption(
     val id: String,
     val localeTag: String,
     val mode: TtsVoiceMode,
-    val quality: Int
+    val quality: Int,
+    @StringRes val nameRes: Int? = null
 )
 
 data class TtsVoiceSnapshot(
@@ -41,6 +44,7 @@ sealed class TtsCapability {
     object LanguageDataMissing : TtsCapability()
     object LanguageNotSupported : TtsCapability()
     object InitializationFailed : TtsCapability()
+    object ModelUnavailable : TtsCapability()
 }
 
 enum class TtsFailureReason {
@@ -50,7 +54,8 @@ enum class TtsFailureReason {
     NETWORK_VOICE_DISABLED,
     NETWORK_UNAVAILABLE,
     INITIALIZATION_FAILED,
-    SYNTHESIS_FAILED
+    SYNTHESIS_FAILED,
+    MODEL_UNAVAILABLE
 }
 
 fun TtsCapability.failureReason(): TtsFailureReason? = when (this) {
@@ -61,6 +66,7 @@ fun TtsCapability.failureReason(): TtsFailureReason? = when (this) {
     TtsCapability.NetworkVoiceDisabled -> TtsFailureReason.NETWORK_VOICE_DISABLED
     TtsCapability.NetworkUnavailable -> TtsFailureReason.NETWORK_UNAVAILABLE
     TtsCapability.InitializationFailed -> TtsFailureReason.INITIALIZATION_FAILED
+    TtsCapability.ModelUnavailable -> TtsFailureReason.MODEL_UNAVAILABLE
 }
 
 sealed class TtsPlaybackResult {
@@ -69,16 +75,18 @@ sealed class TtsPlaybackResult {
     data class Failed(val reason: TtsFailureReason) : TtsPlaybackResult()
 }
 
-/** All engine access and callbacks are serialized on the main thread. */
+/** System engine access and public callbacks run on main; local inference owns its background executor. */
 class TtsPlayer internal constructor(
     private val networkChecker: NetworkChecker,
+    private val localBackend: LocalTtsBackend? = null,
     private val createEngine: (TextToSpeech.OnInitListener) -> TextToSpeech
 ) {
     @Inject
     constructor(
         @ApplicationContext context: Context,
-        networkChecker: NetworkChecker
-    ) : this(networkChecker, { listener -> TextToSpeech(context, listener) })
+        networkChecker: NetworkChecker,
+        localBackend: LocalModelTtsBackend
+    ) : this(networkChecker, localBackend, { listener -> TextToSpeech(context, listener) })
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
@@ -93,6 +101,8 @@ class TtsPlayer internal constructor(
     private var activeSpeech: ActiveSpeech? = null
     private var nextUtteranceId = 0L
     private var voiceSnapshot = TtsVoiceSnapshot()
+    private var catalogGeneration = 0L
+    private var refreshingLocal = false
 
     private class PendingSpeak(
         val text: String,
@@ -201,6 +211,14 @@ class TtsPlayer internal constructor(
             fallBackWhenPreferredUnusable = fallBackWhenPreferredUnusable,
             callback = onResult
         )
+        if (localBackend != null && (request.settings.voiceId == null || TtsModelCatalog.isModelVoice(request.settings.voiceId))) {
+            speakLocal(request)
+        } else {
+            enqueueSystemSpeech(request)
+        }
+    }
+
+    private fun enqueueSystemSpeech(request: PendingSpeak) {
         if (engineReady) {
             speakWithCurrentEngine(request)
         } else {
@@ -208,6 +226,34 @@ class TtsPlayer internal constructor(
             if (!initializing) {
                 shutdownEngine()
                 ensureInitialized()
+            }
+        }
+    }
+
+    private fun speakLocal(request: PendingSpeak) {
+        val backend = localBackend ?: return enqueueSystemSpeech(request)
+        val generation = speechGeneration
+        val voiceId = request.settings.voiceId ?: TtsModelCatalog.defaultVoiceId
+        capability = TtsCapability.Ready(TtsVoiceMode.LOCAL_MODEL)
+        voiceSnapshot = voiceSnapshot.copy(
+            voices = backend.voices() + voiceSnapshot.voices.filter { it.mode != TtsVoiceMode.LOCAL_MODEL },
+            capability = capability
+        )
+        backend.speak(request.text, voiceId, request.settings.speechRate) { result ->
+            onMain {
+                if (generation != speechGeneration) return@onMain
+                if (result is TtsPlaybackResult.Failed && request.fallBackWhenPreferredUnusable) {
+                    enqueueSystemSpeech(PendingSpeak(
+                        request.text, request.allowNetwork, TtsReadingSettings(),
+                        request.applySpeechRateStrictly, true, request.callback
+                    ))
+                } else {
+                    if (result is TtsPlaybackResult.Failed) {
+                        capability = TtsCapability.ModelUnavailable
+                        voiceSnapshot = voiceSnapshot.copy(capability = capability)
+                    }
+                    request.callback(result)
+                }
             }
         }
     }
@@ -224,7 +270,17 @@ class TtsPlayer internal constructor(
         stop()
         pendingRefresh = PendingRefresh(allowNetwork, settings.normalized(), onResult)
         shutdownEngine()
+        val generation = ++catalogGeneration
+        refreshingLocal = localBackend != null
         ensureInitialized()
+        localBackend?.refresh {
+            onMain {
+                if (generation == catalogGeneration) {
+                    refreshingLocal = false
+                    if (!initializing) finishPendingRequests()
+                }
+            }
+        }
     }
 
     fun currentCapability(): TtsCapability = capability
@@ -235,6 +291,7 @@ class TtsPlayer internal constructor(
         speechGeneration++
         pendingSpeak = null
         activeSpeech = null
+        localBackend?.stop()
         try {
             tts?.stop()
         } catch (cancellation: CancellationException) {
@@ -247,6 +304,9 @@ class TtsPlayer internal constructor(
     fun shutdown() = onMain {
         stop()
         pendingRefresh = null
+        catalogGeneration++
+        refreshingLocal = false
+        localBackend?.shutdown()
         shutdownEngine()
     }
 
@@ -262,6 +322,14 @@ class TtsPlayer internal constructor(
                     }
                 }
             }
+            if (localBackend != null) mainHandler.postDelayed({
+                if (generation == engineGeneration && initializing) {
+                    initializing = false
+                    engineGeneration++
+                    capability = TtsCapability.InitializationFailed
+                    finishPendingRequests()
+                }
+            }, 3_000)
         } catch (cancellation: CancellationException) {
             initializing = false
             engineGeneration++
@@ -308,6 +376,7 @@ class TtsPlayer internal constructor(
     }
 
     private fun finishPendingRequests() {
+        if (refreshingLocal) return
         val generation = speechGeneration
         val request = pendingSpeak
         pendingSpeak = null
@@ -325,11 +394,20 @@ class TtsPlayer internal constructor(
     private fun inspectVoice(
         allowNetwork: Boolean,
         preferredId: String?,
-        fallBackWhenPreferredUnusable: Boolean
+        fallBackWhenPreferredUnusable: Boolean,
+        includeLocal: Boolean = true
     ): VoiceSelection {
         val engine = tts
+        val localVoices = if (includeLocal) localBackend?.voices().orEmpty() else emptyList()
+        val selectedLocal = localVoices.firstOrNull { it.id == preferredId }
+            ?: localVoices.firstOrNull().takeIf { preferredId == null }
         if (!engineReady || engine == null) {
-            voiceSnapshot = TtsVoiceSnapshot(capability = capability)
+            capability = when {
+                selectedLocal != null -> TtsCapability.Ready(TtsVoiceMode.LOCAL_MODEL)
+                includeLocal && TtsModelCatalog.isModelVoice(preferredId) -> TtsCapability.ModelUnavailable
+                else -> capability
+            }
+            voiceSnapshot = TtsVoiceSnapshot(voices = localVoices, capability = capability)
             return VoiceSelection(null, capability)
         }
         return try {
@@ -341,7 +419,7 @@ class TtsPlayer internal constructor(
             val engineId = engine.defaultEngine.orEmpty()
             fun id(voice: Voice) = "$engineId/${voice.name}"
             val preferred = voices.firstOrNull { id(it) == preferredId }
-            val needsNetwork = allowNetwork && (preferred?.isNetworkConnectionRequired
+            val needsNetwork = selectedLocal == null && allowNetwork && (preferred?.isNetworkConnectionRequired
                 ?: voices.none { !it.isNetworkConnectionRequired })
             val decision = TtsVoicePolicy.select(
                 voices.map {
@@ -358,7 +436,9 @@ class TtsPlayer internal constructor(
                 preferredId = preferredId,
                 fallBackWhenPreferredUnusable = fallBackWhenPreferredUnusable
             )
-            val current = when (decision.availability) {
+            val current = if (selectedLocal != null) TtsCapability.Ready(TtsVoiceMode.LOCAL_MODEL)
+            else if (includeLocal && TtsModelCatalog.isModelVoice(preferredId)) TtsCapability.ModelUnavailable
+            else when (decision.availability) {
                 TtsVoiceAvailability.LOCAL -> TtsCapability.Ready(TtsVoiceMode.LOCAL)
                 TtsVoiceAvailability.NETWORK -> TtsCapability.Ready(TtsVoiceMode.NETWORK)
                 TtsVoiceAvailability.NETWORK_DISABLED -> TtsCapability.NetworkVoiceDisabled
@@ -367,7 +447,7 @@ class TtsPlayer internal constructor(
             }
             capability = current
             voiceSnapshot = TtsVoiceSnapshot(
-                voices = voices.map {
+                voices = localVoices + voices.map {
                     TtsVoiceOption(id(it), it.locale.toLanguageTag(),
                         if (it.isNetworkConnectionRequired) TtsVoiceMode.NETWORK else TtsVoiceMode.LOCAL,
                         it.quality)
@@ -379,8 +459,9 @@ class TtsPlayer internal constructor(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (_: Exception) {
-            capability = TtsCapability.InitializationFailed
-            voiceSnapshot = TtsVoiceSnapshot(capability = capability)
+            capability = if (selectedLocal != null) TtsCapability.Ready(TtsVoiceMode.LOCAL_MODEL)
+                else TtsCapability.InitializationFailed
+            voiceSnapshot = TtsVoiceSnapshot(voices = localVoices, capability = capability)
             VoiceSelection(null, capability)
         }
     }
@@ -389,7 +470,8 @@ class TtsPlayer internal constructor(
         val selection = inspectVoice(
             request.allowNetwork,
             request.settings.voiceId,
-            request.fallBackWhenPreferredUnusable
+            request.fallBackWhenPreferredUnusable,
+            includeLocal = false
         )
         val voice = selection.voice
         val ready = selection.capability as? TtsCapability.Ready

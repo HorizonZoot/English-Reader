@@ -993,6 +993,7 @@ class ReadingViewModel @Inject constructor(
     }
 
     private fun clearMissingVoice(settings: TtsReadingSettings, snapshot: TtsVoiceSnapshot) {
+        if (snapshot.capability == TtsCapability.ModelUnavailable) return
         val id = settings.voiceId ?: return
         if (snapshot.catalogLoaded && snapshot.voices.none { it.id == id }) {
             saveVoicePreference { settingsPreferences.clearTtsVoiceIf(id) }

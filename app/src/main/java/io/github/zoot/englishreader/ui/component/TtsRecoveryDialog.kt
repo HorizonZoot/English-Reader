@@ -39,14 +39,21 @@ fun TtsRecoveryDialog(
                         Text(stringResource(R.string.tts_use_network_once))
                     }
                 }
-                TextButton(
-                    onClick = { onSystemAction(TtsSystemAction.OPEN_SETTINGS) },
-                    modifier = Modifier.testTag("tts-recovery-settings")
-                ) { Text(stringResource(R.string.tts_system_settings)) }
-                TextButton(
-                    onClick = { onSystemAction(TtsSystemAction.INSTALL_DATA) },
-                    modifier = Modifier.testTag("tts-recovery-install")
-                ) { Text(stringResource(R.string.tts_install_data)) }
+                if (failure.reason == TtsFailureReason.MODEL_UNAVAILABLE) {
+                    TextButton(
+                        onClick = { onSystemAction(TtsSystemAction.OPEN_VOICE_MODELS) },
+                        modifier = Modifier.testTag("tts-recovery-models")
+                    ) { Text(stringResource(R.string.tts_models_title)) }
+                } else {
+                    TextButton(
+                        onClick = { onSystemAction(TtsSystemAction.OPEN_SETTINGS) },
+                        modifier = Modifier.testTag("tts-recovery-settings")
+                    ) { Text(stringResource(R.string.tts_system_settings)) }
+                    TextButton(
+                        onClick = { onSystemAction(TtsSystemAction.INSTALL_DATA) },
+                        modifier = Modifier.testTag("tts-recovery-install")
+                    ) { Text(stringResource(R.string.tts_install_data)) }
+                }
             }
         },
         confirmButton = {

@@ -38,10 +38,14 @@ object TtsModelCatalog {
         id = "libritts_r-medium-int8",
         nameRes = R.string.tts_model_libritts,
         kind = TtsModelKind.VITS,
-        archiveBytes = 24_702_805,
-        archiveSha256 = "7e4d9cf1082b111df1574b39768d09bb05a32b7b580f0fbafcba95915f0db1d6",
-        unpackedBytes = 40_467_049,
-        fileCount = 359,
+        // Repacked from the upstream release: the 112 non-English espeak-ng *_dict files are
+        // dropped (ru_dict alone is 8.5 MB). espeak-ng loads dictionaries lazily per language
+        // via "<dataDir>/<lang>_dict", so en_dict is the only one this app can reach. The
+        // lang/ and voices/ trees stay — the engine resolves voice definitions through them.
+        archiveBytes = 16_241_634,
+        archiveSha256 = "06763246143d7d574c54e8ce7f8a73d7ae9647fccba3f8f0db28e2c25830c3c6",
+        unpackedBytes = 23_377_312,
+        fileCount = 247,
         modelFile = "en_US-libritts_r-medium.onnx",
         sampleRate = 22_050,
         speakerCount = 904,

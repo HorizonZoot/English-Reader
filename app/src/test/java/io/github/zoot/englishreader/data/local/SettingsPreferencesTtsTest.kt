@@ -13,6 +13,9 @@ import io.mockk.every
 import io.mockk.mockk
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -105,12 +108,13 @@ class SettingsPreferencesTtsTest {
     @Test
     fun readingVoice_rateFirstWrite_persistsToDataStore() = runTest {
         val file = temporary.newFolder().resolve("voice.preferences_pb")
-        val scope = kotlinx.coroutines.CoroutineScope(backgroundScope.coroutineContext + kotlinx.coroutines.Job())
+        val storeJob = Job(backgroundScope.coroutineContext[Job])
+        val scope = CoroutineScope(backgroundScope.coroutineContext + storeJob)
         val store = PreferenceDataStoreFactory.create(scope = scope, produceFile = { file })
         try {
             SettingsPreferences(store).setTtsSpeechRate(1.8f)
         } finally {
-            scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+            storeJob.cancelAndJoin()
         }
         val reopened = PreferenceDataStoreFactory.create(scope = backgroundScope, produceFile = { file })
         assertEquals(1.8f, SettingsPreferences(reopened).ttsReadingSettings.first().speechRate)

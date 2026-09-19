@@ -309,9 +309,10 @@ class ReadingViewModelTest {
         runCurrent()
 
         verify(exactly = 1) { ttsPlayer.speakReading(eq("  First sentence.  "), any(), eq(false), any()) }
+        clearMocks(ttsPlayer, answers = false, recordedCalls = true)
         viewModel.dismissSentenceActions()
         advanceUntilIdle()
-        verify(atLeast = 2) { ttsPlayer.stop() }
+        verify(atLeast = 1) { ttsPlayer.stop() }
         assertNull(viewModel.selectedSentence.value)
         assertSame(AiSheetState.Hidden, viewModel.sentenceTranslationState.value)
     }
@@ -353,6 +354,7 @@ class ReadingViewModelTest {
         advanceUntilIdle()
         viewModel.selectSentence(42, 0, SentenceRange(0, "First sentence.", 0, 15))
 
+        clearMocks(ttsPlayer, answers = false, recordedCalls = true)
         viewModel.dismissSentencePopup()
         advanceUntilIdle()
 
@@ -361,7 +363,7 @@ class ReadingViewModelTest {
             viewModel.selectedSentence.value
         )
         assertSame(AiSheetState.Hidden, viewModel.sentenceTranslationState.value)
-        verify(atLeast = 2) { ttsPlayer.stop() }
+        verify(atLeast = 1) { ttsPlayer.stop() }
     }
 
     @Test

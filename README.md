@@ -44,11 +44,19 @@ English Reader 是一个用于**沉浸式英文阅读**的 Android 应用：导�
 - **全文翻译**：逐段翻译整篇文章或整本书的全部章节，**像可恢复下载一样**持久化进度——中断后只继续未完成的段落，已成功的段落不会重复请求（也就不会重复计费）；失败项可单独重试；全部成功后才一次性写入文章译文。
 - **语义缓存**：缓存键只由「决定输出的输入」构成，因此同一句话在不同文章里共享缓存；30 天固定 TTL、500 行容量上限。
 
+### 更新
+
+- **启动时检查**：读取 GitHub Release 列表判断是否有新版本，24 小时内不重复请求；无网络时静默跳过。
+- **手动检查**：「设置 → 关于 → 检查更新」，分别给出「发现新版本」「已是最新」「检查失败」三种反馈。
+- **发现新版本**：弹窗展示版本号与更新说明，「立即更新」跳转 Release 页面，**不做应用内静默安装**。
+- 判断依据是 Release **列表**而非 `latest` 接口，因此 beta 等预发布版本也能被发现；版本比较兼容 `v` 前缀、段数差异与预发布后缀。
+
 ### 隐私与安全
 
 - API Key 只经 `EncryptedAiCredentialStorage` 存储（AndroidX Security Crypto），**不进** Room、DataStore、源码、日志或 Compose 保存状态。
 - 不记录 prompt、请求/响应体、文章与句子原文、缓存译文、完整端点 URL 或原始异常信息。
 - `usesCleartextTraffic="false"`，不支持明文 HTTP。
+- 更新检查只从 GitHub 公开 API **读取** Release 信息，不上传任何内容，也不携带设备或用户标识。
 - AI 失败按**类型化异常与其 cause 链**分类，而非匹配本地化异常文本。
 
 ---
@@ -78,6 +86,7 @@ English Reader 是一个用于**沉浸式英文阅读**的 Android 应用：导�
 | 凭据 | AndroidX Security Crypto 1.1.0-beta01 |
 | 网络 | Retrofit 2.9.0、OkHttp 4.12.0、Moshi 1.15.0 |
 | EPUB | Readium `shared` + `streamer` 3.0.3（仅用解析，**刻意不使用 Navigator**） |
+| 离线语音 | sherpa-onnx 1.13.8 + ONNX Runtime（仅 arm64-v8a；内置 espeak-ng 使分发受 GPLv3 约束） |
 | 异步 | Coroutines、Flow、Channel |
 | 测试 | JUnit4、MockK 1.13.9、Robolectric 4.16.1、Turbine 1.0.0、MockWebServer、Compose UI Test、Room Testing |
 | SDK | minSdk 24，compile/target SDK 34，启用 core library desugaring |
@@ -100,11 +109,14 @@ ViewModel 持有屏幕状态与异步协调；Compose 层尽量无状态，用 `
 ```
 EnglishReader/
 ├── app/
+│   ├── libs/sherpa-onnx-1.13.8.aar             # 离线语音运行时（arm64-v8a，内置 GPL-3.0 的 espeak-ng）
 │   ├── schemas/io.github.zoot.englishreader.data.database.EnglishReaderDatabase/
 │   │   └── 3.json · 4.json · 5.json · 6.json   # 导出的 Room schema（v1/v2 已不可考）
 │   ├── src/
 │   │   ├── main/
 │   │   │   ├── assets/dict_base.tsv            # 内置离线词典，7,005 条
+│   │   │   ├── assets/tts/                     # 内置 LibriTTS 模型 ZIP（默认 Jen 音色）
+│   │   │   ├── assets/licenses/                # sherpa-onnx / ONNX Runtime / espeak-ng / commons-compress 许可原文
 │   │   │   ├── java/io/github/zoot/englishreader/
 │   │   │   │   ├── MainActivity.kt             # 单 Activity + Navigation 图
 │   │   │   │   ├── EnglishReaderApp.kt         # Hilt Application
@@ -120,12 +132,15 @@ EnglishReader/
 │   │   │   │   │   ├── local/                  # DataStore 偏好、加密凭据、AI Profile
 │   │   │   │   │   ├── remote/ai/              # OpenAI 兼容 transport、DTO、端点解析
 │   │   │   │   │   ├── remote/dictionary/      # Free Dictionary API
-│   │   │   │   │   └── repository/             # 文章、书籍、生词、词典、AI、全文翻译
+│   │   │   │   │   ├── remote/update/          # GitHub Release 查询
+│   │   │   │   │   ├── tts/                    # 离线语音模型清单、安装器与解包校验
+│   │   │   │   │   ├── update/                 # 版本号比较与更新说明格式化
+│   │   │   │   │   └── repository/             # 文章、书籍、生词、词典、AI、全文翻译、更新
 │   │   │   │   ├── di/                         # Hilt 模块（DB、网络、设置、协程作用域）
 │   │   │   │   ├── model/                      # 跨层不可变模型与状态
 │   │   │   │   ├── ui/
 │   │   │   │   │   ├── component/              # InteractiveText、浮窗、各类 Sheet
-│   │   │   │   │   ├── dialog/                 # 导入与粘贴对话框
+│   │   │   │   │   ├── dialog/                 # 导入、粘贴、更新提示对话框
 │   │   │   │   │   ├── screen/                 # 阅读、书架、目录、生词本、设置
 │   │   │   │   │   └── theme/                  # Material 3 主题
 │   │   │   │   ├── util/                       # 分句、分段、词形还原、TTS、缓存键

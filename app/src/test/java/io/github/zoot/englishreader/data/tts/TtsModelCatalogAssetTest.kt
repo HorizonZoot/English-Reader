@@ -48,6 +48,12 @@ class TtsModelCatalogAssetTest {
                 for (name in listOf("phondata", "phontab", "phonindex", "intonations")) {
                     assertTrue("espeak-ng-data/$name missing", File(directory, "espeak-ng-data/$name").length() > 0)
                 }
+                // The trim that keeps ~17 MB of non-English dictionaries out of the APK is only
+                // observable here. espeak-ng loads "<lang>_dict" lazily, so any other language
+                // would ship silently; a size/hash update alone would not catch it returning.
+                val dictionaries = directory.walkTopDown().filter { it.isFile }
+                    .map { it.name }.filter { it.endsWith("_dict") }.toList()
+                assertEquals("only the English dictionary should ship", listOf("en_dict"), dictionaries.sorted())
             }
         }
     }

@@ -3,6 +3,8 @@ package io.github.zoot.englishreader.data.repository
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import io.github.zoot.englishreader.data.ai.AiClientResult
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.ai.AiExecutor
@@ -13,25 +15,40 @@ import io.github.zoot.englishreader.data.ai.AiTextNormalizer
 import io.github.zoot.englishreader.data.ai.ExplanationType
 import io.github.zoot.englishreader.data.ai.ResolvedAiExplanationOperation
 import io.github.zoot.englishreader.data.ai.ResolvedAiExplanationRequest
+import io.github.zoot.englishreader.data.dao.ArticleDao
+import io.github.zoot.englishreader.data.dao.WholeTranslationDao
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
 import io.github.zoot.englishreader.data.local.AiAuthStrategy
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
+import io.github.zoot.englishreader.model.AppliedTranslationLayoutCodec
+import io.github.zoot.englishreader.model.ArticleEditResult
+import io.github.zoot.englishreader.model.ArticleEditSnapshot
+import io.github.zoot.englishreader.model.DefaultTranslationMaterializationPolicy
 import io.github.zoot.englishreader.model.TranslationFailureReason
+import io.github.zoot.englishreader.model.TranslationMaterializationPolicy
 import io.github.zoot.englishreader.model.WholeTranslationScope
 import io.github.zoot.englishreader.model.WholeTranslationTaskStatus
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
+import java.io.IOException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -213,6 +230,98 @@ class WholeTranslationRepositoryTest {
         assertEquals(TranslationFailureReason.PARAGRAPH_TOO_LONG, segmentFailure(taskId, articleId, 0))
     }
 
+    @Test
+    fun retryFailed_correctedCredentials_resumesOriginalTaskWithoutRepeatingSuccesses() = runTest {
+        val articleId = insertArticle("A.\n\nB.\n\nC.")
+        failThenAbort(succeedFirst = 1)
+        val repo = repository(this)
+        val taskId = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        assertEquals(listOf("A.", "B."), requestedInputs)
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(taskId))
+
+        val corrected = PROFILE.copy(apiKey = "corrected-test-key")
+        coEvery { resolver.resolveActiveProfileSnapshot() } returns ProfileResolutionResult.Available(corrected)
+        every { resolver.resolveWithProfile(any(), any()) } answers {
+            val profile = firstArg<ResolvedAiProfile>()
+            val text = AiTextNormalizer.normalizeInput(secondArg<AiExplanationInput>().text)
+            AiExplanationResolutionResult.Ready(operationFor(text, profile))
+        }
+        val profiles = mutableListOf<ResolvedAiProfile>()
+        coEvery { executor.execute(any(), any()) } answers {
+            val request = firstArg<ResolvedAiExplanationOperation>().request
+            requestedInputs += request.normalizedInput
+            profiles += request.profile
+            AiClientResult.Success("译:${request.normalizedInput}")
+        }
+        requestedInputs.clear()
+
+        repo.retryFailed(taskId)
+        advanceUntilIdle()
+
+        assertEquals(listOf("B.", "C."), requestedInputs)
+        assertTrue(profiles.all { it === corrected })
+        assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus(taskId))
+        assertEquals("译\n\n译:B.\n\n译:C.", db.articleDao().getArticleById(articleId)?.translation)
+        assertEquals(listOf(1, 2, 1), db.wholeTranslationDao().getSegments(taskId).map { it.attemptCount })
+    }
+
+    @Test
+    fun retryFailed_configurationStillMissing_preservesFailedSegmentsWithoutRequesting() = runTest {
+        val articleId = insertArticle("A.\n\nB.")
+        failThenAbort(succeedFirst = 0)
+        val repo = repository(this)
+        val taskId = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        val segments = db.wholeTranslationDao().getSegments(taskId)
+        requestedInputs.clear()
+        coEvery { resolver.resolveActiveProfileSnapshot() } returns ProfileResolutionResult.Missing
+
+        repo.retryFailed(taskId)
+        advanceUntilIdle()
+
+        assertTrue(requestedInputs.isEmpty())
+        assertEquals(segments, db.wholeTranslationDao().getSegments(taskId))
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(taskId))
+    }
+
+    @Test
+    fun retryFailed_authStillInvalid_attemptsFailedSegmentOnceAndAborts() = runTest {
+        val articleId = insertArticle("A.\n\nB.")
+        failThenAbort(succeedFirst = 0)
+        val repo = repository(this)
+        val taskId = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        requestedInputs.clear()
+
+        repo.retryFailed(taskId)
+        advanceUntilIdle()
+
+        assertEquals(listOf("A."), requestedInputs)
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(taskId))
+        assertEquals(listOf(2, 0), db.wholeTranslationDao().getSegments(taskId).map { it.attemptCount })
+    }
+
+    @Test
+    fun retryFailed_sourceEdited_cancelsBeforeResettingConfigurationFailure() = runTest {
+        val articleId = insertArticle("Original.")
+        failThenAbort(succeedFirst = 0)
+        val repo = repository(this)
+        val taskId = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        val segments = db.wholeTranslationDao().getSegments(taskId)
+        val original = db.articleDao().getArticleById(articleId)!!
+        db.articleDao().updateArticle(original.copy(content = "Edited."))
+        requestedInputs.clear()
+
+        repo.retryFailed(taskId)
+        advanceUntilIdle()
+
+        assertTrue(requestedInputs.isEmpty())
+        assertEquals(WholeTranslationTaskStatus.CANCELLED, taskStatus(taskId))
+        assertEquals(segments, db.wholeTranslationDao().getSegments(taskId))
+    }
+
     // ---- 失败三分法 ----
 
     @Test
@@ -261,6 +370,39 @@ class WholeTranslationRepositoryTest {
 
         assertEquals(4, requestedInputs.size)
         assertEquals(1, resolutions)
+    }
+
+    @Test
+    fun run_truncatedParagraph_preservesOldTranslationUntilExplicitRetryCompletes() = runTest {
+        val articleId = insertArticle("A.\n\nB.\n\nC.")
+        val article = db.articleDao().getArticleById(articleId)!!
+        db.articleDao().updateArticle(article.copy(translation = "旧译文"))
+        coEvery { executor.execute(any(), any()) } answers {
+            val text = firstArg<ResolvedAiExplanationOperation>().request.normalizedInput
+            requestedInputs += text
+            if (text == "B.") AiClientResult.Failure(AiError.ResponseTruncated)
+            else AiClientResult.Success("译:$text")
+        }
+        val repo = repository(this)
+        val taskId = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+
+        assertEquals(listOf("A.", "B.", "C."), requestedInputs)
+        assertEquals(WholeTranslationTaskStatus.PAUSED, taskStatus(taskId))
+        assertEquals("旧译文", db.articleDao().getArticleById(articleId)?.translation)
+        val failed = db.wholeTranslationDao().getSegments(taskId)[1]
+        assertEquals("failed", failed.status)
+        assertNull(failed.translatedText)
+        assertEquals(TranslationFailureReason.PROVIDER_RESPONSE, segmentFailure(taskId, articleId, 1))
+
+        requestedInputs.clear()
+        succeedWith { "译:$it" }
+        repo.retryFailed(taskId)
+        advanceUntilIdle()
+
+        assertEquals(listOf("B."), requestedInputs)
+        assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus(taskId))
+        assertEquals("译:A.\n\n译:B.\n\n译:C.", db.articleDao().getArticleById(articleId)?.translation)
     }
 
     // ---- 源变化 ----
@@ -379,6 +521,58 @@ class WholeTranslationRepositoryTest {
     }
 
     @Test
+    fun cancel_pendingStatusWrite_blocksRetryUntilCancellationIsPersisted() = runTest {
+        val stored = db.wholeTranslationDao()
+        val cancellationEntered = CompletableDeferred<Unit>()
+        val cancellationGate = CompletableDeferred<Unit>()
+        val remoteGate = CompletableDeferred<Unit>()
+        val delayed = object : WholeTranslationDao by stored {
+            override suspend fun updateTaskStatus(taskId: Long, status: String, failureReason: String?, now: Long): Int {
+                if (status == "cancelled") {
+                    cancellationEntered.complete(Unit)
+                    cancellationGate.await()
+                }
+                return stored.updateTaskStatus(taskId, status, failureReason, now)
+            }
+        }
+        val articleId = insertArticle("Original.")
+        failThenAbort(succeedFirst = 0)
+        val repo = WholeTranslationRepository(delayed, db.articleDao(), resolver, executor, this, { NOW }, POLICY)
+        val taskId = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(taskId))
+        requestedInputs.clear()
+        coEvery { executor.execute(any(), any()) } coAnswers {
+            requestedInputs += firstArg<ResolvedAiExplanationOperation>().request.normalizedInput
+            remoteGate.await()
+            AiClientResult.Success("译文")
+        }
+
+        try {
+            val cancellation = launch { repo.cancel(taskId) }
+            runCurrent()
+            assertTrue(cancellationEntered.isCompleted)
+            assertTrue(!cancellation.isCompleted)
+            val retry = launch { repo.retryFailed(taskId) }
+            runCurrent()
+
+            assertTrue("retry must not send a paid request while cancellation is being persisted", requestedInputs.isEmpty())
+            cancellationGate.complete(Unit)
+            cancellation.join()
+            retry.join()
+            advanceUntilIdle()
+
+            assertEquals(WholeTranslationTaskStatus.CANCELLED, taskStatus(taskId))
+            assertTrue(requestedInputs.isEmpty())
+            assertNull(db.articleDao().getArticleById(articleId)?.translation)
+        } finally {
+            cancellationGate.complete(Unit)
+            remoteGate.complete(Unit)
+            advanceUntilIdle()
+        }
+    }
+
+    @Test
     fun resume_alreadyRunning_doesNotStartSecondWorker() = runTest {
         val articleId = insertArticle("A.\n\nB.")
         val gate = CompletableDeferred<Unit>()
@@ -401,6 +595,247 @@ class WholeTranslationRepositoryTest {
         advanceUntilIdle()
     }
 
+    @Test
+    fun resume_changedSource_cancelsStaleTaskAndNewStartUsesFreshSnapshot() = runTest {
+        val articleId = insertArticle("Old one.\n\nOld two.")
+        val scope = WholeTranslationScope.CurrentArticle(articleId)
+        failThenAbort(succeedFirst = 1)
+        val repo = repository(this)
+        val oldTask = (repo.start(scope) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        val checkpoint = db.wholeTranslationDao().getSegments(oldTask)
+        val article = db.articleDao().getArticleById(articleId)!!
+        db.articleDao().updateArticle(article.copy(content = "New one.\n\nNew two."))
+        requestedInputs.clear()
+
+        repo.resume(oldTask)
+        advanceUntilIdle()
+        assertTrue("stale resume must not send a request", requestedInputs.isEmpty())
+        assertEquals(WholeTranslationTaskStatus.CANCELLED, taskStatus(oldTask))
+        assertNull(repo.findResumable(scope))
+        assertEquals(checkpoint, db.wholeTranslationDao().getSegments(oldTask))
+
+        succeedWith { "译:$it" }
+        val fresh = repo.start(scope) as WholeTranslationStartResult.Started
+        advanceUntilIdle()
+        assertTrue(fresh.taskId != oldTask)
+        assertEquals(listOf("New one.", "New two."), requestedInputs)
+        assertEquals("译:New one.\n\n译:New two.", db.articleDao().getArticleById(articleId)?.translation)
+    }
+
+    @Test
+    fun start_sourceChangesBetweenReadAndCreate_rejectsWithoutTaskOrRequest() = runTest {
+        val articleId = insertArticle("Original.")
+        val reader = mockk<ArticleDao>()
+        coEvery { reader.getArticleById(articleId) } coAnswers {
+            val opened = db.articleDao().getArticleById(articleId)!!
+            db.articleDao().updateArticle(opened.copy(content = "Edited."))
+            opened
+        }
+        val repo = WholeTranslationRepository(
+            db.wholeTranslationDao(), reader, resolver, executor, backgroundScope, { NOW }, POLICY
+        )
+
+        assertEquals(WholeTranslationStartResult.SourceChanged,
+            repo.start(WholeTranslationScope.CurrentArticle(articleId)))
+        assertNull(db.wholeTranslationDao().findResumableTask("article:$articleId"))
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun resume_terminalTasks_neverResolveProfileOrIssueNewRequests() = runTest {
+        val repo = repository(this)
+        succeedWith { "译:$it" }
+        val completedArticle = insertArticle("Completed.")
+        val completed = (repo.start(WholeTranslationScope.CurrentArticle(completedArticle)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        val cancelledArticle = insertArticle("Cancelled.")
+        val cancelled = (repo.start(WholeTranslationScope.CurrentArticle(cancelledArticle)) as WholeTranslationStartResult.Started).taskId
+        repo.cancel(cancelled)
+        advanceUntilIdle()
+        requestedInputs.clear()
+        var resolutions = 0
+        coEvery { resolver.resolveActiveProfileSnapshot() } answers {
+            resolutions++
+            ProfileResolutionResult.Available(PROFILE)
+        }
+
+        for (taskId in listOf(completed, cancelled)) {
+            repo.resume(taskId)
+            repo.retryFailed(taskId)
+        }
+        advanceUntilIdle()
+
+        assertEquals(0, resolutions)
+        assertTrue(requestedInputs.isEmpty())
+        assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus(completed))
+        assertEquals(WholeTranslationTaskStatus.CANCELLED, taskStatus(cancelled))
+    }
+
+    @Test
+    fun edit_pendingRequestThenOriginalBodyRestored_lateResultCannotReviveOldTask() = runTest {
+        val articleId = insertArticle("A.\n\nB.\n\nC.")
+        val original = db.articleDao().getArticleById(articleId)!!
+        val gate = CompletableDeferred<Unit>()
+        coEvery { executor.execute(any(), any()) } coAnswers {
+            val text = firstArg<ResolvedAiExplanationOperation>().request.normalizedInput
+            requestedInputs += text
+            if (text == "B.") withContext(NonCancellable) { gate.await() }
+            AiClientResult.Success("译:$text")
+        }
+        val repo = repository(this)
+        val taskId = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        assertEquals(listOf("A.", "B."), requestedInputs)
+        val editor = ArticleRepository(db.articleDao(), backgroundScope, AppliedTranslationLayoutCodec(Moshi.Builder().build()))
+        assertEquals(ArticleEditResult.Saved,
+            editor.saveEdit(ArticleEditSnapshot(articleId, original.title, original.content), original.title, "Edited."))
+        assertEquals(WholeTranslationTaskStatus.CANCELLED, taskStatus(taskId))
+        assertTrue("the old remote call must still be held", !gate.isCompleted)
+        assertEquals(ArticleEditResult.Saved,
+            editor.saveEdit(ArticleEditSnapshot(articleId, original.title, "Edited."), original.title, original.content))
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        repo.resume(taskId)
+        advanceUntilIdle()
+
+        assertEquals(listOf("A.", "B."), requestedInputs)
+        assertEquals(WholeTranslationTaskStatus.CANCELLED, taskStatus(taskId))
+        assertEquals(original.content, db.articleDao().getArticleById(articleId)?.content)
+        assertNull(db.articleDao().getArticleById(articleId)?.translation)
+        val segments = db.wholeTranslationDao().getSegments(taskId)
+        assertEquals("译:A.", segments.first().translatedText)
+        assertNull(segments[1].translatedText)
+        assertEquals("untranslated", segments[2].status)
+    }
+
+    @Test
+    fun start_concurrentSameScope_createsOneTaskWhileFirstSnapshotIsPending() = runTest {
+        val articleId = insertArticle("Original.")
+        val scope = WholeTranslationScope.CurrentArticle(articleId)
+        val snapshotStarted = CompletableDeferred<Unit>()
+        val snapshotGate = CompletableDeferred<Unit>()
+        val remoteGate = CompletableDeferred<Unit>()
+        var snapshotReads = 0
+        val reader = mockk<ArticleDao>()
+        coEvery { reader.getArticleById(articleId) } coAnswers {
+            snapshotReads++
+            snapshotStarted.complete(Unit)
+            snapshotGate.await()
+            db.articleDao().getArticleById(articleId)
+        }
+        coEvery { executor.execute(any(), any()) } coAnswers {
+            requestedInputs += firstArg<ResolvedAiExplanationOperation>().request.normalizedInput
+            remoteGate.await()
+            AiClientResult.Success("译文")
+        }
+        val repo = WholeTranslationRepository(db.wholeTranslationDao(), reader, resolver, executor, this, { NOW }, POLICY)
+        val first = async { repo.start(scope) }
+        advanceUntilIdle()
+        assertTrue(snapshotStarted.isCompleted)
+        val second = async { repo.start(scope) }
+        runCurrent()
+        assertEquals(2, snapshotReads)
+        assertTrue(!first.isCompleted && !second.isCompleted)
+
+        snapshotGate.complete(Unit)
+        val created = first.await() as WholeTranslationStartResult.Started
+        assertEquals(WholeTranslationStartResult.Existing(created.taskId), second.await())
+        advanceUntilIdle()
+        assertEquals(listOf("Original."), requestedInputs)
+        remoteGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus(created.taskId))
+    }
+
+    @Test
+    fun findResumable_changedSource_filtersBeforeAnyResume() = runTest {
+        val articleId = insertArticle("Old.")
+        val scope = WholeTranslationScope.CurrentArticle(articleId)
+        failThenAbort(succeedFirst = 0)
+        val repo = repository(this)
+        val task = (repo.start(scope) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(task))
+        val checkpoint = db.wholeTranslationDao().getSegments(task)
+        val article = db.articleDao().getArticleById(articleId)!!
+        db.articleDao().updateArticle(article.copy(content = "Edited."))
+        requestedInputs.clear()
+
+        assertNull(repo.findResumable(scope))
+        assertEquals(WholeTranslationTaskStatus.CANCELLED, taskStatus(task))
+        assertEquals(checkpoint, db.wholeTranslationDao().getSegments(task))
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun run_beginTaskFailure_isCaughtBeforePaidWork() = runTest {
+        val stored = db.wholeTranslationDao()
+        val failing = object : WholeTranslationDao by stored {
+            override suspend fun beginTask(taskId: Long, now: Long): Boolean = throw IOException()
+        }
+        val articleId = insertArticle("Original.")
+        val repo = WholeTranslationRepository(failing, db.articleDao(), resolver, executor, this, { NOW }, POLICY)
+        val task = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(task))
+        assertEquals(TranslationFailureReason.UNKNOWN, taskFailure(task))
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun run_observerInitialFailure_isCaughtBeforePaidWork() = runTest {
+        val stored = db.wholeTranslationDao()
+        val failing = object : WholeTranslationDao by stored {
+            override fun observeTask(taskId: Long): Flow<WholeTranslationTaskEntity?> = flow { throw IOException() }
+        }
+        val articleId = insertArticle("Original.")
+        val repo = WholeTranslationRepository(failing, db.articleDao(), resolver, executor, this, { NOW }, POLICY)
+        val task = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(task))
+        assertEquals(TranslationFailureReason.UNKNOWN, taskFailure(task))
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun run_observerFailsDuringRequest_discardsLateResultAndFailsSafely() = runTest {
+        val stored = db.wholeTranslationDao()
+        val failObserver = CompletableDeferred<Unit>()
+        val remoteGate = CompletableDeferred<Unit>()
+        val failing = object : WholeTranslationDao by stored {
+            override fun observeTask(taskId: Long): Flow<WholeTranslationTaskEntity?> = flow {
+                emit(stored.getTask(taskId))
+                failObserver.await()
+                throw IOException()
+            }
+        }
+        coEvery { executor.execute(any(), any()) } coAnswers {
+            requestedInputs += firstArg<ResolvedAiExplanationOperation>().request.normalizedInput
+            withContext(NonCancellable) { remoteGate.await() }
+            AiClientResult.Success("迟到译文")
+        }
+        val articleId = insertArticle("First.\n\nSecond.")
+        val repo = WholeTranslationRepository(failing, db.articleDao(), resolver, executor, this, { NOW }, POLICY)
+        val task = (repo.start(WholeTranslationScope.CurrentArticle(articleId)) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        assertEquals(listOf("First."), requestedInputs)
+        failObserver.complete(Unit)
+        runCurrent()
+        assertTrue(!remoteGate.isCompleted)
+        remoteGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(task))
+        assertEquals(TranslationFailureReason.UNKNOWN, taskFailure(task))
+        assertEquals(listOf("First."), requestedInputs)
+        assertTrue(stored.getSegments(task).all { it.translatedText == null })
+        assertNull(db.articleDao().getArticleById(articleId)?.translation)
+    }
+
     // ---- helpers ----
 
     private fun repository(scope: CoroutineScope) = WholeTranslationRepository(
@@ -409,7 +844,8 @@ class WholeTranslationRepositoryTest {
         requestResolver = resolver,
         executor = executor,
         applicationScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher((scope as kotlinx.coroutines.test.TestScope).testScheduler)),
-        clock = { NOW }
+        clock = { NOW },
+        materializationPolicy = POLICY
     )
 
     private suspend fun insertArticle(content: String): Long =
@@ -443,9 +879,9 @@ class WholeTranslationRepositoryTest {
                 .first { it.articleId == articleId && it.paragraphIndex == index }.failureReason
         )
 
-    private fun operationFor(text: String): ResolvedAiExplanationOperation {
+    private fun operationFor(text: String, profile: ResolvedAiProfile = PROFILE): ResolvedAiExplanationOperation {
         val request = ResolvedAiExplanationRequest(
-            profile = PROFILE,
+            profile = profile,
             normalizedModelId = "m",
             normalizedInput = text,
             outputLanguageTag = "zh-CN",
@@ -458,6 +894,16 @@ class WholeTranslationRepositoryTest {
 
     private companion object {
         const val NOW = 1_000_000L
+
+        /**
+         * 与生产同一套纯计算，只是自带 Moshi。
+         *
+         * 刻意不在这里替换成假实现：materialization 的正确性大半落在这些计算上（按目标版本分派、
+         * 坐标完整性、聚合与坐标同源），换成假的等于把要测的东西测掉了。
+         */
+        val POLICY: TranslationMaterializationPolicy = DefaultTranslationMaterializationPolicy(
+            AppliedTranslationLayoutCodec(Moshi.Builder().add(KotlinJsonAdapterFactory()).build())
+        )
         val PROFILE = ResolvedAiProfile(
             profileId = "p",
             providerTemplate = AiProviderTemplate.OPENAI_COMPATIBLE,

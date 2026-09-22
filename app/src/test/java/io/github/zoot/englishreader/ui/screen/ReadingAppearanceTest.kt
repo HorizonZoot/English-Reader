@@ -5,10 +5,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.semantics.SemanticsActions
 import io.github.zoot.englishreader.model.SelectedSentence
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
-import androidx.compose.ui.test.assertIsOff
-import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -101,20 +101,28 @@ class ReadingAppearanceTest {
     }
 
     @Test
-    fun articleWithTranslation_toggleShowsAndHidesExistingInlineText() {
+    fun articleWithTranslation_scrollPopupToggleShowsAndHidesExistingInlineText() {
+        assertPopupTranslationToggle(ReadingMode.SCROLL)
+    }
+
+    @Test
+    fun articleWithTranslation_pagedPopupToggleShowsAndHidesExistingInlineText() {
+        assertPopupTranslationToggle(ReadingMode.PAGED)
+    }
+
+    private fun assertPopupTranslationToggle(readingMode: ReadingMode) {
         var toggles = 0
-        renderReading(translation = "第一句。", onToggle = { toggles++ })
+        renderReading(translation = "第一句。", readingMode = readingMode, onToggle = { toggles++ })
 
+        composeRule.onNodeWithTag("reading-settings-translation").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("关闭").performClick()
         composeRule.onNodeWithText("第一句。").assertDoesNotExist()
-        composeRule.onNodeWithTag("reading-settings-translation")
-            .performScrollTo().assertIsOff().performClick().assertIsOn()
-        composeRule.onNodeWithContentDescription("关闭").performScrollTo().performClick()
-        composeRule.onNodeWithText("第一句。").assertExists()
-
-        composeRule.onNodeWithContentDescription("阅读设置").performClick()
-        composeRule.onNodeWithTag("reading-settings-translation")
-            .performScrollTo().assertIsOn().performClick().assertIsOff()
-        composeRule.onNodeWithContentDescription("关闭").performScrollTo().performClick()
+        openSentenceActions()
+        composeRule.onNodeWithTag("sentence-action-toggle-translation")
+            .performScrollTo().assertTextContains("显示译文").performClick()
+        composeRule.onNodeWithText("第一句。").assertIsDisplayed()
+        composeRule.onNodeWithTag("sentence-action-toggle-translation")
+            .performScrollTo().assertTextContains("隐藏译文").performClick()
         composeRule.onNodeWithText("第一句。").assertDoesNotExist()
         composeRule.runOnIdle { assertEquals(2, toggles) }
     }
@@ -186,22 +194,35 @@ class ReadingAppearanceTest {
                         currentFontSize = fontSize(),
                         currentTheme = theme(),
                         currentReadingMode = readingMode(),
-                        hasTranslation = false,
-                        showTranslation = false,
                         onDismiss = {},
                         onFontSizeChange = onFontSizeChange,
                         onThemeChange = onThemeChange,
-                        onReadingModeChange = onReadingModeChange,
-                        onToggleTranslation = {}
+                        onReadingModeChange = onReadingModeChange
                     )
                 }
             }
         }
     }
 
-    private fun renderReading(translation: String?, onToggle: () -> Unit = {}) {
+    private fun openSentenceActions() {
+        fun invokeAction(label: String) {
+            val action = composeRule.onNodeWithContentDescription("Interactive reading text")
+                .fetchSemanticsNode().config[SemanticsActions.CustomActions].first { it.label == label }
+            composeRule.runOnIdle { action.action() }
+        }
+        invokeAction("Highlight sentence 1")
+        invokeAction("播放句子语音")
+        composeRule.onNodeWithTag("sentence-action-popup").assertIsDisplayed()
+    }
+
+    private fun renderReading(
+        translation: String?,
+        readingMode: ReadingMode = ReadingMode.SCROLL,
+        onToggle: () -> Unit = {}
+    ) {
         val showTranslation = mutableStateOf(false)
         val showSettings = mutableStateOf(true)
+        val selection = mutableStateOf<SelectedSentence?>(null)
         composeRule.setContent {
             EnglishReaderTheme {
                 ArticleUiTheme {
@@ -212,11 +233,12 @@ class ReadingAppearanceTest {
                             content = "First sentence.",
                             translation = translation
                         ),
-                        selectedSentence = null,
+                        selectedSentence = selection.value,
                         selectedWord = null,
                         isLoadingDefinition = false,
                         isLoading = false,
                         fontSizeOption = FontSizeOption.MEDIUM,
+                        readingMode = readingMode,
                         showTranslation = showTranslation.value,
                         snackbarHostState = remember { SnackbarHostState() },
                         onToggleTranslation = {
@@ -225,7 +247,13 @@ class ReadingAppearanceTest {
                         },
                         onBack = {},
                         onExplainSentence = {},
-                        onSentenceSelected = { _, _, _ -> },
+                        onSentenceSelected = { id, index, range ->
+                            selection.value = SelectedSentence(
+                                id, index, range.text, range.text.trim(), range.startOffset, range.endOffset
+                            )
+                        },
+                        onSentenceAccessibilityTarget = { _, _ -> },
+                        onPlaySentence = {},
                         onWordLongPress = {},
                         onClearSelection = {},
                         showReadingSettings = showSettings.value,

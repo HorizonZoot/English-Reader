@@ -47,6 +47,7 @@ import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.model.TtsSystemAction
 import io.github.zoot.englishreader.ui.screen.ArticleListScreen
+import io.github.zoot.englishreader.ui.screen.ArticleEditorScreen
 import io.github.zoot.englishreader.ui.screen.AiProfileConfigScreen
 import io.github.zoot.englishreader.ui.screen.BookTocScreen
 import io.github.zoot.englishreader.ui.screen.ReadingScreen
@@ -339,8 +340,20 @@ fun EnglishReaderNavigation() {
                 },
                 onBookClick = { bookId ->
                     navController.navigate("book/$bookId")
+                },
+                onEditArticle = { articleId ->
+                    navController.navigate("article/$articleId/edit") { launchSingleTop = true }
                 }
             )
+        }
+
+        composable(
+            route = "article/{articleId}/edit",
+            arguments = listOf(navArgument("articleId") { type = NavType.LongType })
+        ) {
+            ArticleUiTheme {
+                ArticleEditorScreen(onNavigateBack = { navController.popBackStack() })
+            }
         }
 
         composable(
@@ -364,7 +377,11 @@ fun EnglishReaderNavigation() {
                 // 从章节跳目录用 navigate 而非 popBackStack：用户可能是从书架直接进的某一章
                 // （继续阅读），此时返回栈里没有目录页可弹。
                 onOpenToc = { bookId -> navController.navigate("book/$bookId") },
-                viewModel = viewModel
+                viewModel = viewModel,
+                onEditArticle = { id ->
+                    navController.navigate("article/$id/edit") { launchSingleTop = true }
+                },
+                onOpenAiProfile = { navController.navigate("settings/ai-profile") }
             )
         }
 

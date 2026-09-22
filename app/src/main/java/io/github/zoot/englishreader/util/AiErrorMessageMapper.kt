@@ -32,6 +32,7 @@ fun AiError.toUiMessage(): AiErrorMessage = when (this) {
     AiError.DnsFailure -> AiErrorMessage(R.string.settings_ai_error_dns)
     AiError.TlsFailure -> AiErrorMessage(R.string.settings_ai_error_tls)
     AiError.MalformedResponse -> AiErrorMessage(R.string.settings_ai_error_malformed)
+    AiError.ResponseTruncated -> AiErrorMessage(R.string.settings_ai_error_truncated)
     AiError.NoContent -> AiErrorMessage(R.string.settings_ai_error_no_content)
     AiError.Unknown -> AiErrorMessage(R.string.settings_ai_error_unknown)
 }

@@ -89,7 +89,7 @@ internal fun PagedReadingContent(
     onPageChanged: (ReadingAnchor) -> Unit,
     onControlsChanged: (ReadingPageControls?) -> Unit,
     onModeChange: (ReadingMode) -> Unit,
-    originalContent: @Composable (Int, ReadingTextViewport, Boolean) -> Unit
+    originalContent: @Composable (ReadingTextBlock, ReadingTextViewport, Boolean) -> Unit
 ) {
     val density = LocalDensity.current
     val currentOnRestored by rememberUpdatedState(onRestored)
@@ -224,10 +224,10 @@ internal fun PagedReadingContent(
                     ) {
                         items(ready.pages[pageIndex].fragments, key = { "${it.blockIndex}:${it.anchor.characterOffset}" }) { fragment ->
                             if (fragment.gapBefore > 0) Spacer(Modifier.height(with(density) { fragment.gapBefore.toDp() }))
-                            val viewport = ReadingTextViewport(fragment.anchor.characterOffset, fragment.endOffset, fragment.top, fragment.height)
+                            val viewport = ReadingTextViewport(fragment.localStartOffset, fragment.localEndOffset, fragment.top, fragment.height)
                             val block = blocks[fragment.blockIndex]
                             if (block.kind == ReadingTextKind.ORIGINAL) {
-                                originalContent(block.paragraphIndex, viewport, active)
+                                originalContent(block, viewport, active)
                             } else {
                                 Text(
                                     text = block.text,

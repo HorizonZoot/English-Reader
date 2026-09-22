@@ -8,6 +8,8 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -76,17 +78,14 @@ class SentenceActionPopupTest {
         }
     }
 
-    /** 「更多」展开后才出现「全文翻译」；两级动作都在同一个 FlowRow 里，不弹嵌套 Popup。 */
+    /** 「全文翻译」直接平铺在动作栏里，不再藏进「更多」二级菜单。 */
     @Test
-    fun actions_moreExpandsToWholeTranslation_andDispatchesOnce() {
+    fun actions_wholeTranslationIsDirectlyVisible_andDispatchesOnce() {
         var wholeCount = 0
         setPopup(target = target(word = null), onWholeTranslation = { wholeCount++ })
 
-        composeRule.onAllNodesWithTag("sentence-action-whole-translation").assertCountEquals(0)
-        composeRule.onNodeWithTag("sentence-action-more").performClick()
         composeRule.onAllNodesWithTag("sentence-action-more").assertCountEquals(0)
-
-        val node = composeRule.onNodeWithTag("sentence-action-whole-translation")
+        val node = composeRule.onNodeWithTag("sentence-action-whole-translation").performScrollTo()
         val bounds = node.fetchSemanticsNode().touchBoundsInRoot
         val minimumPx = with(composeRule.density) { 48.dp.toPx() }
         assertTrue("whole-translation touch height must be at least 48dp", bounds.height >= minimumPx - 0.5f)
@@ -95,13 +94,63 @@ class SentenceActionPopupTest {
         composeRule.runOnIdle { assertEquals(1, wholeCount) }
     }
 
-    /** 没有全文翻译回调时（如非阅读页调用方），「更多」也不出现，不留一个空菜单。 */
+    /** 没有全文翻译回调时（如非阅读页调用方），「全文翻译」不出现，也不再有「更多」空菜单。 */
     @Test
-    fun actions_withoutWholeTranslationCallback_hidesMore() {
+    fun actions_withoutWholeTranslationCallback_hidesWholeTranslation() {
         setPopup(target = target(word = null), onWholeTranslation = null)
 
         composeRule.onAllNodesWithTag("sentence-action-more").assertCountEquals(0)
         composeRule.onAllNodesWithTag("sentence-action-whole-translation").assertCountEquals(0)
+    }
+
+    @Test
+    fun actions_savedTranslationCanToggleDirectlyWithoutStartingOtherActions() {
+        val showTranslation = mutableStateOf(false)
+        val calls = mutableListOf<String>()
+        setPopup(
+            target = target(word = null),
+            onPlay = { calls += "play" },
+            onTranslate = { calls += "translate" },
+            onExplain = { calls += "explain" },
+            onWholeTranslation = { calls += "whole" },
+            hasTranslation = true,
+            showTranslation = { showTranslation.value },
+            onToggleTranslation = {
+                calls += "toggle"
+                showTranslation.value = !showTranslation.value
+            }
+        )
+
+        composeRule.onNodeWithTag("sentence-action-whole-translation").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("sentence-action-toggle-translation")
+            .performScrollTo().assertIsDisplayed().assertIsEnabled()
+            .assertTextContains("显示译文").performClick()
+        composeRule.onNodeWithTag("sentence-action-toggle-translation")
+            .performScrollTo().assertIsDisplayed().assertTextContains("隐藏译文").performClick()
+        composeRule.onNodeWithTag("sentence-action-toggle-translation")
+            .assertTextContains("显示译文")
+        composeRule.runOnIdle { assertEquals(listOf("toggle", "toggle"), calls) }
+    }
+
+    @Test
+    fun actions_withoutSavedTranslation_disablesToggleAndExplainsWhereToTranslate() {
+        val calls = mutableListOf<String>()
+        setPopup(
+            target = target(word = null),
+            onWholeTranslation = { calls += "whole" },
+            hasTranslation = false,
+            onToggleTranslation = { calls += "toggle" }
+        )
+
+        composeRule.onNodeWithTag("sentence-action-toggle-translation")
+            .performScrollTo().assertIsDisplayed().assertIsNotEnabled()
+            .assertTextContains("暂无译文").performClick()
+        composeRule.onNodeWithText("尚无全文译文，可点“全文翻译”生成。")
+            .performScrollTo().assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(emptyList<String>(), calls) }
+        composeRule.onNodeWithTag("sentence-action-whole-translation")
+            .performScrollTo().assertIsDisplayed().performClick()
+        composeRule.runOnIdle { assertEquals(listOf("whole"), calls) }
     }
 
     @Test
@@ -374,6 +423,9 @@ class SentenceActionPopupTest {
         onTranslate: () -> Unit = {},
         onExplain: () -> Unit = {},
         onWholeTranslation: (() -> Unit)? = null,
+        hasTranslation: Boolean = false,
+        showTranslation: () -> Boolean = { false },
+        onToggleTranslation: (() -> Unit)? = null
     ) {
         composeRule.setContent {
             MaterialTheme {
@@ -385,6 +437,9 @@ class SentenceActionPopupTest {
                     onTranslate = onTranslate,
                     onExplain = onExplain,
                     onWholeTranslation = onWholeTranslation,
+                    hasTranslation = hasTranslation,
+                    showTranslation = showTranslation(),
+                    onToggleTranslation = onToggleTranslation,
                     onCancelTranslation = {},
                     onRetryTranslation = {},
                     onDismiss = {}

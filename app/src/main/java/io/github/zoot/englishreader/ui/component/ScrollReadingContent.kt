@@ -1,12 +1,9 @@
 package io.github.zoot.englishreader.ui.component
 
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -42,7 +39,11 @@ import io.github.zoot.englishreader.util.ParagraphAligner
 import kotlinx.coroutines.flow.first
 import kotlin.math.roundToInt
 
-internal data class ReadingBlockKey(val paragraphIndex: Int, val kind: ReadingTextKind)
+internal data class ReadingBlockKey(
+    val paragraphIndex: Int,
+    val kind: ReadingTextKind,
+    val textStartOffset: Int = 0
+)
 
 internal data class ReadingLayoutKey(
     val viewport: IntSize,
@@ -76,13 +77,11 @@ internal fun ScrollReadingContent(
     onPositionChanged: (ReadingAnchor) -> Unit,
     onPositionSettled: (ReadingAnchor) -> Unit,
     onProgressChanged: (Float) -> Unit,
-    originalContent: @Composable (Int, Boolean) -> Unit
+    originalContent: @Composable (ReadingTextBlock, Boolean) -> Unit
 ) {
     val density = LocalDensity.current
     val contentWidth = (layoutKey.viewport.width - with(density) { 28.dp.roundToPx() } * 2)
         .coerceIn(0, with(density) { 600.dp.roundToPx() })
-    val translationGap = with(density) { 8.dp.roundToPx() }
-    val sourceGap = with(density) { 14.dp.roundToPx() }
     val currentAnchor by rememberUpdatedState(anchor)
     val currentSelectedAnchor by rememberUpdatedState(selectedAnchor)
     val currentTarget by rememberUpdatedState(target)
@@ -96,83 +95,51 @@ internal fun ScrollReadingContent(
     val currentEnabled by rememberUpdatedState(enabled)
     var consumedRequestId by remember { mutableLongStateOf(0) }
     val requestId = target?.requestId ?: consumedRequestId
-    var restored by remember(layoutKey, requestId) { mutableStateOf(false) }
+    var restored by remember(layoutKey, blocks, requestId) { mutableStateOf(false) }
 
-    fun blockLayout(key: ReadingBlockKey): TextLayoutResult? {
-        val block = blocks.firstOrNull { it.paragraphIndex == key.paragraphIndex && it.kind == key.kind } ?: return null
-        return layouts[key]?.takeIf { layout ->
-            layout.layoutInput.text.text == block.text && layout.layoutInput.constraints.maxWidth == contentWidth &&
-                layout.layoutInput.density.density == density.density && layout.layoutInput.density.fontScale == density.fontScale &&
-                layout.layoutInput.style.fontSize == block.style.fontSize && layout.layoutInput.style.lineHeight == block.style.lineHeight
-        }
+    fun gap(index: Int): Int = if (index == 0) 0 else with(density) { blocks[index].gapBeforeDp.dp.roundToPx() }
+
+    fun blockLayout(block: ReadingTextBlock): TextLayoutResult? = layouts[block.key]?.takeIf { layout ->
+        layout.layoutInput.text.text == block.text && layout.layoutInput.constraints.maxWidth == contentWidth &&
+            layout.layoutInput.density.density == density.density && layout.layoutInput.density.fontScale == density.fontScale &&
+            layout.layoutInput.style.fontSize == block.style.fontSize && layout.layoutInput.style.lineHeight == block.style.lineHeight
     }
 
     fun observedAnchor(): ReadingAnchor? {
         val item = listState.firstVisibleItemIndex
-        val offset = listState.firstVisibleItemScrollOffset
-        val paragraph = (item - 1).coerceIn(0, paragraphs.lastIndex)
-        val source = blockLayout(ReadingBlockKey(0, ReadingTextKind.SOURCE))
-        val original = blockLayout(ReadingBlockKey(paragraph, ReadingTextKind.ORIGINAL))
-        val kind: ReadingTextKind
-        val localY: Int
-        if (item == 0) {
-            val sourceHeight = source?.size?.height ?: 0
-            kind = if (source != null && offset < sourceHeight) ReadingTextKind.SOURCE else ReadingTextKind.TITLE
-            localY = if (kind == ReadingTextKind.TITLE && source != null) offset - sourceHeight - sourceGap else offset
-        } else {
-            val originalHeight = original?.size?.height ?: return null
-            val translation = blockLayout(ReadingBlockKey(paragraph, ReadingTextKind.TRANSLATION))
-            kind = if (translation != null && offset >= originalHeight + translationGap) ReadingTextKind.TRANSLATION else ReadingTextKind.ORIGINAL
-            localY = if (kind == ReadingTextKind.TRANSLATION) offset - originalHeight - translationGap else offset
-        }
-        val layout = blockLayout(ReadingBlockKey(paragraph, kind)) ?: return ReadingAnchor(paragraph)
-        val line = layout.getLineForVerticalPosition(localY.coerceAtLeast(0).toFloat())
-        return ReadingAnchor(paragraph, kind, layout.getLineStart(line))
+        val block = blocks.getOrNull(item) ?: return null
+        val layout = blockLayout(block) ?: return null
+        val localY = (listState.firstVisibleItemScrollOffset - gap(item)).coerceAtLeast(0)
+        val line = layout.getLineForVerticalPosition(localY.toFloat())
+        return ReadingAnchor(block.paragraphIndex, block.kind, block.textStartOffset + layout.getLineStart(line))
     }
 
-    LaunchedEffect(layoutKey, requestId) {
-        if (contentWidth <= 0 || layoutKey.viewport.height <= 0) return@LaunchedEffect
+    LaunchedEffect(layoutKey, blocks, requestId) {
+        if (contentWidth <= 0 || layoutKey.viewport.height <= 0 || blocks.isEmpty()) return@LaunchedEffect
         val restoreTarget = currentTarget
         var desired = restoreTarget?.position?.anchor ?: currentSelectedAnchor ?: currentAnchor
         if (restoreTarget?.entry == ReadingEntry.START) {
-            desired = ReadingAnchor(textKind = blocks.first().kind)
+            val first = blocks.first()
+            desired = ReadingAnchor(first.paragraphIndex, first.kind, first.textStartOffset)
         } else if (restoreTarget?.entry == ReadingEntry.END) {
             val last = blocks.last()
-            desired = ReadingAnchor(last.paragraphIndex, last.kind, (last.text.length - 1).coerceAtLeast(0))
+            desired = ReadingAnchor(last.paragraphIndex, last.kind, (last.textEndOffset - 1).coerceAtLeast(last.textStartOffset))
         }
         desired = desired.copy(paragraphIndex = desired.paragraphIndex.coerceAtMost(paragraphs.lastIndex))
-        if (blocks.none { it.paragraphIndex == desired.paragraphIndex && it.kind == desired.textKind }) {
-            desired = ReadingAnchor(desired.paragraphIndex)
-        }
-        val header = desired.textKind == ReadingTextKind.TITLE || desired.textKind == ReadingTextKind.SOURCE
-        val item = if (header) 0 else desired.paragraphIndex + 1
+        val block = blocks.blockFor(desired) ?: blocks.blockFor(ReadingAnchor(desired.paragraphIndex)) ?: blocks.first()
+        val item = blocks.indexOf(block)
+        val character = (desired.characterOffset - block.textStartOffset).coerceIn(0, (block.text.length - 1).coerceAtLeast(0))
         listState.scrollToItem(item)
-        val key = ReadingBlockKey(desired.paragraphIndex, desired.textKind)
-        val measured = snapshotFlow { blockLayout(key) }.first { it != null }!!
-        val character = desired.characterOffset.coerceAtMost((measured.layoutInput.text.length - 1).coerceAtLeast(0))
-        val base = when (desired.textKind) {
-            ReadingTextKind.TRANSLATION -> {
-                val original = snapshotFlow { blockLayout(ReadingBlockKey(desired.paragraphIndex, ReadingTextKind.ORIGINAL)) }.first { it != null }!!
-                original.size.height + translationGap
-            }
-            ReadingTextKind.TITLE -> {
-                if (blocks.any { it.kind == ReadingTextKind.SOURCE }) {
-                    val source = snapshotFlow { blockLayout(ReadingBlockKey(0, ReadingTextKind.SOURCE)) }.first { it != null }!!
-                    source.size.height + sourceGap
-                } else 0
-            }
-            else -> 0
-        }
-        listState.scrollToItem(item, base + measured.getLineTop(measured.getLineForOffset(character)).roundToInt())
+        val measured = snapshotFlow { blockLayout(block) }.first { it != null }!!
+        listState.scrollToItem(item, gap(item) + measured.getLineTop(measured.getLineForOffset(character)).roundToInt())
         withFrameNanos { }
         consumedRequestId = restoreTarget?.requestId ?: consumedRequestId
-        val restoredAnchor = if (restoreTarget?.entry == ReadingEntry.END) observedAnchor() ?: desired
-            else desired.copy(characterOffset = character)
-        currentOnRestored(restoredAnchor, restoreTarget)
+        val restoredAnchor = ReadingAnchor(block.paragraphIndex, block.kind, block.textStartOffset + character)
+        currentOnRestored(if (restoreTarget?.entry == ReadingEntry.END) observedAnchor() ?: restoredAnchor else restoredAnchor, restoreTarget)
         restored = true
     }
 
-    LaunchedEffect(listState, layoutKey, restored) {
+    LaunchedEffect(listState, layoutKey, blocks, restored) {
         if (!restored) return@LaunchedEffect
         var previous = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         var lastObservedAnchor = currentAnchor
@@ -182,16 +149,14 @@ internal fun ScrollReadingContent(
             val lastItem = info.visibleItemsInfo.lastOrNull()
             val endVisible = lastItem != null && lastItem.index == info.totalItemsCount - 1 &&
                 lastItem.offset + lastItem.size <= info.viewportEndOffset
-            val progress = scrollReadingProgress(
-                paragraphOffsets = paragraphOffsets,
-                anchor = observedAnchor() ?: currentAnchor,
-                atStart = !listState.canScrollBackward,
-                atEnd = endVisible || !listState.canScrollForward
-            )
+            val observed = observedAnchor() ?: currentAnchor
+            val progressAnchor = if (observed.textKind == ReadingTextKind.TRANSLATION) {
+                blocks.blockFor(observed)?.let { ReadingAnchor(it.paragraphIndex, ReadingTextKind.ORIGINAL, it.sourceEndOffset) } ?: observed
+            } else observed
             Triple(
                 listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset,
                 listState.isScrollInProgress,
-                progress
+                scrollReadingProgress(paragraphOffsets, progressAnchor, !listState.canScrollBackward, endVisible || !listState.canScrollForward)
             )
         }.collect { (position, scrolling, progress) ->
             currentOnProgressChanged(progress)
@@ -219,34 +184,19 @@ internal fun ScrollReadingContent(
         state = listState,
         userScrollEnabled = enabled && restored,
         contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 24.dp, bottom = 16.dp + bottomInset),
-        verticalArrangement = Arrangement.spacedBy(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        item(key = "reading-header") {
-            Column(Modifier.widthIn(max = 600.dp).fillMaxWidth().padding(bottom = 8.dp)) {
-                blocks.filter { it.kind == ReadingTextKind.SOURCE || it.kind == ReadingTextKind.TITLE }.forEachIndexed { index, block ->
-                    if (index > 0) Spacer(Modifier.height(block.gapBeforeDp.dp))
+        itemsIndexed(blocks, key = { _, block -> "${block.kind}:${block.paragraphIndex}:${block.textStartOffset}" }) { index, block ->
+            Column(Modifier.widthIn(max = 600.dp).fillMaxWidth().padding(top = if (index == 0) 0.dp else block.gapBeforeDp.dp)) {
+                if (block.kind == ReadingTextKind.ORIGINAL) {
+                    originalContent(block, enabled && restored)
+                } else {
                     Text(
                         text = block.text,
                         style = block.style,
                         color = if (block.kind == ReadingTextKind.TITLE) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.fillMaxWidth(),
-                        onTextLayout = { layouts.recordLayout(ReadingBlockKey(0, block.kind), it) }
-                    )
-                }
-            }
-        }
-        itemsIndexed(paragraphs, key = { index, _ -> index }) { index, _ ->
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                originalContent(index, enabled && restored)
-                blocks.firstOrNull { it.paragraphIndex == index && it.kind == ReadingTextKind.TRANSLATION }?.let { block ->
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        text = block.text,
-                        style = block.style,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.widthIn(max = 600.dp).fillMaxWidth(),
-                        onTextLayout = { layouts.recordLayout(ReadingBlockKey(index, block.kind), it) }
+                        onTextLayout = { layouts.recordLayout(block.key, it) }
                     )
                 }
             }
@@ -263,9 +213,7 @@ internal fun scrollReadingProgress(
     val total = paragraphOffsets.lastOrNull() ?: return 0f
     if (total <= 0) return 0f
     if (atEnd) return 1f
-    if (atStart || anchor.textKind == ReadingTextKind.TITLE || anchor.textKind == ReadingTextKind.SOURCE) {
-        return 0f
-    }
+    if (atStart || anchor.textKind == ReadingTextKind.TITLE || anchor.textKind == ReadingTextKind.SOURCE) return 0f
     val paragraph = anchor.paragraphIndex.coerceIn(0, paragraphOffsets.lastIndex - 1)
     val start = paragraphOffsets[paragraph]
     val end = paragraphOffsets[paragraph + 1]

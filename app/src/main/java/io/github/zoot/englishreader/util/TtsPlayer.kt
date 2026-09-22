@@ -93,7 +93,7 @@ class TtsPlayer internal constructor(
     private var initializing = false
     private var engineReady = false
     private var engineGeneration = 0L
-    private var speechGeneration = 0L
+    @Volatile private var speechGeneration = 0L
     private var languageFallback: TtsCapability = TtsCapability.LanguageDataMissing
     @Volatile private var capability: TtsCapability = TtsCapability.Checking
     private var pendingSpeak: PendingSpeak? = null
@@ -177,6 +177,17 @@ class TtsPlayer internal constructor(
         onResult: (TtsPlaybackResult) -> Unit
     ) = speakReading(text, TtsReadingSettings(), allowNetwork, onResult)
 
+    /** Prepares a catalog voice without downloading or using the system audio engine. */
+    fun prepareReading(settings: TtsReadingSettings, allowNetwork: Boolean) {
+        val generation = speechGeneration
+        onMain {
+            if (generation != speechGeneration) return@onMain
+            val backend = localBackend ?: return@onMain
+            val voiceId = settings.normalized().voiceId ?: TtsModelCatalog.defaultVoiceId
+            backend.prepare(voiceId.takeIf { TtsModelCatalog.findVoice(it) != null })
+        }
+    }
+
     fun speakReading(
         text: String,
         settings: TtsReadingSettings,
@@ -200,18 +211,22 @@ class TtsPlayer internal constructor(
         onResult: (TtsPlaybackResult) -> Unit
     ) = onMain {
         if (text.isBlank()) return@onMain
-        stop()
+        val normalized = settings.normalized()
+        val usesLocal = localBackend != null &&
+            (normalized.voiceId == null || TtsModelCatalog.isModelVoice(normalized.voiceId))
+        // Stop old audio immediately without throwing away preparation for local replacement.
+        stopCurrentSpeech(preservePreparation = usesLocal)
         // 命名实参：下面两个 Boolean 相邻且语义相反，位置传参时一次字段重排就会静默翻转
         // 二者（整句变成可退回、单词变成语速严格），且照样编译。
         val request = PendingSpeak(
             text = text,
             allowNetwork = allowNetwork,
-            settings = settings.normalized(),
+            settings = normalized,
             applySpeechRateStrictly = applySpeechRateStrictly,
             fallBackWhenPreferredUnusable = fallBackWhenPreferredUnusable,
             callback = onResult
         )
-        if (localBackend != null && (request.settings.voiceId == null || TtsModelCatalog.isModelVoice(request.settings.voiceId))) {
+        if (usesLocal) {
             speakLocal(request)
         } else {
             enqueueSystemSpeech(request)
@@ -294,11 +309,16 @@ class TtsPlayer internal constructor(
 
     fun currentVoiceSnapshot(): TtsVoiceSnapshot = voiceSnapshot
 
-    fun stop() = onMain {
+    fun stop() = onMain { stopCurrentSpeech() }
+
+    /** For replacing a reading request; user stop/shutdown must still use the normal stop path. */
+    fun stopBeforeReading() = onMain { stopCurrentSpeech(preservePreparation = true) }
+
+    private fun stopCurrentSpeech(preservePreparation: Boolean = false) {
         speechGeneration++
         pendingSpeak = null
         activeSpeech = null
-        localBackend?.stop()
+        localBackend?.stop(preservePreparation)
         try {
             tts?.stop()
         } catch (cancellation: CancellationException) {

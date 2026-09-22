@@ -125,6 +125,7 @@ enum class TranslationFailureReason(
             is AiError.Server -> TRANSIENT_NETWORK
 
             AiError.NoContent,
+            AiError.ResponseTruncated,
             AiError.MalformedResponse -> PROVIDER_RESPONSE
 
             is AiError.UnexpectedHttp,

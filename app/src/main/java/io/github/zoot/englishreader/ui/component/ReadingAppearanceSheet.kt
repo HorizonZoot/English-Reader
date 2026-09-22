@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrightnessAuto
@@ -23,13 +22,11 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -52,12 +49,9 @@ import io.github.zoot.englishreader.data.local.ThemeOption
 fun ReadingAppearanceSheet(
     currentFontSize: FontSizeOption,
     currentTheme: ThemeOption,
-    hasTranslation: Boolean,
-    showTranslation: Boolean,
     onDismiss: () -> Unit,
     onFontSizeChange: (FontSizeOption) -> Unit,
     onThemeChange: (ThemeOption) -> Unit,
-    onToggleTranslation: () -> Unit,
     currentReadingMode: ReadingMode = ReadingMode.DEFAULT,
     onReadingModeChange: (ReadingMode) -> Unit = {}
 ) {
@@ -176,28 +170,6 @@ fun ReadingAppearanceSheet(
                             textAlign = TextAlign.Center
                         )
                     }
-                }
-            }
-            if (hasTranslation) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 56.dp)
-                        .toggleable(
-                            value = showTranslation,
-                            role = Role.Switch,
-                            onValueChange = { onToggleTranslation() }
-                        )
-                        .testTag("reading-settings-translation"),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = stringResource(R.string.show_translation),
-                        modifier = Modifier.weight(1f)
-                    )
-                    Switch(checked = showTranslation, onCheckedChange = null)
                 }
             }
         }

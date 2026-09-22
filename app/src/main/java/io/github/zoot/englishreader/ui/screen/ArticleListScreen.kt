@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -56,7 +57,8 @@ import io.github.zoot.englishreader.viewmodel.LibraryItem
 fun ArticleListScreen(
     onArticleClick: (Long) -> Unit,
     onBookClick: (Long) -> Unit,
-    viewModel: ArticleListViewModel = hiltViewModel()
+    viewModel: ArticleListViewModel = hiltViewModel(),
+    onEditArticle: ((Long) -> Unit)? = null
 ) = ArticleUiTheme {
     val libraryItems by viewModel.libraryItems.collectAsStateWithLifecycle()
     val isImporting by viewModel.isImporting.collectAsStateWithLifecycle()
@@ -268,7 +270,8 @@ fun ArticleListScreen(
                                 subtitle = null,
                                 isBook = false,
                                 onClick = { onArticleClick(item.article.id) },
-                                onDelete = { articleToDelete = item.article }
+                                onDelete = { articleToDelete = item.article },
+                                onEdit = onEditArticle?.let { edit -> { edit(item.article.id) } }
                             )
 
                             is LibraryItem.Book -> LibraryRow(
@@ -360,7 +363,8 @@ private fun LibraryRow(
     subtitle: String?,
     isBook: Boolean,
     onClick: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onEdit: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val typeLabel = stringResource(
@@ -437,6 +441,16 @@ private fun LibraryRow(
                     expanded = showMenu,
                     onDismissRequest = { showMenu = false }
                 ) {
+                    if (!isBook && onEdit != null) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_edit_article)) },
+                            leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                            onClick = {
+                                showMenu = false
+                                onEdit()
+                            }
+                        )
+                    }
                     DropdownMenuItem(
                         text = {
                             Text(

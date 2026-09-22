@@ -90,7 +90,8 @@ class BookReadingFlowTest {
             .setTransactionExecutor(Runnable::run)
             .build()
         bookRepository = BookRepository(db.bookDao(), db.articleDao())
-        articleRepository = ArticleRepository(db.articleDao(), applicationScope.backgroundScope)
+        articleRepository = ArticleRepository(db.articleDao(), applicationScope.backgroundScope,
+            io.github.zoot.englishreader.model.AppliedTranslationLayoutCodec(com.squareup.moshi.Moshi.Builder().build()))
 
         vocabularyRepository = mockk(relaxed = true)
         dictionaryRepository = mockk(relaxed = true)

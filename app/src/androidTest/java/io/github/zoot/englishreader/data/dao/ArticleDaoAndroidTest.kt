@@ -9,7 +9,15 @@ import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
 import io.github.zoot.englishreader.data.entity.ReadingPositionEntity
+import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
+import io.github.zoot.englishreader.model.ArticleEditResult
+import io.github.zoot.englishreader.model.ArticleEditSnapshot
+import io.github.zoot.englishreader.model.TranslationFingerprint
+import io.github.zoot.englishreader.model.TranslationPlannerVersion
+import io.github.zoot.englishreader.model.TranslationSegmentationMode
+import io.github.zoot.englishreader.util.ParagraphAligner
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -72,6 +80,72 @@ class ArticleDaoAndroidTest {
     )
 
     @Test
+    fun deleteArticle_preservesVocabularyFieldsAndOtherArticleLinks() = runBlocking {
+        val id = articleDao.insertArticle(ArticleEntity(title = "Delete", content = "Saved word."))
+        val otherId = articleDao.insertArticle(ArticleEntity(title = "Keep", content = "Other word."))
+        val word = VocabularyEntity(
+            word = "word", articleId = id, createdAt = 100,
+            phonetic = "/wɜːd/", definitions = "saved definition", definitionSource = "dictionary"
+        )
+        val wordId = vocabularyDao.insertVocabulary(word)
+        val otherWord = word.copy(articleId = otherId, createdAt = 200)
+        val otherWordId = vocabularyDao.insertVocabulary(otherWord)
+        val otherArticle = articleDao.getArticleById(otherId)
+
+        articleDao.deleteArticle(requireNotNull(articleDao.getArticleById(id)))
+
+        assertNull(articleDao.getArticleById(id))
+        assertEquals(otherArticle, articleDao.getArticleById(otherId))
+        assertEquals(
+            listOf(word.copy(id = wordId, articleId = null), otherWord.copy(id = otherWordId)),
+            allVocab().sortedBy { it.id }
+        )
+    }
+
+    @Test
+    fun deleteArticle_existingUnboundWord_deduplicatesOnlyDeletedArticlesWord() = runBlocking {
+        val id = articleDao.insertArticle(ArticleEntity(title = "Delete", content = "Body."))
+        val otherId = articleDao.insertArticle(ArticleEntity(title = "Keep", content = "Body."))
+        val unbound = VocabularyEntity(word = "shared", definitions = "keep this definition", createdAt = 100)
+        val unboundId = vocabularyDao.insertVocabulary(unbound)
+        vocabularyDao.insertVocabulary(VocabularyEntity(word = "shared", articleId = id))
+        val other = VocabularyEntity(word = "shared", articleId = otherId, createdAt = 200)
+        val otherWordId = vocabularyDao.insertVocabulary(other)
+
+        articleDao.deleteArticle(requireNotNull(articleDao.getArticleById(id)))
+
+        assertEquals(
+            listOf(unbound.copy(id = unboundId), other.copy(id = otherWordId)),
+            allVocab().sortedBy { it.id }
+        )
+        assertTrue(articleDao.getArticleById(otherId) != null)
+    }
+
+    @Test
+    fun deleteArticle_deleteFails_rollsBackVocabularyDeduplicationAndUnbinding() = runBlocking {
+        val id = articleDao.insertArticle(ArticleEntity(title = "Keep on failure", content = "Body."))
+        vocabularyDao.insertVocabulary(VocabularyEntity(word = "shared"))
+        vocabularyDao.insertVocabulary(VocabularyEntity(word = "shared", articleId = id))
+        vocabularyDao.insertVocabulary(VocabularyEntity(word = "unique", articleId = id))
+        val article = requireNotNull(articleDao.getArticleById(id))
+        val vocabulary = allVocab().sortedBy { it.id }
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER reject_article_delete BEFORE DELETE ON articles " +
+                "BEGIN SELECT RAISE(ABORT, 'test failure'); END"
+        )
+        var failed = false
+        try {
+            articleDao.deleteArticle(article)
+        } catch (_: android.database.SQLException) {
+            failed = true
+        }
+
+        assertTrue(failed)
+        assertEquals(article, articleDao.getArticleById(id))
+        assertEquals(vocabulary, allVocab().sortedBy { it.id })
+    }
+
+    @Test
     fun readingPosition_staleSaveCannotRegressBookOrArticleAndDeletionCascades() = runBlocking {
         val (bookId, firstId, secondId) = bookWithTwoChapters()
         val latest = ReadingPositionEntity(secondId, 4, "TRANSLATION", 18, 300)
@@ -106,6 +180,131 @@ class ArticleDaoAndroidTest {
         assertEquals(firstId, db.bookDao().getProgress(bookId)?.chapterArticleId)
         assertNull(articleDao.getArticleById(secondId)?.lastReadAt)
     }
+
+    @Test
+    fun saveEdit_titleOnly_preservesConcurrentTranslationReadingTimeAndVocabulary() = runBlocking {
+        val id = articleDao.insertArticle(
+            ArticleEntity(title = "Old title", content = "Old body.", source = "paste", createdAt = 10, lastReadAt = 20)
+        )
+        val opened = articleDao.getArticleById(id)!!
+        val current = opened.copy(translation = "后台新译文", lastReadAt = 50)
+        articleDao.updateArticle(current)
+        val position = ReadingPositionEntity(id, 2, "ORIGINAL", 7, 100)
+        articleDao.upsertReadingPosition(position)
+        val wordId = vocabularyDao.insertVocabulary(VocabularyEntity(word = "body", articleId = id))
+        val taskId = editingTask(current)
+
+        assertEquals(ArticleEditResult.Saved, articleDao.saveEdit(opened.editSnapshot(), "New title", opened.content, 200))
+
+        assertEquals(current.copy(title = "New title"), articleDao.getArticleById(id))
+        assertEquals(position, articleDao.getReadingPosition(id))
+        assertEquals(wordId, allVocab().single().id)
+        assertEquals(id, allVocab().single().articleId)
+        assertEquals("running", db.wholeTranslationDao().getTask(taskId)?.status)
+    }
+
+    @Test
+    fun saveEdit_bodyChange_resetsDependentStateWithoutDeletingCheckpointOrVocabulary() = runBlocking {
+        val id = articleDao.insertArticle(
+            ArticleEntity(title = "Old title", content = "First.\n\nSecond.", translation = "旧译文",
+                source = "file", createdAt = 10, lastReadAt = 20)
+        )
+        val opened = articleDao.getArticleById(id)!!
+        articleDao.upsertReadingPosition(ReadingPositionEntity(id, 1, "TRANSLATION", 7, 100))
+        vocabularyDao.insertVocabulary(VocabularyEntity(word = "first", articleId = id))
+        val taskId = editingTask(opened)
+        val checkpoint = db.wholeTranslationDao().getSegments(taskId)
+        val completedTask = editingTask(opened)
+        db.wholeTranslationDao().updateTaskStatus(completedTask, "completed", null, 100)
+        val unrelatedId = articleDao.insertArticle(ArticleEntity(title = "Other", content = "Unchanged."))
+        val unrelated = articleDao.getArticleById(unrelatedId)!!
+        val unrelatedTask = editingTask(unrelated)
+
+        assertEquals(ArticleEditResult.Saved, articleDao.saveEdit(opened.editSnapshot(), "Edited", "New body.", 200))
+
+        assertEquals(opened.copy(title = "Edited", content = "New body.", translation = null), articleDao.getArticleById(id))
+        val reset = ReadingPositionEntity(id, 0, "TITLE", 0, 200)
+        assertEquals(reset, articleDao.getReadingPosition(id))
+        assertEquals(id, allVocab().single().articleId)
+        assertEquals("cancelled", db.wholeTranslationDao().getTask(taskId)?.status)
+        assertEquals(checkpoint, db.wholeTranslationDao().getSegments(taskId))
+        assertEquals("completed", db.wholeTranslationDao().getTask(completedTask)?.status)
+        assertEquals("running", db.wholeTranslationDao().getTask(unrelatedTask)?.status)
+        assertEquals(unrelated, articleDao.getArticleById(unrelatedId))
+
+        articleDao.saveReadingPositionIfContent(ReadingPositionEntity(id, 1, "ORIGINAL", 4, 300), opened.content)
+        assertEquals("late old-layout save must not replace the reset", reset, articleDao.getReadingPosition(id))
+        assertEquals(20L, articleDao.getArticleById(id)?.lastReadAt)
+    }
+
+    @Test
+    fun saveEdit_missingConflictAndChapterTargets_leaveExistingRowsUntouched() = runBlocking {
+        val id = articleDao.insertArticle(ArticleEntity(title = "Current", content = "Current body.", translation = "译文"))
+        val current = articleDao.getArticleById(id)!!
+        val position = ReadingPositionEntity(id, 1, "ORIGINAL", 3, 100)
+        articleDao.upsertReadingPosition(position)
+        assertEquals(ArticleEditResult.NotFound,
+            articleDao.saveEdit(ArticleEditSnapshot(Long.MAX_VALUE, "T", "C"), "Changed", "Changed.", 200))
+        assertEquals(ArticleEditResult.Conflict,
+            articleDao.saveEdit(current.editSnapshot().copy(title = "Stale"), "Changed", "Changed.", 200))
+        assertEquals(ArticleEditResult.Conflict,
+            articleDao.saveEdit(current.editSnapshot().copy(content = "Stale."), "Changed", "Changed.", 200))
+        assertEquals(current, articleDao.getArticleById(id))
+        assertEquals(position, articleDao.getReadingPosition(id))
+
+        val (_, chapterId, _) = bookWithTwoChapters()
+        val chapter = articleDao.getArticleById(chapterId)!!
+        assertEquals(ArticleEditResult.NotStandalone,
+            articleDao.saveEdit(chapter.editSnapshot(), "Changed", "Changed.", 200))
+        assertEquals(chapter, articleDao.getArticleById(chapterId))
+    }
+
+    @Test
+    fun saveEdit_positionWriteFails_rollsBackArticleAndTaskCancellation() = runBlocking {
+        val id = articleDao.insertArticle(ArticleEntity(title = "Title", content = "Body.", translation = "旧译文"))
+        val opened = articleDao.getArticleById(id)!!
+        val position = ReadingPositionEntity(id, 0, "ORIGINAL", 3, 100)
+        articleDao.upsertReadingPosition(position)
+        val taskId = editingTask(opened)
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER reject_edit_reset BEFORE UPDATE ON reading_positions " +
+                "BEGIN SELECT RAISE(ABORT, 'test failure'); END"
+        )
+        var failed = false
+        try {
+            articleDao.saveEdit(opened.editSnapshot(), "Edited", "Edited body.", 200)
+        } catch (_: android.database.SQLException) {
+            failed = true
+        }
+        assertTrue(failed)
+        assertEquals(opened, articleDao.getArticleById(id))
+        assertEquals(position, articleDao.getReadingPosition(id))
+        assertEquals("running", db.wholeTranslationDao().getTask(taskId)?.status)
+    }
+
+    private fun ArticleEntity.editSnapshot() = ArticleEditSnapshot(id, title, content)
+
+    private suspend fun editingTask(article: ArticleEntity): Long = db.wholeTranslationDao().createTask(
+        task = WholeTranslationTaskEntity(scopeKey = "article:${article.id}", status = "running", createdAt = 100, updatedAt = 100),
+        articles = listOf(
+            TranslationTaskTarget(
+                articleId = article.id,
+                articleFingerprint = TranslationFingerprint.forArticle(article.content),
+                segmentationMode = TranslationSegmentationMode.PRESERVE.toStableToken(),
+                plannerVersion = TranslationPlannerVersion.LEGACY
+            )
+        ),
+        segments = ParagraphAligner.splitParagraphs(article.content).mapIndexed { index, text ->
+            TranslationSegmentEntity(
+                taskId = 0, articleId = article.id, paragraphIndex = index,
+                sourceFingerprint = TranslationFingerprint.forParagraph(text),
+                status = if (index == 0) "translated" else "untranslated",
+                translatedText = if (index == 0) "已完成译文" else null,
+                updatedAt = 100
+            )
+        },
+        now = 100
+    )
 
     private suspend fun bookWithTwoChapters(): Triple<Long, Long, Long> {
         val bookDao = db.bookDao()

@@ -30,13 +30,35 @@ class AiPromptPolicyTest {
 
         assertEquals("First line\nSecond line", result.prompt.normalizedInput)
         assertEquals(ExplanationType.SENTENCE_EXPLANATION, result.prompt.explanationType)
-        assertEquals("sentence-context-v1", result.prompt.promptVersion)
+        assertEquals("sentence-context-v3", result.prompt.promptVersion)
         assertEquals(2, result.prompt.messages.size)
         assertEquals("system", result.prompt.messages[0].role)
         assertEquals("user", result.prompt.messages[1].role)
         assertEquals("First line\nSecond line", result.prompt.messages[1].content)
         assertTrue(result.prompt.messages[0].content.contains("sentence"))
         assertTrue(result.prompt.messages[0].content.contains("Simplified Chinese"))
+    }
+
+    @Test
+    fun prepare_sentence_requestsConciseMeaningAndOnlyEssentialPlainTextPoints() {
+        val result = AiPromptPolicy.prepare(AiExplanationInput.Sentence("Reading helps."))
+            as AiPromptPreparationResult.Ready
+        val instruction = result.prompt.messages[0].content
+
+        listOf(
+            "one natural Chinese translation",
+            "1 to 3 key points",
+            "do not pad simple sentences",
+            "Combine overlapping points",
+            "main clause, modifiers or references",
+            "译文",
+            "要点",
+            "plain text only",
+            "no Markdown",
+            "Do not repeat the whole sentence"
+        ).forEach { requirement ->
+            assertTrue("Missing sentence explanation constraint: $requirement", instruction.contains(requirement))
+        }
     }
 
     @Test
@@ -52,7 +74,7 @@ class AiPromptPolicyTest {
 
             assertEquals(case, expectedLength, prompt.normalizedInput.length)
             assertEquals(case, ExplanationType.ARTICLE_EXPLANATION, prompt.explanationType)
-            assertEquals(case, "article-context-v1", prompt.promptVersion)
+            assertEquals(case, "article-context-v2", prompt.promptVersion)
             assertEquals(case, prompt.normalizedInput, prompt.messages[1].content)
             assertEquals(case, "system", prompt.messages[0].role)
             assertEquals(case, "user", prompt.messages[1].role)

@@ -156,8 +156,6 @@
     <string name="reading_sentence_translate_content_description">翻译当前句子</string>
     <string name="reading_sentence_explain">解释</string>
     <string name="reading_sentence_explain_content_description">解释当前句子</string>
-    <string name="reading_sentence_more">更多</string>
-    <string name="reading_sentence_more_content_description">更多操作</string>
     <string name="reading_sentence_whole_translation">全文翻译</string>
     <string name="reading_sentence_whole_translation_content_description">翻译整篇文章或整本书</string>
 
@@ -167,9 +165,21 @@
     <string name="whole_translation_scope_current_description">只翻译正在阅读的这一篇</string>
     <string name="whole_translation_scope_chapter">整本书</string>
     <string name="whole_translation_scope_chapter_description">按章节顺序翻译全部 %1$d 章</string>
-    <string name="whole_translation_scope_counts">%1$d 个段落，约 %2$d 次请求</string>
-    <string name="whole_translation_cost_notice">每个段落会单独发送给 AI 服务商，可能消耗额度或产生费用。已翻译的段落会保存，中断后可继续，不会重复请求。</string>
+    <string name="whole_translation_scope_counts">%1$d 个原段，%2$d 个对照块，最多 %3$d 次请求</string>
+    <string name="whole_translation_cost_notice">每个对照块会单独发送给 AI 服务商，可能消耗额度或产生费用。成功结果会保存，继续同一任务不会重发已成功的块；缓存可能减少实际远端请求。中断时尚未保存结果的请求仍可能已计费。</string>
+    <string name="whole_translation_previewing">正在计算本地分块预览…</string>
+    <string name="whole_translation_segmentation_title">当前文章 / 当前章的分段方式</string>
+    <string name="whole_translation_mode_auto">自动对照分块</string>
+    <string name="whole_translation_mode_line">按换行</string>
+    <string name="whole_translation_mode_preserve">保留原段落</string>
+    <string name="whole_translation_segmentation_notice">只记住当前文章或当前章的选择，不改写原文，也不会立即重新翻译。整本书分别使用各章保存的方式。</string>
+    <string name="whole_translation_preview_changed">正文、分段方式或翻译范围已变化，预览已更新，请重新确认。</string>
+    <string name="whole_translation_regenerate">重新生成对照</string>
+    <string name="whole_translation_regenerate_notice">将按当前预览创建新任务，可能新增付费请求。旧译文会保留，直到新任务全部成功后再整体替换。</string>
+    <string name="whole_translation_fixed_modes">原任务固定分段：%1$s。继续不会重新分块。</string>
+    <string name="whole_translation_other_chapter_limit">超限的是书中其他章节，请先前往对应章节调整分段方式；不会替你修改其他章的偏好。</string>
     <string name="whole_translation_start">开始翻译</string>
+    <string name="whole_translation_starting">正在启动翻译…</string>
     <string name="whole_translation_resume">继续翻译</string>
     <string name="whole_translation_retry_failed">重试失败项</string>
     <string name="whole_translation_continue_background">后台继续</string>
@@ -184,12 +194,19 @@
     <string name="whole_translation_status_failed_generic">任务已停止</string>
     <string name="whole_translation_rejected_no_content">没有可翻译的段落</string>
     <string name="whole_translation_rejected_generic">无法开始翻译</string>
+    <string name="whole_translation_too_many_blocks">按当前分段方式会切出 %1$d 个对照块，超过单篇上限 %2$d。请改用“保留原段落”，或先编辑文章整理分段。</string>
+    <string name="whole_translation_conflict_book">这篇文章已包含在一个进行中的整本书翻译里。请先查看那个任务，或取消它，再单独翻译本页，避免重复付费。</string>
+    <string name="whole_translation_conflict_article">这篇文章已有另一个进行中的翻译任务。请先查看该任务，或取消它，再重新开始，避免重复付费。</string>
+    <string name="whole_translation_conflict_open_existing">查看已有任务</string>
+    <string name="whole_translation_conflict_cancel_existing">取消已有任务</string>
     <string name="whole_translation_close">关闭</string>
     <string name="reading_sentence_actions_title">句子操作</string>
     <string name="reading_sentence_translation_title">句子译文</string>
     <string name="reading_sentence_translation_loading">正在翻译</string>
     <string name="reading_sentence_translation_unavailable">暂时没有可用译文</string>
     <string name="reading_sentence_explanation_title">句子解释</string>
+    <string name="reading_sentence_source">原文</string>
+    <string name="reading_sentence_explanation_detail">译意与讲解</string>
     <string name="reading_sentence_explanation_unavailable">暂时没有可用解释</string>
     <string name="reading_sentence_popup_close">关闭</string>
 
@@ -204,6 +221,11 @@
 
     <!-- Reading screen - translation -->
     <string name="show_translation">显示译文</string>
+    <string name="hide_translation">隐藏译文</string>
+    <string name="reading_no_translation">暂无译文</string>
+    <string name="reading_no_translation_hint">尚无全文译文，可点“全文翻译”生成。</string>
+    <string name="whole_translation_paragraph_hint">无需先编辑原文补空行，可直接使用自动对照分块；若每行都是独立内容，可改选“按换行”。编辑器仍可用于手动整理原文。</string>
+    <string name="action_edit_article">编辑文章</string>
     <string name="reading_settings">阅读设置</string>
     <string name="reading_appearance_title">阅读外观</string>
     <string name="reading_appearance_sample" translatable="false">Aa</string>
@@ -378,8 +400,13 @@
     <string name="settings_ai_error_dns">无法解析服务地址</string>
     <string name="settings_ai_error_tls">安全连接失败</string>
     <string name="settings_ai_error_malformed">服务返回的数据格式无效</string>
+    <string name="settings_ai_error_truncated">AI 输出达到长度上限，内容不完整。请检查服务商的输出上限或更换模型后重试。</string>
     <string name="settings_ai_error_no_content">服务未返回可用内容</string>
     <string name="settings_ai_error_unknown">AI 请求失败，请稍后重试</string>
+    <string name="reading_ai_not_configured_title">尚未配置 AI 服务</string>
+    <string name="reading_ai_not_configured_message">翻译、解释等功能需要先配置 AI 服务。是否前往配置？</string>
+    <string name="reading_ai_not_configured_confirm">前往配置</string>
+    <string name="reading_ai_not_configured_dismiss">暂不</string>
     <string name="settings_provider_deepseek">DeepSeek</string>
     <string name="settings_provider_kimi">Kimi</string>
     <string name="settings_provider_zhipu">智谱</string>
@@ -435,4 +462,31 @@
     <string name="tts_model_error_storage">无法读写模型，请检查可用存储空间后重试</string>
     <string name="tts_model_error_corrupt">模型校验失败，请重新下载</string>
     <string name="tts_model_licenses">语音引擎：sherpa-onnx（Apache-2.0）、ONNX Runtime（MIT）、espeak-ng（GPL-3.0）。内置模型数据集：LibriTTS-R（CC BY 4.0）。包含此引擎的应用分发须遵守 GPLv3。</string>
+    <string name="article_editor_title">编辑文章</string>
+    <string name="article_editor_save">保存</string>
+    <string name="article_editor_saving">保存中…</string>
+    <string name="article_editor_title_label">文章标题</string>
+    <string name="article_editor_content_label">英文正文</string>
+    <string name="article_editor_character_count">%1$d / %2$d 字符</string>
+    <string name="article_editor_load_failed">无法载入文章，请重试。</string>
+    <string name="article_editor_not_found">文章已不存在，请返回书架。</string>
+    <string name="article_editor_not_standalone">暂不支持编辑书籍章节，请返回阅读页。</string>
+    <string name="article_editor_conflict">文章已在其他页面发生变化。草稿已保留，请先复制需要的文字，再返回并重新打开编辑。</string>
+    <string name="article_editor_save_failed">保存失败，草稿已保留，请检查存储空间后重试。</string>
+    <string name="article_editor_title_required">请输入文章标题。</string>
+    <string name="article_editor_content_required">请输入英文正文。</string>
+    <string name="article_editor_content_save_title">保存正文修改？</string>
+    <string name="article_editor_content_save_message">修改正文后，旧译文将被清除，已有全文翻译任务将终止，阅读位置将从头开始。文章和已收藏的生词会保留。</string>
+    <string name="article_editor_confirm_save">确认保存</string>
+    <string name="article_editor_discard_title">放弃未保存的修改？</string>
+    <string name="article_editor_discard_message">返回后，这次未保存的修改将丢失。</string>
+    <string name="article_editor_discard">放弃修改</string>
+    <string name="article_editor_keep_editing">继续编辑</string>
+    <string name="article_editor_format">按换行分段</string>
+    <string name="article_editor_format_warning">仅适合每行本来就是一个段落的文章。普通排版折行不要使用；请先检查预览。</string>
+    <string name="article_editor_unseparated_hint">这些文字只有单换行，目前会被识别为一个段落。如果每行本来就是独立段落，可预览“按换行分段”，让译文按段对应。</string>
+    <string name="article_editor_preview_title">分段预览</string>
+    <string name="article_editor_preview_count">整理后共 %1$d 个段落</string>
+    <string name="article_editor_preview_notice">这里只预览换行变化，不会翻译或保存文章。应用到草稿后，仍需点击保存。</string>
+    <string name="article_editor_apply_to_draft">应用到草稿</string>
 </resources>

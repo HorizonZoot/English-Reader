@@ -4,7 +4,16 @@ import androidx.room.*
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
 import io.github.zoot.englishreader.data.entity.ReadingPositionEntity
+import io.github.zoot.englishreader.model.ArticleEditResult
+import io.github.zoot.englishreader.model.ArticleEditSnapshot
+import io.github.zoot.englishreader.model.ReadingTextKind
+import io.github.zoot.englishreader.model.ReadingArticleRecord
+import io.github.zoot.englishreader.model.ReadingPublication
 import kotlinx.coroutines.flow.Flow
+
+private const val READING_ARTICLE_QUERY =
+    "SELECT a.*, s.appliedPlan, s.appliedSourceFingerprint, s.appliedTranslationFingerprint " +
+        "FROM articles a LEFT JOIN article_translation_state s ON s.articleId = a.id WHERE a.id = :id"
 
 /**
  * 文章数据访问对象
@@ -37,6 +46,15 @@ interface ArticleDao {
 
     @Query("SELECT * FROM articles WHERE id = :id")
     suspend fun getArticleById(id: Long): ArticleEntity?
+
+    @Query("SELECT * FROM articles WHERE id = :id")
+    fun observeArticle(id: Long): Flow<ArticleEntity?>
+
+    @Query(READING_ARTICLE_QUERY)
+    suspend fun getReadingArticle(id: Long): ReadingArticleRecord?
+
+    @Query(READING_ARTICLE_QUERY)
+    fun observeReadingArticle(id: Long): Flow<ReadingArticleRecord?>
 
     @Query("SELECT * FROM reading_positions WHERE articleId = :articleId")
     suspend fun getReadingPosition(articleId: Long): ReadingPositionEntity?
@@ -84,14 +102,97 @@ interface ArticleDao {
         updateReadingBookTime(bookId, position.updatedAt)
     }
 
+    /** 正文检查与位置提交必须同事务，避免旧布局的迟到保存覆盖编辑后的起点。 */
+    @Transaction
+    suspend fun saveReadingPositionIfContent(
+        position: ReadingPositionEntity,
+        expectedContent: String,
+        expectedPublication: ReadingPublication? = null
+    ) {
+        val current = getReadingArticle(position.articleId) ?: return
+        if (current.article.content != expectedContent) return
+        if (expectedPublication != null &&
+            ReadingPublication(current.article.translation, current.appliedPlan) != expectedPublication
+        ) return
+        saveReadingPosition(position)
+    }
+
+    @Query("UPDATE articles SET title = :title WHERE id = :id")
+    suspend fun updateEditedTitle(id: Long, title: String)
+
+    @Query("UPDATE articles SET title = :title, content = :content, translation = NULL WHERE id = :id")
+    suspend fun updateEditedContent(id: Long, title: String, content: String)
+
+    @Query(
+        "UPDATE whole_translation_tasks SET status = 'cancelled', failureReason = NULL, updatedAt = :now " +
+            "WHERE status NOT IN ('completed', 'cancelled') AND taskId IN " +
+            "(SELECT taskId FROM translation_task_articles WHERE articleId = :articleId)"
+    )
+    suspend fun cancelTranslationTasksForEdit(articleId: Long, now: Long)
+
+    /**
+     * 编辑正文后清除已发布的对照布局，保留用户的分块偏好。
+     *
+     * 布局里的 offset 是按编辑前的正文算的，编辑后它们指向的已经是别的字符。不清除的话，阅读层
+     * 会拿旧坐标去裁新正文——轻则显示错位的对照，重则切出半个词。清除后回落到整段展示，直到下次
+     * 成功发布。
+     *
+     * `preferredMode` 不动：那是用户对这篇文章的选择，与正文改了什么无关。
+     */
+    @Query(
+        "UPDATE article_translation_state SET appliedPlan = NULL, " +
+            "appliedSourceFingerprint = NULL, appliedTranslationFingerprint = NULL, " +
+            "appliedTaskId = NULL, updatedAt = :now WHERE articleId = :articleId"
+    )
+    suspend fun clearAppliedLayoutForEdit(articleId: Long, now: Long)
+
+    /** 编辑只更新指定字段，不通过删除重插触发任何文章关联的级联。 */
+    @Transaction
+    suspend fun saveEdit(
+        original: ArticleEditSnapshot,
+        title: String,
+        content: String,
+        positionTimestamp: Long
+    ): ArticleEditResult {
+        val current = getArticleById(original.articleId) ?: return ArticleEditResult.NotFound
+        if (readingBookId(current.id) != null) return ArticleEditResult.NotStandalone
+        if (current.title != original.title || current.content != original.content) {
+            return ArticleEditResult.Conflict
+        }
+        if (content == current.content) {
+            if (title != current.title) updateEditedTitle(current.id, title)
+            return ArticleEditResult.Saved
+        }
+
+        cancelTranslationTasksForEdit(current.id, positionTimestamp)
+        clearAppliedLayoutForEdit(current.id, positionTimestamp)
+        updateEditedContent(current.id, title, content)
+        upsertReadingPosition(
+            ReadingPositionEntity(
+                articleId = current.id,
+                paragraphIndex = 0,
+                textKind = ReadingTextKind.TITLE.name,
+                characterOffset = 0,
+                updatedAt = positionTimestamp
+            )
+        )
+        return ArticleEditResult.Saved
+    }
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertArticle(article: ArticleEntity): Long
 
     @Update
     suspend fun updateArticle(article: ArticleEntity)
 
-    @Delete
-    suspend fun deleteArticle(article: ArticleEntity)
+    /** 与删书一致：先去重、解绑生词，再删除文章，任一步失败均回滚。 */
+    @Transaction
+    suspend fun deleteArticle(article: ArticleEntity) {
+        val articleIds = listOf(article.id)
+        deleteRedundantVocabularyForArticles(articleIds)
+        unbindVocabularyFromArticles(articleIds)
+        deleteArticlesByIds(articleIds)
+    }
 
     /**
      * 删除样本关联生词中的冗余行，为后续解绑（articleId 置 null）去重。

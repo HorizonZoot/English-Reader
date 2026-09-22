@@ -53,11 +53,12 @@ class RetrofitAiChatTransport @Inject constructor(
         }
 
         // 不用 choices[0]：空数组会抛 IndexOutOfBoundsException，表现为不明崩溃。
-        val text = response.body()?.choices?.firstOrNull()?.message?.content
-        return if (text.isNullOrBlank()) {
-            AiChatTransportResult.NoContent
-        } else {
-            AiChatTransportResult.Content(text)
+        val choice = response.body()?.choices?.firstOrNull()
+        val text = choice?.message?.content
+        return when {
+            choice?.finishReason == "length" -> AiChatTransportResult.Truncated(text)
+            text.isNullOrBlank() -> AiChatTransportResult.NoContent
+            else -> AiChatTransportResult.Content(text)
         }
     }
 

@@ -40,6 +40,7 @@ internal class RemoteAiExecutor(
 
             when (val result = transport.complete(config, request.preparedMessages)) {
                 is AiChatTransportResult.Content -> AiClientResult.Success(result.text)
+                is AiChatTransportResult.Truncated -> AiClientResult.Failure(AiError.ResponseTruncated)
                 AiChatTransportResult.NoContent ->
                     AiClientResult.Failure(AiError.NoContent)
             }
@@ -80,6 +81,12 @@ internal class RemoteAiExecutor(
             listOf(AiChatMessage(role = "user", content = probeMessage))
         )) {
             is AiChatTransportResult.Content -> AiClientResult.Success(result.text)
+            is AiChatTransportResult.Truncated -> {
+                // 探测刻意只给 1/4 token；非空响应已证明连通，但不能复用这条规则处理正文。
+                val text = result.text
+                if (text.isNullOrBlank()) AiClientResult.Failure(AiError.NoContent)
+                else AiClientResult.Success(text)
+            }
             AiChatTransportResult.NoContent -> AiClientResult.Failure(AiError.NoContent)
         }
     } catch (cancellation: CancellationException) {

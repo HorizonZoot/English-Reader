@@ -178,6 +178,45 @@ class AiChatTransportTest {
     }
 
     @Test
+    fun response_normalFinishReason_yieldsContent() = runTest {
+        for (reason in listOf("\"stop\"", "null")) {
+            server.enqueue(MockResponse().setBody(
+                """{"choices":[{"message":{"content":"Complete"},"finish_reason":$reason}]}"""
+            ))
+
+            val result = transport.complete(config(AiProviderTemplate.DEEPSEEK, serverUrl("")), messages())
+
+            assertEquals("Complete", (result as AiChatTransportResult.Content).text)
+        }
+    }
+
+    @Test
+    fun response_firstChoiceTruncated_doesNotAcceptPartialTextOrAnotherChoice() = runTest {
+        server.enqueue(MockResponse().setBody(
+            """{"choices":[{"message":{"content":"Only the beginning"},"finish_reason":"length"},
+                {"message":{"content":"Another choice"},"finish_reason":"stop"}]}"""
+        ))
+
+        val result = transport.complete(config(AiProviderTemplate.DEEPSEEK, serverUrl("")), messages())
+
+        assertTrue(result is AiChatTransportResult.Truncated)
+        assertEquals("Only the beginning", (result as AiChatTransportResult.Truncated).text)
+        assertFalse(result.toString().contains("Only the beginning"))
+    }
+
+    @Test
+    fun response_truncatedWithoutContent_preservesTruncationReason() = runTest {
+        server.enqueue(MockResponse().setBody(
+            """{"choices":[{"message":{"content":null},"finish_reason":"length"}]}"""
+        ))
+
+        val result = transport.complete(config(AiProviderTemplate.DEEPSEEK, serverUrl("")), messages())
+
+        assertTrue(result is AiChatTransportResult.Truncated)
+        assertEquals(null, (result as AiChatTransportResult.Truncated).text)
+    }
+
+    @Test
     fun response_withoutUsableContent_yieldsNoContentResult() = runTest {
         val cases = listOf(
             "empty choices" to """{"choices":[]}""",

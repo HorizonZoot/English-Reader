@@ -14,7 +14,8 @@ data class ReadingBlockMetrics(
     val paragraphIndex: Int,
     val textKind: ReadingTextKind,
     val lines: List<ReadingLine>,
-    val gapBefore: Int
+    val gapBefore: Int,
+    val textStartOffset: Int = 0
 )
 
 /** 原段落布局中的裁切范围；所有行只归属一页。 */
@@ -24,7 +25,9 @@ data class ReadingPageFragment(
     val endOffset: Int,
     val top: Int,
     val height: Int,
-    val gapBefore: Int
+    val gapBefore: Int,
+    val localStartOffset: Int = anchor.characterOffset,
+    val localEndOffset: Int = endOffset
 )
 
 data class ReadingPage(val fragments: List<ReadingPageFragment>) {
@@ -94,11 +97,13 @@ fun paginateReadingBlocks(blocks: List<ReadingBlockMetrics>, pageHeight: Int): R
             val height = last.bottom - top
             fragments += ReadingPageFragment(
                 blockIndex = blockIndex,
-                anchor = ReadingAnchor(block.paragraphIndex, block.textKind, block.lines[firstLine].startOffset),
-                endOffset = last.endOffset,
+                anchor = ReadingAnchor(block.paragraphIndex, block.textKind, block.textStartOffset + block.lines[firstLine].startOffset),
+                endOffset = block.textStartOffset + last.endOffset,
                 top = top,
                 height = height,
-                gapBefore = gap
+                gapBefore = gap,
+                localStartOffset = block.lines[firstLine].startOffset,
+                localEndOffset = last.endOffset
             )
             usedHeight += gap + height
             firstLine = endLine

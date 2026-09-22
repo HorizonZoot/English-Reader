@@ -91,20 +91,10 @@ class EpubBookParser @Inject constructor(
             coroutineContext.ensureActive()
 
             // Readium 3.0.3 的 Resource 不是 Closeable，生命周期随 publication（见 Phase 0 Spike）。
-            val bytes = get(link)?.read()?.getOrNull() ?: return@forEach
-
-            val xhtml = try {
-                XmlBytesDecoder.decode(bytes)
-            } catch (_: ImportException) {
-                // 单个资源解码失败不应废掉整本书：跳过并让「无可读章节」兜底。
-                return@forEach
-            }
-
-            val content = try {
-                XhtmlTextExtractor.extract(xhtml)
-            } catch (_: ImportException) {
-                return@forEach
-            }
+            val bytes = get(link)?.read()?.getOrNull() ?: invalidEpub()
+            // 读取或解析失败意味着正文可能丢失，不能与合法的空白封面一并跳过。
+            val xhtml = XmlBytesDecoder.decode(bytes)
+            val content = XhtmlTextExtractor.extract(xhtml)
 
             // 封面页等纯图片资源提取后为空白。它们合法但不可读，过滤掉。
             if (content.isBlank()) return@forEach

@@ -7,6 +7,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -62,7 +63,7 @@ class ReadingVoiceSettingsSheetTest {
                             settings = state.value.settings.copy(voiceId = voiceId)
                         )
                     },
-                    onRateChange = {},
+                    onRateChange = { null },
                     onNetworkAllowedChange = { allowed ->
                         networkChanges += allowed
                         state.value = state.value.copy(allowNetwork = allowed)
@@ -129,9 +130,12 @@ class ReadingVoiceSettingsSheetTest {
                     onVoiceChange = {},
                     onRateChange = { rate ->
                         rates += rate
+                        val requestId = state.value.rateChangeId + 1
                         state.value = state.value.copy(
-                            settings = state.value.settings.copy(speechRate = rate)
+                            settings = state.value.settings.copy(speechRate = rate),
+                            rateChangeId = requestId
                         )
+                        requestId
                     },
                     onNetworkAllowedChange = {},
                     onPreview = {},
@@ -191,7 +195,7 @@ class ReadingVoiceSettingsSheetTest {
                         state = state,
                     onDismiss = {},
                     onVoiceChange = {},
-                    onRateChange = {},
+                    onRateChange = { null },
                     onNetworkAllowedChange = {},
                     onPreview = {},
                     onStopPreview = {},
@@ -207,6 +211,119 @@ class ReadingVoiceSettingsSheetTest {
         composeRule.onNodeWithTag("reading-voice-sheet")
             .performScrollToNode(hasTestTag("reading-voice-preview-failure"))
         composeRule.onNodeWithTag("reading-voice-preview-failure").assertIsDisplayed()
+    }
+
+    @Test
+    fun content_rateCommitKeepsDraftUntilAcknowledgedAndIgnoresOlderPreferenceEmission() {
+        val state = mutableStateOf(readyState())
+        val rates = mutableListOf<Float>()
+        renderRateContent(
+            state = { state.value },
+            onRateChange = { rate ->
+                rates += rate
+                rates.size.toLong()
+            }
+        )
+
+        val range = composeRule.onNodeWithTag("reading-voice-rate")
+            .fetchSemanticsNode().config[SemanticsProperties.ProgressBarRangeInfo]
+        assertEquals(0, range.steps)
+        changeRate(1.63f)
+        assertDisplayedRate(1.6f)
+        composeRule.runOnIdle {
+            assertEquals(1.0f, state.value.settings.speechRate, 0.001f)
+            state.value = state.value.copy(allowNetwork = true)
+        }
+        assertDisplayedRate(1.6f)
+        composeRule.runOnIdle {
+            state.value = state.value.copy(rateChangeId = 1, pendingSpeechRate = 1.6f)
+        }
+        assertDisplayedRate(1.6f)
+
+        changeRate(1.27f)
+        composeRule.runOnIdle {
+            state.value = state.value.copy(
+                settings = state.value.settings.copy(speechRate = 1.6f),
+                pendingSpeechRate = null
+            )
+        }
+        assertDisplayedRate(1.3f)
+        composeRule.runOnIdle {
+            state.value = state.value.copy(rateChangeId = 2, pendingSpeechRate = 1.3f)
+        }
+        assertDisplayedRate(1.3f)
+        composeRule.runOnIdle {
+            state.value = state.value.copy(
+                settings = state.value.settings.copy(speechRate = 1.3f),
+                pendingSpeechRate = null
+            )
+        }
+        assertDisplayedRate(1.3f)
+        composeRule.runOnIdle { assertEquals(listOf(1.6f, 1.3f), rates) }
+    }
+
+    @Test
+    fun content_reopenedDuringSaveShowsPendingRateThenRestoresPersistedRateOnFailure() {
+        val state = mutableStateOf(readyState())
+        val visible = mutableStateOf(true)
+        var commits = 0
+        renderRateContent(
+            state = { state.value },
+            visible = { visible.value },
+            onRateChange = { rate ->
+                commits++
+                state.value = state.value.copy(rateChangeId = commits.toLong(), pendingSpeechRate = rate)
+                commits.toLong()
+            }
+        )
+
+        changeRate(1.6f)
+        assertDisplayedRate(1.6f)
+        composeRule.runOnIdle { visible.value = false }
+        composeRule.onNodeWithTag("reading-voice-rate").assertDoesNotExist()
+        composeRule.runOnIdle { visible.value = true }
+        assertDisplayedRate(1.6f)
+        composeRule.runOnIdle { state.value = state.value.copy(pendingSpeechRate = null) }
+        assertDisplayedRate(1.0f)
+        composeRule.runOnIdle { assertEquals(1, commits) }
+    }
+
+    private fun changeRate(rate: Float) {
+        composeRule.onNodeWithTag("reading-voice-rate")
+            .performSemanticsAction(SemanticsActions.SetProgress) { setProgress -> setProgress(rate) }
+    }
+
+    private fun assertDisplayedRate(expected: Float) {
+        val range = composeRule.onNodeWithTag("reading-voice-rate")
+            .fetchSemanticsNode().config[SemanticsProperties.ProgressBarRangeInfo]
+        assertEquals(expected, range.current, 0.001f)
+    }
+
+    private fun renderRateContent(
+        state: () -> ReadingVoiceSettingsState,
+        onRateChange: (Float) -> Long?,
+        visible: () -> Boolean = { true }
+    ) {
+        composeRule.setContent {
+            MaterialTheme {
+                Box(Modifier.height(640.dp).fillMaxWidth()) {
+                    if (visible()) {
+                        ReadingVoiceSettingsContent(
+                            state = state(),
+                            onDismiss = {},
+                            onVoiceChange = {},
+                            onRateChange = onRateChange,
+                            onNetworkAllowedChange = {},
+                            onPreview = {},
+                            onStopPreview = {},
+                            onReset = {},
+                            onRecheck = {},
+                            onSystemAction = {}
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private fun readyState() = ReadingVoiceSettingsState(

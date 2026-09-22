@@ -22,6 +22,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -137,7 +138,14 @@ class DefaultAiClientTest {
         assertEquals("Hello world", request.normalizedInput)
         assertEquals("zh-CN", request.outputLanguageTag)
         assertEquals(ExplanationType.SENTENCE_EXPLANATION, request.explanationType)
-        assertEquals("sentence-context-v1", request.promptVersion)
+        assertEquals("sentence-context-v3", request.promptVersion)
+        val currentKey = requestSlot.captured.semanticCacheKey
+        assertEquals(ExplanationCacheIdentity.from(request).hash(), currentKey)
+        assertNotEquals(
+            "Concise explanations must not reuse the previous verbose prompt cache",
+            ExplanationCacheIdentity.from(request.copy(promptVersion = "sentence-context-v2")).hash(),
+            currentKey
+        )
         assertEquals(2, request.preparedMessages.size)
         assertEquals("system", request.preparedMessages[0].role)
         assertEquals("user", request.preparedMessages[1].role)
@@ -229,7 +237,7 @@ class DefaultAiClientTest {
             ExplanationType.ARTICLE_EXPLANATION,
             requestSlot.captured.request.explanationType
         )
-        assertEquals("article-context-v1", requestSlot.captured.request.promptVersion)
+        assertEquals("article-context-v2", requestSlot.captured.request.promptVersion)
         assertEquals(
             ImportBudget.MAX_FULL_EXPLANATION_CHARS,
             requestSlot.captured.request.preparedMessages[1].content.length

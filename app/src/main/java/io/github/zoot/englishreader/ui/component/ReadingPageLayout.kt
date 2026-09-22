@@ -22,6 +22,10 @@ import io.github.zoot.englishreader.core.paginateReadingBlocks
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.local.FontSizeOption
 import io.github.zoot.englishreader.model.ReadingTextKind
+import io.github.zoot.englishreader.model.ReadingAnchor
+import io.github.zoot.englishreader.model.AppliedTranslationLayout
+import io.github.zoot.englishreader.model.ReadingProjectedKind
+import io.github.zoot.englishreader.model.ReadingTranslationProjection
 import io.github.zoot.englishreader.util.ParagraphAligner
 import kotlinx.coroutines.yield
 import kotlin.math.ceil
@@ -32,18 +36,31 @@ internal data class ReadingTextBlock(
     val kind: ReadingTextKind,
     val text: String,
     val style: TextStyle,
-    val gapBeforeDp: Int
-)
+    val gapBeforeDp: Int,
+    val textStartOffset: Int = 0,
+    val sourceStartOffset: Int = textStartOffset,
+    val sourceEndOffset: Int = sourceStartOffset + text.length
+) {
+    val key: ReadingBlockKey get() = ReadingBlockKey(paragraphIndex, kind, textStartOffset)
+    val textEndOffset: Int get() = textStartOffset + text.length
+    fun contains(offset: Int): Boolean = offset in textStartOffset until textEndOffset
+}
+
+internal fun List<ReadingTextBlock>.blockFor(anchor: ReadingAnchor): ReadingTextBlock? {
+    val candidates = filter { it.paragraphIndex == anchor.paragraphIndex && it.kind == anchor.textKind }
+    return candidates.firstOrNull { anchor.characterOffset < it.textEndOffset } ?: candidates.lastOrNull()
+}
 
 @Composable
 internal fun rememberReadingTextBlocks(
     article: ArticleEntity,
     paragraphs: List<ParagraphAligner.AlignedParagraph>,
     fontSize: FontSizeOption,
-    showTranslation: Boolean
+    showTranslation: Boolean,
+    appliedLayout: AppliedTranslationLayout? = null
 ): List<ReadingTextBlock> {
     val typography = MaterialTheme.typography
-    return remember(article.title, article.source, paragraphs, fontSize, showTranslation, typography) {
+    return remember(article.title, article.source, article.translation, paragraphs, fontSize, showTranslation, appliedLayout, typography) {
         buildList {
             article.source?.takeIf { it.isNotBlank() }?.let {
                 add(ReadingTextBlock(0, ReadingTextKind.SOURCE, it, typography.labelMedium, 0))
@@ -59,23 +76,25 @@ internal fun rememberReadingTextBlocks(
                     )
                 )
             }
-            paragraphs.forEachIndexed { index, paragraph ->
+            ReadingTranslationProjection.project(
+                paragraphs.map { it.english }, article.translation, appliedLayout, showTranslation
+            ).forEachIndexed { index, block ->
+                val original = block.kind == ReadingProjectedKind.ORIGINAL
+                val size = (fontSize.sizeSp - 3).sp
                 add(
                     ReadingTextBlock(
-                        index, ReadingTextKind.ORIGINAL, paragraph.english,
-                        readingOriginalTextStyle(fontSize.sizeSp.sp, FontFamily.Serif, Color.Unspecified),
-                        if (index == 0) 32 else 24
+                        paragraphIndex = block.sourceParagraphIndex,
+                        kind = if (original) ReadingTextKind.ORIGINAL else ReadingTextKind.TRANSLATION,
+                        text = block.text,
+                        style = if (original) {
+                            readingOriginalTextStyle(fontSize.sizeSp.sp, FontFamily.Serif, Color.Unspecified)
+                        } else typography.bodyLarge.copy(fontSize = size, lineHeight = size * 1.6f),
+                        gapBeforeDp = if (!original) 8 else if (index == 0) 32 else 24,
+                        textStartOffset = block.textStartOffset,
+                        sourceStartOffset = block.sourceStartOffset,
+                        sourceEndOffset = block.sourceEndOffset
                     )
                 )
-                if (showTranslation && !paragraph.chinese.isNullOrBlank()) {
-                    val size = (fontSize.sizeSp - 3).sp
-                    add(
-                        ReadingTextBlock(
-                            index, ReadingTextKind.TRANSLATION, paragraph.chinese,
-                            typography.bodyLarge.copy(fontSize = size, lineHeight = size * 1.6f), 8
-                        )
-                    )
-                }
             }
         }
     }
@@ -109,6 +128,7 @@ internal fun rememberReadingPageLayout(
             ReadingBlockMetrics(
                 paragraphIndex = block.paragraphIndex,
                 textKind = block.kind,
+                textStartOffset = block.textStartOffset,
                 gapBefore = with(density) { block.gapBeforeDp.dp.roundToPx() },
                 lines = List(layout.lineCount) { line ->
                     ReadingLine(

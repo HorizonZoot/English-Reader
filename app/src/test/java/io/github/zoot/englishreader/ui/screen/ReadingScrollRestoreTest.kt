@@ -24,6 +24,7 @@ import io.github.zoot.englishreader.data.local.FontSizeOption
 import io.github.zoot.englishreader.model.ReadingAnchor
 import io.github.zoot.englishreader.model.ReadingPosition
 import io.github.zoot.englishreader.model.ReadingPositionTarget
+import io.github.zoot.englishreader.model.ReadingTextKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -140,6 +141,63 @@ class ReadingScrollRestoreTest {
     }
 
     @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun translationUpdatedWhileShown_subsequentScrollSavesCurrentTranslationAnchor() {
+        val current = mutableStateOf(article.copy(
+            translation = (1..12).joinToString("\n\n") { "Old translation $it." }
+        ))
+        val saves = mutableListOf<ReadingPosition>()
+        val position = ReadingPosition(article.id, ReadingAnchor())
+        render(
+            target = ReadingPositionTarget(position),
+            onSave = { saves += it },
+            articleUpdates = current,
+            showTranslation = true
+        )
+        composeRule.runOnIdle {
+            current.value = current.value.copy(
+                translation = (1..12).joinToString("\n\n") {
+                    "Updated translation $it keeps going with more detail. ".repeat(80)
+                }
+            )
+        }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle {
+            assertEquals("refresh preserves the original reading anchor", position, saves.last())
+            saves.clear()
+        }
+
+        composeRule.onNode(hasScrollToIndexAction())
+            .performSemanticsAction(SemanticsActions.ScrollBy) { scroll -> assertTrue(scroll(0f, 500f)) }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle {
+            assertTrue("scrolling the new translation must save progress", saves.isNotEmpty())
+            assertEquals(ReadingTextKind.TRANSLATION, saves.last().anchor.textKind)
+            assertTrue(saves.last().anchor.characterOffset > 0)
+        }
+    }
+
+    @Test
+    @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    fun titleUpdatedWhileVisible_subsequentScrollSavesCurrentTitleAnchor() {
+        val current = mutableStateOf(article.copy(title = "Original title. ".repeat(40)))
+        val saves = mutableListOf<ReadingPosition>()
+        render(target = null, onSave = { saves += it }, articleUpdates = current)
+        composeRule.runOnIdle { current.value = current.value.copy(title = "Updated title. ".repeat(40)) }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle { saves.clear() }
+
+        composeRule.onNode(hasScrollToIndexAction())
+            .performSemanticsAction(SemanticsActions.ScrollBy) { scroll -> assertTrue(scroll(0f, 100f)) }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle {
+            assertTrue("scrolling the updated title must save progress", saves.isNotEmpty())
+            assertEquals(ReadingTextKind.TITLE, saves.last().anchor.textKind)
+            assertTrue(saves.last().anchor.characterOffset > 0)
+        }
+    }
+
+    @Test
     @Config(qualifiers = "w1000dp-h1000dp")
     @GraphicsMode(GraphicsMode.Mode.NATIVE)
     fun restore_windowAndFontScaleChanges_preserveAnchorAndAllowReadingToEnd() {
@@ -184,7 +242,9 @@ class ReadingScrollRestoreTest {
         font: MutableState<FontSizeOption> = mutableStateOf(FontSizeOption.DEFAULT),
         readingArticle: ArticleEntity = article,
         viewport: MutableState<DpSize>? = null,
-        fontScale: MutableState<Float>? = null
+        fontScale: MutableState<Float>? = null,
+        articleUpdates: MutableState<ArticleEntity>? = null,
+        showTranslation: Boolean = false
     ) {
         val pending = mutableStateOf(target)
         composeRule.setContent {
@@ -192,13 +252,13 @@ class ReadingScrollRestoreTest {
             CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale?.value ?: density.fontScale)) {
                 Box(viewport?.value?.let { Modifier.size(it) } ?: Modifier.fillMaxSize()) {
                     ReadingScreenContent(
-                        article = readingArticle,
+                        article = articleUpdates?.value ?: readingArticle,
                         selectedSentence = null,
                         selectedWord = null,
                         isLoadingDefinition = false,
                         isLoading = false,
                         fontSizeOption = font.value,
-                        showTranslation = false,
+                        showTranslation = showTranslation,
                         snackbarHostState = remember { SnackbarHostState() },
                         onToggleTranslation = {},
                         onBack = {},

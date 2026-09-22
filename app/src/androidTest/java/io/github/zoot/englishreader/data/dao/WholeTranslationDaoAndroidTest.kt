@@ -8,9 +8,14 @@ import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import io.github.zoot.englishreader.model.AppliedTranslationLayoutCodec
+import io.github.zoot.englishreader.model.DefaultTranslationMaterializationPolicy
 import io.github.zoot.englishreader.model.TranslationFingerprint
-import io.github.zoot.englishreader.model.TranslationOutputAssembler
+import io.github.zoot.englishreader.model.TranslationPlannerVersion
 import io.github.zoot.englishreader.model.TranslationSegmentStatus
+import io.github.zoot.englishreader.model.TranslationSegmentationMode
 import io.github.zoot.englishreader.util.ParagraphAligner
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -88,8 +93,8 @@ class WholeTranslationDaoAndroidTest {
         val taskId = dao.createTask(
             task = taskRow(scopeKey = "book:7", bookId = 7),
             articles = listOf(
-                second to TranslationFingerprint.forArticle(TWO_PARAGRAPHS),
-                first to TranslationFingerprint.forArticle(ONE_PARAGRAPH)
+                legacyTarget(second, TWO_PARAGRAPHS),
+                legacyTarget(first, ONE_PARAGRAPH)
             ),
             segments = segmentsFor(second, TWO_PARAGRAPHS) + segmentsFor(first, ONE_PARAGRAPH),
             now = NOW
@@ -102,20 +107,81 @@ class WholeTranslationDaoAndroidTest {
 
     @Test
     fun findResumableTask_terminalStatuses_areExcluded() = runBlocking {
+        for (status in listOf("completed", "cancelled", "failed")) {
+            val articleId = insertArticle(ONE_PARAGRAPH)
+            val taskId = createTask(articleId)
+            assertNotNull(dao.findResumableTask("article:$articleId"))
+            dao.updateTaskStatus(taskId, status, if (status == "failed") "configuration" else null, NOW)
+            if (status == "failed") {
+                assertNotNull("failed task must stay resumable", dao.findResumableTask("article:$articleId"))
+            } else {
+                assertNull("$status task must not be resumable", dao.findResumableTask("article:$articleId"))
+            }
+        }
+    }
+
+    @Test
+    fun terminalTask_lateWorkerWritesAndResume_cannotResurrectOrChangeCheckpoint() = runBlocking {
+        for (status in listOf("completed", "cancelled")) {
+            val articleId = insertArticle(TWO_PARAGRAPHS)
+            val taskId = createTask(articleId)
+            dao.tryClaimSegment(taskId, articleId, 0, NOW + LEASE, NOW, 0)
+            dao.updateTaskStatus(taskId, status, null, NOW)
+            val segments = dao.getSegments(taskId)
+
+            for (next in listOf("running", "paused", "failed", "cancelled")) {
+                assertEquals("$status -> $next", 0, dao.updateTaskStatus(taskId, next, null, NOW + 1))
+            }
+            assertEquals(false, dao.beginTask(taskId, NOW + 1))
+            assertEquals(0, dao.tryClaimSegment(taskId, articleId, 1, NOW + LEASE, NOW, 0))
+            assertEquals(0, dao.checkpointSuccess(taskId, articleId, 0, fingerprintOf(TWO_PARAGRAPHS, 0), "迟到", NOW))
+            assertEquals(0, dao.checkpointFailure(taskId, articleId, 0, "transient_network", NOW))
+            assertEquals(0, dao.reclaimExpiredLeases(taskId, NOW + LEASE + 1))
+            assertNull(dao.claimSegment(taskId, true, LEASE, NOW + LEASE + 1))
+            assertEquals(segments, dao.getSegments(taskId))
+            assertEquals(status, dao.getTask(taskId)?.status)
+        }
+    }
+
+    @Test
+    fun createTask_sourceChangedAfterRead_doesNotLeaveTaskOrCheckpoint() = runBlocking {
         val articleId = insertArticle(ONE_PARAGRAPH)
+        val original = articleDao.getArticleById(articleId)!!
+        articleDao.updateArticle(original.copy(content = "Edited."))
+        var rejected = false
+        try {
+            dao.createTask(
+                taskRow("article:$articleId"),
+                listOf(legacyTarget(articleId, ONE_PARAGRAPH)),
+                segmentsFor(articleId, ONE_PARAGRAPH), NOW
+            )
+        } catch (_: TranslationSourceChangedException) {
+            rejected = true
+        }
+        assertTrue(rejected)
+        assertNull(dao.findResumableTask("article:$articleId"))
+        for (table in listOf("whole_translation_tasks", "translation_task_articles", "translation_segments")) {
+            db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM $table").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("$table must stay empty", 0, cursor.getInt(0))
+            }
+        }
+        assertEquals("Edited.", articleDao.getArticleById(articleId)?.content)
+    }
+
+    @Test
+    fun findResumableTaskForSources_changedBody_cancelsWithoutResumingOrChangingCheckpoints() = runBlocking {
+        val articleId = insertArticle(TWO_PARAGRAPHS)
         val taskId = createTask(articleId)
+        val original = articleDao.getArticleById(articleId)!!
+        val segments = dao.getSegments(taskId)
+        assertEquals("paused", dao.getTask(taskId)?.status)
+        articleDao.updateArticle(original.copy(content = "Edited."))
 
-        assertNotNull(dao.findResumableTask("article:$articleId"))
-
-        dao.updateTaskStatus(taskId, "completed", null, NOW)
-        assertNull("completed task must not be resumable", dao.findResumableTask("article:$articleId"))
-
-        dao.updateTaskStatus(taskId, "cancelled", null, NOW)
-        assertNull("cancelled task must not be resumable", dao.findResumableTask("article:$articleId"))
-
-        // failed 因配置问题中止，修好凭据后应能接着已完成的段落继续
-        dao.updateTaskStatus(taskId, "failed", "configuration", NOW)
-        assertNotNull("failed task must stay resumable", dao.findResumableTask("article:$articleId"))
+        assertNull(dao.findResumableTaskForSources("article:$articleId", listOf(articleId), NOW + 1))
+        assertEquals("cancelled", dao.getTask(taskId)?.status)
+        assertEquals(segments, dao.getSegments(taskId))
+        assertNull(articleDao.getArticleById(articleId)?.translation)
     }
 
     // ---- 领取与 lease ----
@@ -200,6 +266,52 @@ class WholeTranslationDaoAndroidTest {
         translateAll(taskId, articleId, ONE_PARAGRAPH)
 
         assertNull(dao.claimSegment(taskId, includeFailed = true, leaseDurationMs = LEASE, now = NOW))
+    }
+
+    @Test
+    fun resetConfigurationFailures_runningTask_resetsOnlyConfigurationAndPreservesAttempts() = runBlocking {
+        val content = "Done.\n\nAuth.\n\nOversized."
+        val articleId = insertArticle(content)
+        val taskId = createTask(articleId)
+        dao.tryClaimSegment(taskId, articleId, 0, NOW + LEASE, NOW, 0)
+        dao.checkpointSuccess(taskId, articleId, 0, fingerprintOf(content, 0), "已完成", NOW)
+        dao.tryClaimSegment(taskId, articleId, 1, NOW + LEASE, NOW, 0)
+        dao.checkpointFailure(taskId, articleId, 1, "configuration", NOW)
+        dao.tryClaimSegment(taskId, articleId, 2, NOW + LEASE, NOW, 0)
+        dao.checkpointFailure(taskId, articleId, 2, "paragraph_too_long", NOW)
+        val before = dao.getSegments(taskId)
+        val otherTask = createTask(articleId)
+        dao.tryClaimSegment(otherTask, articleId, 0, NOW + LEASE, NOW, 0)
+        dao.checkpointFailure(otherTask, articleId, 0, "configuration", NOW)
+        val otherSegments = dao.getSegments(otherTask)
+        assertTrue(dao.beginTask(taskId, NOW + 1))
+
+        assertEquals(1, dao.resetConfigurationFailures(taskId, NOW + 2))
+
+        assertEquals(
+            before.map { segment ->
+                if (segment.paragraphIndex == 1) segment.copy(
+                    status = "untranslated", failureReason = null, leaseExpiresAt = null, updatedAt = NOW + 2
+                ) else segment
+            },
+            dao.getSegments(taskId)
+        )
+        assertEquals(otherSegments, dao.getSegments(otherTask))
+    }
+
+    @Test
+    fun resetConfigurationFailures_taskNotRunning_leavesCheckpointUntouched() = runBlocking {
+        for (status in listOf("paused", "failed", "cancelled", "completed")) {
+            val articleId = insertArticle(ONE_PARAGRAPH)
+            val taskId = createTask(articleId)
+            dao.tryClaimSegment(taskId, articleId, 0, NOW + LEASE, NOW, 0)
+            dao.checkpointFailure(taskId, articleId, 0, "configuration", NOW)
+            dao.updateTaskStatus(taskId, status, null, NOW)
+            val before = dao.getSegments(taskId)
+
+            assertEquals(status, 0, dao.resetConfigurationFailures(taskId, NOW + 1))
+            assertEquals(before, dao.getSegments(taskId))
+        }
     }
 
     // ---- checkpoint ----
@@ -352,8 +464,8 @@ class WholeTranslationDaoAndroidTest {
         val taskId = dao.createTask(
             task = taskRow(scopeKey = "book:3", bookId = 3),
             articles = listOf(
-                first to TranslationFingerprint.forArticle(ONE_PARAGRAPH),
-                second to TranslationFingerprint.forArticle(TWO_PARAGRAPHS)
+                legacyTarget(first, ONE_PARAGRAPH),
+                legacyTarget(second, TWO_PARAGRAPHS)
             ),
             segments = segmentsFor(first, ONE_PARAGRAPH) + segmentsFor(second, TWO_PARAGRAPHS),
             now = NOW
@@ -414,7 +526,7 @@ class WholeTranslationDaoAndroidTest {
         val content = articleDao.getArticleById(articleId)!!.content
         return dao.createTask(
             task = taskRow(scopeKey = "article:$articleId"),
-            articles = listOf(articleId to TranslationFingerprint.forArticle(content)),
+            articles = listOf(legacyTarget(articleId, content)),
             segments = segmentsFor(articleId, content),
             now = NOW
         )
@@ -442,10 +554,21 @@ class WholeTranslationDaoAndroidTest {
 
     private suspend fun materialize(taskId: Long): MaterializationResult = dao.materialize(
         taskId = taskId,
-        paragraphSplitter = ParagraphAligner::splitParagraphs,
-        joinParagraphs = TranslationOutputAssembler::join,
-        articleFingerprint = TranslationFingerprint::forArticle,
+        policy = POLICY,
         now = NOW
+    )
+
+    /**
+     * v7 之前形态的目标：一行一个空行段落，没有块坐标。
+     *
+     * 本文件的既有用例全部验证 legacy 语义，因此统一走这个构造。块路径的用例在
+     * `WholeTranslationBlockPathTest` 里，用真实规划器产出坐标，不在这里手写。
+     */
+    private fun legacyTarget(articleId: Long, content: String) = TranslationTaskTarget(
+        articleId = articleId,
+        articleFingerprint = TranslationFingerprint.forArticle(content),
+        segmentationMode = TranslationSegmentationMode.PRESERVE.toStableToken(),
+        plannerVersion = TranslationPlannerVersion.LEGACY
     )
 
     private companion object {
@@ -453,5 +576,15 @@ class WholeTranslationDaoAndroidTest {
         const val LEASE = 60_000L
         const val ONE_PARAGRAPH = "Only paragraph."
         const val TWO_PARAGRAPHS = "First paragraph.\n\nSecond paragraph."
+
+        /**
+         * 与生产同一套纯计算。
+         *
+         * 不换成假实现：materialize 的正确性大半就落在这些计算上（按目标版本分派、坐标完整性、
+         * 聚合与坐标同源），替换掉等于把要验的东西验掉了。
+         */
+        val POLICY = DefaultTranslationMaterializationPolicy(
+            AppliedTranslationLayoutCodec(Moshi.Builder().add(KotlinJsonAdapterFactory()).build())
+        )
     }
 }

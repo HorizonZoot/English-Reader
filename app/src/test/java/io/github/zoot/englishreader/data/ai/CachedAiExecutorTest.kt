@@ -1,6 +1,8 @@
 package io.github.zoot.englishreader.data.ai
 
 import io.github.zoot.englishreader.data.entity.ExplanationCacheEntity
+import io.github.zoot.englishreader.data.remote.ai.AiChatTransport
+import io.github.zoot.englishreader.data.remote.ai.AiChatTransportResult
 import io.github.zoot.englishreader.data.repository.ExplanationCacheRepository
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -83,6 +85,31 @@ class CachedAiExecutorTest {
 
         assertEquals(AiClientResult.Failure(AiError.NoContent), result)
         coVerify(exactly = 0) { cacheRepository.insertCache(any()) }
+    }
+
+    @Test
+    fun truncatedRemoteResponse_isNotCachedAndLaterCompleteResponseCanBeSaved() = runTest {
+        val transport = mockk<AiChatTransport>()
+        val cachedRemote = CachedAiExecutor(RemoteAiExecutor(transport), cacheRepository)
+        val writes = mutableListOf<ExplanationCacheEntity>()
+        coEvery { cacheRepository.getCachedExplanation(any()) } returns null
+        coEvery { cacheRepository.insertCache(capture(writes)) } returns Unit
+        coEvery { transport.complete(any(), any()) } returnsMany listOf(
+            AiChatTransportResult.Truncated("Only the beginning"),
+            AiChatTransportResult.Content("Complete explanation")
+        )
+
+        val first = cachedRemote.execute(operation(), AiOperationCompletionGate())
+
+        assertEquals(AiClientResult.Failure(AiError.ResponseTruncated), first)
+        assertTrue(writes.isEmpty())
+        coVerify(exactly = 0) { cacheRepository.insertCache(any()) }
+
+        val second = cachedRemote.execute(operation(), AiOperationCompletionGate())
+
+        assertEquals(AiClientResult.Success("Complete explanation"), second)
+        assertEquals("Complete explanation", writes.single().explanation)
+        coVerify(exactly = 2) { transport.complete(any(), any()) }
     }
 
     // ---- 读写使用同一个键 ----

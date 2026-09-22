@@ -44,6 +44,12 @@ class TtsModelRepository internal constructor(
     )
 
     private val locks = entries.associate { it.id to Mutex() }
+    // Slots are fixed at construction; each mutable slot is protected by its model's mutex.
+    private class Verification {
+        var stamp: TtsModelArchive.Stamp? = null
+        var revision = 0L
+    }
+    private val verified = entries.associate { it.id to Verification() }
     private val mutableStates = MutableStateFlow<Map<String, TtsModelState>>(
         entries.associate { it.id to TtsModelState.NotInstalled }
     )
@@ -56,14 +62,17 @@ class TtsModelRepository internal constructor(
             try {
                 cleanup(File(root, entry.id + ".tmp"))
                 cleanup(File(root, entry.id + ".archive"))
-                publish(entry, if (TtsModelArchive.valid(File(root, entry.id), entry, coroutineContext)) {
+                publish(entry, if (verifyInstalled(entry, File(root, entry.id), force = true)) {
                     TtsModelState.Installed
                 } else TtsModelState.NotInstalled)
             } catch (cancelled: CancellationException) {
+                invalidate(entry)
                 throw cancelled
             } catch (_: IOException) {
+                invalidate(entry)
                 publish(entry, TtsModelState.Failed(TtsModelFailure.STORAGE))
             } catch (_: SecurityException) {
+                invalidate(entry)
                 publish(entry, TtsModelState.Failed(TtsModelFailure.STORAGE))
             } finally {
                 lock.unlock()
@@ -76,18 +85,28 @@ class TtsModelRepository internal constructor(
         val lock = locks.getValue(id)
         if (!lock.tryLock()) return@withContext
         try {
-            ensureInstalled(entry, allowDownload = true)
+            ensureInstalled(entry, allowDownload = true, forceVerification = true)
         } finally {
             lock.unlock()
         }
     }
 
     // The lease prevents removal while native inference is reading the model files.
-    suspend fun <T> withModel(id: String, action: suspend (File) -> T): T {
+    suspend fun <T> withModel(id: String, action: suspend (File) -> T): T =
+        withModelRevision(id) { directory, _ -> action(directory) }
+
+    /** Native caches must distinguish a replacement at the same on-disk path. */
+    internal suspend fun <T> withModelRevision(id: String, action: suspend (File, Long) -> T): T {
         val entry = entries.firstOrNull { it.id == id } ?: throw TtsModelException(TtsModelFailure.UNAVAILABLE)
         return locks.getValue(id).withLock {
             val directory = withContext(ioDispatcher) { ensureInstalled(entry, allowDownload = false) }
-            action(directory)
+            try {
+                action(directory, verified.getValue(id).revision)
+            } catch (failure: TtsModelException) {
+                // A native load may expose damage not caught by metadata-only reuse.
+                invalidate(entry)
+                throw failure
+            }
         }
     }
 
@@ -95,6 +114,7 @@ class TtsModelRepository internal constructor(
         val entry = entries.first { it.id == id }
         require(!entry.bundled)
         locks.getValue(id).withLock {
+            invalidate(entry)
             publish(entry, TtsModelState.Removing)
             try {
                 clearPreference()
@@ -111,12 +131,16 @@ class TtsModelRepository internal constructor(
         }
     }
 
-    private suspend fun ensureInstalled(entry: TtsModelEntry, allowDownload: Boolean): File {
+    private suspend fun ensureInstalled(
+        entry: TtsModelEntry,
+        allowDownload: Boolean,
+        forceVerification: Boolean = false
+    ): File {
         val directory = File(root, entry.id)
         val temporary = File(root, entry.id + ".tmp")
         val archive = File(root, entry.id + ".archive")
         try {
-            if (TtsModelArchive.valid(directory, entry, coroutineContext)) {
+            if (verifyInstalled(entry, directory, forceVerification)) {
                 publish(entry, TtsModelState.Installed)
                 return directory
             }
@@ -137,29 +161,60 @@ class TtsModelRepository internal constructor(
             }
             publish(entry, TtsModelState.Installing)
             if (!temporary.mkdir()) throw IOException()
-            TtsModelArchive.extract(archive, temporary, entry, coroutineContext)
+            val stamp = TtsModelArchive.extract(archive, temporary, entry, coroutineContext)
             coroutineContext.ensureActive()
             if (directory.exists() && !directory.deleteRecursively()) throw IOException()
             // Same-filesystem rename into an absent destination is atomic on Android and the JVM.
             if (!temporary.renameTo(directory)) throw IOException()
+            rememberVerified(entry, stamp.relocated(directory))
             publish(entry, TtsModelState.Installed)
             return directory
         } catch (cancelled: CancellationException) {
+            invalidate(entry)
             publish(entry, TtsModelState.NotInstalled)
             throw cancelled
         } catch (failure: TtsModelException) {
+            invalidate(entry)
             publish(entry, TtsModelState.Failed(failure.reason))
             throw failure
         } catch (_: IOException) {
+            invalidate(entry)
             publish(entry, TtsModelState.Failed(TtsModelFailure.STORAGE))
             throw TtsModelException(TtsModelFailure.STORAGE)
         } catch (_: SecurityException) {
+            invalidate(entry)
             publish(entry, TtsModelState.Failed(TtsModelFailure.STORAGE))
             throw TtsModelException(TtsModelFailure.STORAGE)
         } finally {
             cleanup(temporary)
             cleanup(archive)
         }
+    }
+
+    private suspend fun verifyInstalled(entry: TtsModelEntry, directory: File, force: Boolean): Boolean {
+        val previous = verified.getValue(entry.id).stamp
+        if (!force && previous?.matches(directory, entry, coroutineContext) == true) return true
+        val started = System.nanoTime()
+        val stamp = TtsModelArchive.verify(directory, entry, coroutineContext)
+        Log.d("TtsModelRepository", "stage=verify elapsedMs=${(System.nanoTime() - started) / 1_000_000}")
+        if (stamp == null) {
+            invalidate(entry)
+            return false
+        }
+        rememberVerified(entry, stamp)
+        return true
+    }
+
+    private fun rememberVerified(entry: TtsModelEntry, stamp: TtsModelArchive.Stamp) {
+        val slot = verified.getValue(entry.id)
+        if (slot.stamp != stamp) slot.revision++
+        slot.stamp = stamp
+    }
+
+    private fun invalidate(entry: TtsModelEntry) {
+        val slot = verified.getValue(entry.id)
+        slot.stamp = null
+        slot.revision++
     }
 
     private suspend fun download(target: File, entry: TtsModelEntry) = coroutineScope {

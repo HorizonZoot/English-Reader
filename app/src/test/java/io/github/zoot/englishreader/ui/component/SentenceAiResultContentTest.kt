@@ -4,12 +4,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -17,11 +20,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.model.AiExplanationTarget
+import io.github.zoot.englishreader.model.AiExplanationTextNormalizer
 import io.github.zoot.englishreader.model.AiOperationOutcome
 import io.github.zoot.englishreader.model.AiOperationRef
 import io.github.zoot.englishreader.model.AiSheetAttachment
 import io.github.zoot.englishreader.model.AiSheetRequestToken
 import io.github.zoot.englishreader.model.AiSheetState
+import io.github.zoot.englishreader.model.SelectedSentence
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -85,6 +90,7 @@ class SentenceAiResultContentTest {
         )
 
         composeRule.onNodeWithText("A private explanation").assertIsDisplayed()
+        composeRule.onNodeWithText("译意与讲解").assertIsDisplayed()
         // 内部标识不得随解释正文一起渲染。visible() 刻意把 operationRef 填成
         // semantic-secret / operation-secret，此前全文件却没有一条断言用到它们——
         // 命名让这个 fixture 看起来在守脱敏，实际不守。现有脱敏断言都在
@@ -159,6 +165,104 @@ class SentenceAiResultContentTest {
             "文章过长（8001 字符），全文解释上限为 8000 字符"
         ).assertIsDisplayed()
     }
+
+    @Test
+    fun sentenceResult_loadingSuccessAndRejectionKeepExactSnapshotSource() {
+        val rawText = "  First\t sentence.\n"
+        val target = sentenceTarget(rawText)
+        val state = mutableStateOf<AiSheetState>(AiSheetState.Loading(AiSheetRequestToken(1), target))
+        composeRule.setContent {
+            MaterialTheme {
+                Box(Modifier.width(300.dp).heightIn(max = 360.dp)) {
+                    SentenceAiResultContent(
+                        mode = SentencePopupMode.EXPLANATION,
+                        state = state.value,
+                        onDismiss = {},
+                        onCancel = {}
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithTag("sentence-result-source").performScrollTo().assertTextEquals(rawText)
+        composeRule.runOnIdle { state.value = visible(null).copy(target = target) }
+        composeRule.onNodeWithTag("sentence-result-source").performScrollTo().assertTextEquals(rawText)
+        composeRule.runOnIdle {
+            state.value = visible(AiOperationOutcome.Success("First sentence：第一句；sentence 是名词。"))
+                .copy(target = target)
+        }
+        composeRule.onNodeWithTag("sentence-result-source").performScrollTo().assertTextEquals(rawText)
+        composeRule.onAllNodesWithText("译意与讲解").assertCountEquals(0)
+        composeRule.onNodeWithTag("sentence-result-explanation")
+            .performScrollTo().assertTextEquals("First sentence：第一句；sentence 是名词。")
+        composeRule.runOnIdle { state.value = AiSheetState.Rejected(AiError.NoActiveProfile, target) }
+        composeRule.onNodeWithTag("sentence-result-source").performScrollTo().assertTextEquals(rawText)
+        composeRule.onNodeWithTag("sentence-result-explanation").assertDoesNotExist()
+        composeRule.runOnIdle { state.value = AiSheetState.Hidden }
+        composeRule.onNodeWithTag("sentence-result-source").assertDoesNotExist()
+    }
+
+    @Test
+    fun sentenceResult_conciseExplanation_preservesMeaningAndPointsWithoutExtraHeading() {
+        val source = "Reading is one of the most beneficial activities for our minds."
+        val explanation = "译文\n阅读是最有益于心智的活动之一。\n\n" +
+            "要点\n• Reading：动名词作主语，按单数处理，因此用 is。\n" +
+            "• one of the most beneficial activities：最有益的活动之一；one of 后接复数名词。"
+        setContent(
+            state = visible(AiOperationOutcome.Success(explanation)).copy(target = sentenceTarget(source))
+        )
+
+        composeRule.onNodeWithTag("sentence-result-source").performScrollTo().assertTextEquals(source)
+        composeRule.onNodeWithTag("sentence-result-explanation")
+            .performScrollTo().assertTextEquals(explanation)
+        composeRule.onAllNodesWithText("译意与讲解").assertCountEquals(0)
+        composeRule.onAllNodesWithText("译文", substring = true).assertCountEquals(1)
+        composeRule.onAllNodesWithText("要点", substring = true).assertCountEquals(1)
+        composeRule.onNodeWithContentDescription("关闭").assertIsDisplayed()
+    }
+
+    @Test
+    fun sentenceTranslation_success_keepsTranslationOnlyWithoutExplanationHeadings() {
+        setContent(
+            state = visible(AiOperationOutcome.Success("阅读有益。"))
+                .copy(target = sentenceTarget("Reading helps.")),
+            mode = SentencePopupMode.TRANSLATION
+        )
+
+        composeRule.onNodeWithTag("sentence-result-explanation")
+            .performScrollTo().assertTextEquals("阅读有益。")
+        composeRule.onAllNodesWithText("译意与讲解").assertCountEquals(0)
+        composeRule.onAllNodesWithText("要点", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun sentenceResult_longSourceAndExplanationKeepCloseReachable() {
+        val rawText = "The quoted sentence keeps its original wording.\n".repeat(80)
+        var dismisses = 0
+        setContent(
+            state = visible(AiOperationOutcome.Success("Long explanation.\n".repeat(80)))
+                .copy(target = sentenceTarget(rawText)),
+            onDismiss = { dismisses++ },
+            height = 220.dp
+        )
+
+        composeRule.onNodeWithTag("sentence-result-source").performScrollTo().assertTextEquals(rawText)
+        composeRule.onNodeWithContentDescription("关闭").assertIsDisplayed()
+        composeRule.onNodeWithText("关闭").performScrollTo().assertIsDisplayed().performClick()
+        composeRule.onNodeWithContentDescription("关闭").assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(1, dismisses) }
+    }
+
+    private fun sentenceTarget(rawText: String) = AiExplanationTarget.Sentence(
+        SelectedSentence(
+            articleId = 7,
+            sentenceIndex = 0,
+            rawText = rawText,
+            normalizedText = AiExplanationTextNormalizer.normalize(rawText),
+            startOffset = 5,
+            endOffset = 5 + rawText.length
+        )
+    )
 
     private fun setContent(
         state: AiSheetState,

@@ -16,6 +16,7 @@ import io.github.zoot.englishreader.util.TtsPlaybackResult
 import io.github.zoot.englishreader.util.TtsVoiceMode
 import io.github.zoot.englishreader.util.TtsVoiceOption
 import io.github.zoot.englishreader.util.TtsVoiceSnapshot
+import io.mockk.clearMocks
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -97,6 +98,82 @@ class ReadingTtsViewModelTest {
     private fun TestScope.positionAndPlay(vm: ReadingViewModel) {
         vm.consumeTtsPositionTarget(requireNotNull(vm.ttsPositionTarget.value))
         runCurrent()
+    }
+
+    @Test
+    fun loadArticle_preparesChosenVoiceWithoutSpeech() = runTest {
+        val chosen = TtsReadingSettings("model/kokoro-int8-en-v0_19/1", 1.4f)
+        every { preferences.ttsReadingSettings } returns MutableStateFlow(chosen)
+        loadedViewModel()
+
+        verify(exactly = 1) { player.prepareReading(chosen, false) }
+        assertTrue(calls.isEmpty())
+    }
+
+    @Test
+    fun startReading_preservesPreparationButPauseCancelsIt() = runTest {
+        val vm = loadedViewModel()
+        clearMocks(player, answers = false)
+        vm.selectSentence(1, 0, first)
+        vm.playSelectedSentence()
+        runCurrent()
+        verify(exactly = 0) { player.stop() }
+        verify(atLeast = 1) { player.stopBeforeReading() }
+
+        clearMocks(player, answers = false)
+        vm.startContinuousReading(1, paragraphs, ReadingAnchor())
+        positionAndPlay(vm)
+        verify(exactly = 0) { player.stop() }
+        verify(atLeast = 1) { player.stopBeforeReading() }
+        vm.pauseReadingTts()
+        verify(exactly = 1) { player.stop() }
+        assertEquals(ReadingTtsPhase.PAUSED, vm.readingTtsState.value.phase)
+    }
+
+    @Test
+    fun releaseTts_duringArticleLoad_doesNotPrepareUntilResumed() = runTest {
+        val loaded = CompletableDeferred<ArticleEntity?>()
+        val started = CompletableDeferred<Unit>()
+        coEvery { fixture.articleRepository.getArticleById(1) } coAnswers {
+            started.complete(Unit)
+            loaded.await()
+        }
+        val vm = fixture.create()
+        vm.loadArticle(1)
+        runCurrent()
+        assertTrue(started.isCompleted)
+        vm.releaseTts()
+        loaded.complete(ArticleEntity(1, "Title", "Body."))
+        runCurrent()
+        verify(exactly = 0) { player.prepareReading(any(), any()) }
+        verify(exactly = 0) { player.speakReading(any(), any(), any(), any()) }
+
+        vm.refreshTtsCapability()
+        runCurrent()
+        verify(exactly = 1) { player.prepareReading(TtsReadingSettings(), false) }
+        verify(exactly = 0) { player.speakReading(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun releaseTts_duringWarmupPreferenceRead_discardsLatePreparation() = runTest {
+        val readStarted = CompletableDeferred<Unit>()
+        val read = CompletableDeferred<Unit>()
+        every { preferences.ttsReadingSettings } returns flow {
+            readStarted.complete(Unit)
+            withContext(NonCancellable) { read.await() }
+            emit(TtsReadingSettings())
+        }
+        coEvery { fixture.articleRepository.getArticleById(1) } returns ArticleEntity(1, "Title", "Body.")
+        val vm = fixture.create()
+        vm.loadArticle(1)
+        runCurrent()
+        assertTrue(readStarted.isCompleted)
+        vm.releaseTts()
+        read.complete(Unit)
+        runCurrent()
+
+        verify(exactly = 0) { player.prepareReading(any(), any()) }
+        verify(exactly = 1) { player.shutdown() }
     }
 
     @Test

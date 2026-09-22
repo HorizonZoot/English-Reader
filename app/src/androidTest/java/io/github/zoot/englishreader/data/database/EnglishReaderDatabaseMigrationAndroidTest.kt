@@ -32,11 +32,12 @@ class EnglishReaderDatabaseMigrationAndroidTest {
         migrationHelper.createDatabase(TEST_DATABASE_NAME, 3).close()
         migrationHelper.runMigrationsAndValidate(
             TEST_DATABASE_NAME,
-            6,
+            7,
             true,
             MIGRATION_3_4,
             MIGRATION_4_5,
-            MIGRATION_5_6
+            MIGRATION_5_6,
+            MIGRATION_6_7
         ).close()
     }
 
@@ -340,6 +341,184 @@ class EnglishReaderDatabaseMigrationAndroidTest {
                 assertTrue(c.moveToFirst())
                 assertEquals("$table must cascade when its task is deleted", 0, c.getInt(0))
             }
+        }
+
+        db.close()
+    }
+
+    /**
+     * v6 → v7 只追加列与一张新表，既有用户数据必须逐字不变。
+     *
+     * 这次迁移的风险不在「转换错」而在「误动」：若为了加列而走 recreate-and-copy，用户的文章、
+     * 已有译文和已付费成功的 checkpoint 会被静默清空，而 schema 校验照样通过。所以这里写入
+     * 完整的一套真实行再逐项回读，尤其是 `translatedText`——那是用户已经花钱换来的内容。
+     */
+    @Test
+    fun migration6To7_addsBlockCoordinatesAndPreservesPaidCheckpoints() {
+        migrationHelper.createDatabase(TEST_DATABASE_NAME, 6).apply {
+            execSQL(
+                "INSERT INTO articles (id, title, content, translation, createdAt) " +
+                    "VALUES (10, 'Kept', 'First para.\n\nSecond para.', 'YiWenYi\n\nYiWenEr', 100)"
+            )
+            execSQL(
+                "INSERT INTO reading_positions (articleId, paragraphIndex, textKind, characterOffset, updatedAt) " +
+                    "VALUES (10, 1, 'ORIGINAL', 7, 200)"
+            )
+            execSQL(
+                "INSERT INTO whole_translation_tasks " +
+                    "(taskId, scopeKey, bookId, status, failureReason, createdAt, updatedAt) " +
+                    "VALUES (1, 'article:10', NULL, 'paused', NULL, 100, 150)"
+            )
+            execSQL(
+                "INSERT INTO translation_task_articles (taskId, articleId, ordinal, articleFingerprint) " +
+                    "VALUES (1, 10, 0, 'fp-article')"
+            )
+            execSQL(
+                "INSERT INTO translation_segments " +
+                    "(taskId, articleId, paragraphIndex, sourceFingerprint, status, translatedText, " +
+                    "failureReason, attemptCount, leaseExpiresAt, updatedAt) " +
+                    "VALUES (1, 10, 0, 'fp-p0', 'translated', 'YiWenYi', NULL, 1, NULL, 140)"
+            )
+            execSQL(
+                "INSERT INTO translation_segments " +
+                    "(taskId, articleId, paragraphIndex, sourceFingerprint, status, translatedText, " +
+                    "failureReason, attemptCount, leaseExpiresAt, updatedAt) " +
+                    "VALUES (1, 10, 1, 'fp-p1', 'failed', NULL, 'transient_network', 2, NULL, 150)"
+            )
+            close()
+        }
+
+        val db = migrationHelper.runMigrationsAndValidate(TEST_DATABASE_NAME, 7, true, MIGRATION_6_7)
+
+        db.query("SELECT title, content, translation FROM articles WHERE id = 10").use { c ->
+            assertTrue("article row must survive", c.moveToFirst())
+            assertEquals("Kept", c.getString(0))
+            assertEquals("First para.\n\nSecond para.", c.getString(1))
+            assertEquals("YiWenYi\n\nYiWenEr", c.getString(2))
+        }
+        db.query("SELECT paragraphIndex, characterOffset FROM reading_positions WHERE articleId = 10").use { c ->
+            assertTrue("reading position must survive untouched", c.moveToFirst())
+            assertEquals(1, c.getInt(0))
+            assertEquals(7, c.getInt(1))
+        }
+
+        // 已成功段落的译文是用户已付费的结果，必须逐字保留。
+        db.query(
+            "SELECT status, translatedText, attemptCount FROM translation_segments " +
+                "WHERE taskId = 1 AND articleId = 10 AND paragraphIndex = 0"
+        ).use { c ->
+            assertTrue("paid checkpoint must survive", c.moveToFirst())
+            assertEquals("translated", c.getString(0))
+            assertEquals("YiWenYi", c.getString(1))
+            assertEquals(1, c.getInt(2))
+        }
+        db.query(
+            "SELECT status, failureReason FROM translation_segments " +
+                "WHERE taskId = 1 AND articleId = 10 AND paragraphIndex = 1"
+        ).use { c ->
+            assertTrue("failed checkpoint must survive", c.moveToFirst())
+            assertEquals("failed", c.getString(0))
+            assertEquals("transient_network", c.getString(1))
+        }
+    }
+
+    /**
+     * 旧任务必须落在 legacy 语义上，且三个块坐标必须为 NULL。
+     *
+     * 这是整个兼容策略的支点。旧行没有块边界，也无从重建（那需要重跑当时那个 OS 版本的 ICU 分句）。
+     * 若默认值给成 `block-v1`，恢复时会把「空行段落序号」当作「块序号」解释，已经翻好的第 N 段译文
+     * 会对到第 N 块上——两者在单块段落里恰好相等，所以这种错位在简单文章上完全看不出来，只在长文
+     * 上表现为译文错位。同理，offset 若被填成 0 而非 NULL，读取路径就再也无法区分「这一块从段首
+     * 开始」和「这一行根本没有块坐标」。
+     */
+    @Test
+    fun migration6To7_existingTaskTargetsDefaultToLegacySemantics() {
+        migrationHelper.createDatabase(TEST_DATABASE_NAME, 6).apply {
+            execSQL("INSERT INTO articles (id, title, content, createdAt) VALUES (10, 'T', 'Body.', 100)")
+            execSQL(
+                "INSERT INTO whole_translation_tasks " +
+                    "(taskId, scopeKey, bookId, status, failureReason, createdAt, updatedAt) " +
+                    "VALUES (1, 'article:10', NULL, 'paused', NULL, 100, 100)"
+            )
+            execSQL(
+                "INSERT INTO translation_task_articles (taskId, articleId, ordinal, articleFingerprint) " +
+                    "VALUES (1, 10, 0, 'fp-article')"
+            )
+            execSQL(
+                "INSERT INTO translation_segments " +
+                    "(taskId, articleId, paragraphIndex, sourceFingerprint, status, translatedText, " +
+                    "failureReason, attemptCount, leaseExpiresAt, updatedAt) " +
+                    "VALUES (1, 10, 0, 'fp-p0', 'untranslated', NULL, NULL, 0, NULL, 100)"
+            )
+            close()
+        }
+
+        val db = migrationHelper.runMigrationsAndValidate(TEST_DATABASE_NAME, 7, true, MIGRATION_6_7)
+
+        db.query(
+            "SELECT segmentationMode, plannerVersion FROM translation_task_articles " +
+                "WHERE taskId = 1 AND articleId = 10"
+        ).use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("preserve", c.getString(0))
+            assertEquals("legacy-v1", c.getString(1))
+        }
+        db.query(
+            "SELECT sourceParagraphIndex, sourceStartOffset, sourceEndOffset FROM translation_segments " +
+                "WHERE taskId = 1 AND articleId = 10 AND paragraphIndex = 0"
+        ).use { c ->
+            assertTrue(c.moveToFirst())
+            assertTrue("legacy rows must carry no block paragraph", c.isNull(0))
+            assertTrue("legacy rows must carry no block start", c.isNull(1))
+            assertTrue("legacy rows must carry no block end", c.isNull(2))
+        }
+
+        db.query("SELECT COUNT(*) FROM article_translation_state").use { c ->
+            assertTrue("article_translation_state must exist after migration", c.moveToFirst())
+            assertEquals("new table must start empty", 0, c.getInt(0))
+        }
+
+        db.close()
+    }
+
+    /**
+     * 已发布布局的生命周期必须与任务解耦，但与文章绑定。
+     *
+     * 两条相反的要求写在同一个用例里，因为它们是同一个设计决定的两面：
+     * - 删除历史任务**不得**影响已发布对照。用户清理任务列表时，正在读的对照不应该退回整段模式，
+     *   所以这张表对 `whole_translation_tasks` 没有外键，`appliedTaskId` 只是溯源信息。
+     * - 删除文章**必须**连带清理。那些 offset 只对该文章的正文成立，留着就是悬空坐标。
+     */
+    @Test
+    fun migration6To7_appliedLayoutOutlivesTaskButCascadesWithArticle() {
+        migrationHelper.createDatabase(TEST_DATABASE_NAME, 6).close()
+        val db = migrationHelper.runMigrationsAndValidate(TEST_DATABASE_NAME, 7, true, MIGRATION_6_7)
+
+        db.execSQL("PRAGMA foreign_keys = ON")
+        db.execSQL("INSERT INTO articles (id, title, content, createdAt) VALUES (10, 'T', 'Body.', 100)")
+        db.execSQL(
+            "INSERT INTO whole_translation_tasks " +
+                "(taskId, scopeKey, bookId, status, failureReason, createdAt, updatedAt) " +
+                "VALUES (1, 'article:10', NULL, 'completed', NULL, 100, 100)"
+        )
+        db.execSQL(
+            "INSERT INTO article_translation_state " +
+                "(articleId, preferredMode, appliedPlan, appliedSourceFingerprint, " +
+                "appliedTranslationFingerprint, appliedTaskId, updatedAt) " +
+                "VALUES (10, 'auto', '{\"layoutVersion\":\"layout-v1\"}', 'fp-src', 'fp-tr', 1, 200)"
+        )
+
+        db.execSQL("DELETE FROM whole_translation_tasks WHERE taskId = 1")
+        db.query("SELECT appliedPlan, appliedTaskId FROM article_translation_state WHERE articleId = 10").use { c ->
+            assertTrue("published layout must outlive its task", c.moveToFirst())
+            assertEquals("{\"layoutVersion\":\"layout-v1\"}", c.getString(0))
+            assertEquals(1L, c.getLong(1))
+        }
+
+        db.execSQL("DELETE FROM articles WHERE id = 10")
+        db.query("SELECT COUNT(*) FROM article_translation_state").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals("layout must cascade when its article is deleted", 0, c.getInt(0))
         }
 
         db.close()

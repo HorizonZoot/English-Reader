@@ -233,3 +233,60 @@ val MIGRATION_5_6 = object : Migration(5, 6) {
         )
     }
 }
+
+/**
+ * 数据库迁移：版本 6 → 版本 7
+ *
+ * 变更内容：对照分块坐标
+ * - `translation_task_articles` 追加 `segmentationMode` / `plannerVersion`
+ * - `translation_segments` 追加可空的 `sourceParagraphIndex` / `sourceStartOffset` / `sourceEndOffset`
+ * - 新增 `article_translation_state`：文章级分块偏好与已发布对照布局
+ *
+ * **纯追加**：不重建任何既有表、不改写正文、不回填也不重新编号旧任务。这一点是本次迁移安全性的
+ * 全部依据——`articles.content`、`articles.translation` 与所有历史 checkpoint 逐字保持原样。
+ *
+ * 旧任务的默认值是 `preserve` / `legacy-v1`，让它们继续按「一个空行段落就是一段」读完。**不能**给
+ * 旧行填 `block-v1`：那些行没有 offset，按块语义解释会把段落序号当成块序号，已付费成功的译文会对到
+ * 错误的位置上。
+ *
+ * 三个 offset 列**必须可空**。已有 checkpoint 无从得知当初的块边界（那需要重跑当时的 ICU 分句，而
+ * ICU 边界随系统版本变化），填任何具体值都是编造坐标。可空 + `legacy-v1` 让读取路径在类型层面就必须
+ * 显式处理「这一行没有块坐标」。
+ *
+ * `article_translation_state` 对 `articles` 是 CASCADE，但对 `whole_translation_tasks` **不设外键**：
+ * 已发布的对照必须比产出它的任务活得更久，否则用户清理历史任务会让正在读的对照退回整段模式。
+ *
+ * **SQL 必须与 Room 导出的 7.json 完全一致**（列顺序、NOT NULL、DEFAULT、FK 子句、index 名）。
+ * 追加列的 SQL `DEFAULT`、实体上的 `@ColumnInfo(defaultValue = ...)` 与导出 schema 三者必须同值：
+ * 只在 Kotlin 构造函数给默认值不会进 schema，MigrationTestHelper 会直接判定不一致。
+ */
+val MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE `translation_task_articles` " +
+                "ADD COLUMN `segmentationMode` TEXT NOT NULL DEFAULT 'preserve'"
+        )
+        db.execSQL(
+            "ALTER TABLE `translation_task_articles` " +
+                "ADD COLUMN `plannerVersion` TEXT NOT NULL DEFAULT 'legacy-v1'"
+        )
+
+        db.execSQL("ALTER TABLE `translation_segments` ADD COLUMN `sourceParagraphIndex` INTEGER")
+        db.execSQL("ALTER TABLE `translation_segments` ADD COLUMN `sourceStartOffset` INTEGER")
+        db.execSQL("ALTER TABLE `translation_segments` ADD COLUMN `sourceEndOffset` INTEGER")
+
+        db.execSQL(
+            "CREATE TABLE IF NOT EXISTS `article_translation_state` (" +
+                "`articleId` INTEGER NOT NULL, " +
+                "`preferredMode` TEXT NOT NULL, " +
+                "`appliedPlan` TEXT, " +
+                "`appliedSourceFingerprint` TEXT, " +
+                "`appliedTranslationFingerprint` TEXT, " +
+                "`appliedTaskId` INTEGER, " +
+                "`updatedAt` INTEGER NOT NULL, " +
+                "PRIMARY KEY(`articleId`), " +
+                "FOREIGN KEY(`articleId`) REFERENCES `articles`(`id`) " +
+                "ON UPDATE NO ACTION ON DELETE CASCADE )"
+        )
+    }
+}

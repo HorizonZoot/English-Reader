@@ -30,6 +30,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.ai.AiError
+import io.github.zoot.englishreader.model.AiExplanationTarget
 import io.github.zoot.englishreader.model.AiOperationOutcome
 import io.github.zoot.englishreader.model.AiSheetState
 import io.github.zoot.englishreader.util.toUiMessage
@@ -77,6 +78,25 @@ fun SentenceAiResultContent(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            val target = when (state) {
+                is AiSheetState.Loading -> state.target
+                is AiSheetState.Visible -> state.target
+                is AiSheetState.Rejected -> state.target
+                AiSheetState.Hidden -> null
+            }
+            (target as? AiExplanationTarget.Sentence)?.snapshot?.rawText?.let { source ->
+                Text(
+                    stringResource(R.string.reading_sentence_source),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    source,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.testTag("sentence-result-source")
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
             when (state) {
                 is AiSheetState.Loading -> ResultLoading(isTranslation, onCancel)
                 is AiSheetState.Rejected -> ResultError(
@@ -87,7 +107,18 @@ fun SentenceAiResultContent(
                 is AiSheetState.Visible -> when (val outcome = state.outcome) {
                     null -> ResultLoading(isTranslation, onCancel)
                     is AiOperationOutcome.Success -> {
-                        Text(text = outcome.explanation, style = MaterialTheme.typography.bodyLarge)
+                        if (!isTranslation && target !is AiExplanationTarget.Sentence) {
+                            Text(
+                                stringResource(R.string.reading_sentence_explanation_detail),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Text(
+                            text = outcome.explanation,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.testTag("sentence-result-explanation")
+                        )
                         ResultCloseButton(onDismiss)
                     }
                     is AiOperationOutcome.Failure -> ResultError(

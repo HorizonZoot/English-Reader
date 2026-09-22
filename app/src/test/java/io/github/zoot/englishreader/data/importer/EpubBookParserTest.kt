@@ -263,6 +263,45 @@ class EpubBookParserTest {
     }
 
     @Test
+    fun parse_unreadableMiddleChapter_rejectsInsteadOfSilentlyDroppingIt() = runTest {
+        val chapters = listOf(
+            "first.xhtml" to "<p>First chapter.</p>",
+            "middle.xhtml" to "<p>Middle chapter.</p>",
+            "last.xhtml" to "<p>Last chapter.</p>"
+        )
+        val valid = parser.parse(write(epub(chapters)))
+        assertEquals(listOf("First chapter.", "Middle chapter.", "Last chapter."), valid.chapters.map { it.content })
+        val invalidResources = listOf(
+            "malformed XHTML" to lines(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>Middle chapter.</div></body></html>"
+            ),
+            "invalid UTF-8" to byteArrayOf(0xC3.toByte(), 0x28),
+            "missing resource" to null
+        )
+        for ((label, bytes) in invalidResources) {
+            try {
+                parser.parse(write(epub(chapters, resourceOverrides = mapOf("middle.xhtml" to bytes))))
+                fail("$label must not produce a successful incomplete book")
+            } catch (failure: ImportException) {
+                assertEquals(label, ImportFailure.InvalidEpub, failure.failure)
+            }
+        }
+    }
+
+    @Test
+    fun parse_validEmptyMiddleChapter_skipsOnlyItsEmptyBody() = runTest {
+        val book = parser.parse(write(epub(listOf(
+            "first.xhtml" to "<p>First.</p>",
+            "empty.xhtml" to "   ",
+            "last.xhtml" to "<p>Last.</p>"
+        ))))
+
+        assertEquals(listOf("First.", "Last."), book.chapters.map { it.content })
+        assertEquals(listOf(0, 1), book.chapters.map { it.chapterIndex })
+    }
+
+    @Test
     fun parse_allChaptersBlank_rejectsAsNoReadableChapters() = runTest {
         try {
             parser.parse(
@@ -542,7 +581,9 @@ class EpubBookParserTest {
          */
         tocStyle: TocStyle = TocStyle.NAV,
         /** spine 里需要标 `linear="no"` 的章节 href。 */
-        nonLinearHrefs: Set<String> = emptySet()
+        nonLinearHrefs: Set<String> = emptySet(),
+        /** 覆盖原始章节字节，null 表示资源缺失；manifest/spine 保留原样。 */
+        resourceOverrides: Map<String, ByteArray?> = emptyMap()
     ): ByteArray {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
@@ -609,17 +650,15 @@ class EpubBookParserTest {
             }
 
             chapters.forEach { (href, body) ->
-                entry(
-                    zip, "OEBPS/$href",
-                    lines(
-                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
-                        "<!DOCTYPE html>",
-                        "<html xmlns=\"http://www.w3.org/1999/xhtml\">",
-                        "<head><title>Chapter</title></head>",
-                        "<body>$body</body>",
-                        "</html>"
-                    )
+                val bytes = if (href in resourceOverrides) resourceOverrides[href] else lines(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+                    "<!DOCTYPE html>",
+                    "<html xmlns=\"http://www.w3.org/1999/xhtml\">",
+                    "<head><title>Chapter</title></head>",
+                    "<body>$body</body>",
+                    "</html>"
                 )
+                if (bytes != null) entry(zip, "OEBPS/$href", bytes)
             }
         }
         return out.toByteArray()

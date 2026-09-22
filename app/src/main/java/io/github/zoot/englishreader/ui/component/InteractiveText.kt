@@ -57,6 +57,8 @@ fun InteractiveText(
     selectedWord: String? = null,
     sentenceIndexOffset: Int = 0,
     precomputedSentences: List<SentenceRange>? = null,
+    /** text 是原段的切片；句子与回调仍使用完整原段坐标。 */
+    sourceStartOffset: Int = 0,
     onSentenceClick: (Int, SentenceRange) -> Unit,
     onWordLongPress: (String) -> Unit,
     onClearSelection: () -> Unit = {},
@@ -120,11 +122,8 @@ fun InteractiveText(
         Color.Transparent
     }
 
-    // 句子来源：调用方已在对齐阶段分好句时直接复用，避免同一段文本被分句两次
-    // （对齐层算 sentenceOffset 一次 + 渲染层再一次）。
-    // 传入的 offset 必须是相对 [text] 的段落局部坐标；ParagraphAligner.AlignedParagraph
-    // 在构造时已校验该配对，故此处不再重复校验。
-    // 空列表视为「未预计算」而非「此段无句」：否则非空 text 会静默渲染为空白。
+    // 分块必须携带整段分句结果，不能对片段重新分句后赋予第二份句子身份。
+    require(sourceStartOffset >= 0 && (sourceStartOffset == 0 || !precomputedSentences.isNullOrEmpty()))
     val sentences = remember(text, precomputedSentences) {
         precomputedSentences?.takeIf { it.isNotEmpty() } ?: SentenceSplitter.split(text)
     }
@@ -134,27 +133,26 @@ fun InteractiveText(
 
     val visibleStart = visibleViewport?.startOffset ?: 0
     val visibleEnd = visibleViewport?.endOffset ?: text.length
-    val visibleSentences = remember(sentences, visibleStart, visibleEnd) {
-        sentences.filter { it.startOffset < visibleEnd && it.endOffset > visibleStart }
+    val visibleSentences = remember(sentences, visibleStart, visibleEnd, sourceStartOffset) {
+        sentences.filter { it.startOffset < visibleEnd + sourceStartOffset && it.endOffset > visibleStart + sourceStartOffset }
     }
 
-    LaunchedEffect(textLayoutResult, selectedSentenceTarget, visibleViewport) {
+    LaunchedEffect(textLayoutResult, selectedSentenceTarget, visibleViewport, sourceStartOffset) {
         val target = selectedSentenceTarget ?: return@LaunchedEffect
         val layout = textLayoutResult ?: return@LaunchedEffect
         if (layout.layoutInput.text.text != text) return@LaunchedEffect
         val sentence = visibleSentences.firstOrNull {
             it.index + sentenceIndexOffset == target.sentenceIndex && it == target.sentenceRange
         } ?: return@LaunchedEffect
-        val glyphOffset = target.glyphOffset?.takeIf {
-            it in maxOf(sentence.startOffset, visibleStart) until minOf(sentence.endOffset, visibleEnd) &&
-                !text[it].isWhitespace()
-        } ?: (maxOf(sentence.startOffset, visibleStart) until minOf(sentence.endOffset, visibleEnd))
-            .firstOrNull { !text[it].isWhitespace() }
-            ?: return@LaunchedEffect
+        val start = maxOf(sentence.startOffset - sourceStartOffset, visibleStart)
+        val end = minOf(sentence.endOffset - sourceStartOffset, visibleEnd)
+        val glyphOffset = target.glyphOffset?.minus(sourceStartOffset)?.takeIf {
+            it in start until end && !text[it].isWhitespace()
+        } ?: (start until end).firstOrNull { !text[it].isWhitespace() } ?: return@LaunchedEffect
         val measured = target.copy(
             anchorBounds = layout.getBoundingBox(glyphOffset).inViewport(visibleViewport),
-            sentenceBounds = layout.sentenceBounds(sentence, visibleViewport),
-            glyphOffset = glyphOffset
+            sentenceBounds = layout.sentenceBounds(sentence, visibleViewport, sourceStartOffset),
+            glyphOffset = glyphOffset + sourceStartOffset
         )
         if (measured != target) currentOnSentenceTargetLayoutChanged?.invoke(measured)
     }
@@ -180,7 +178,7 @@ fun InteractiveText(
     // 句子动作与单词动作各自独立限额（互不挤占），合计有上限避免超过系统对 CustomAccessibilityAction
     // 数量的限制被静默丢弃。key 只用稳定值（回调经 rememberUpdatedState 快照，不再作为 key）。
     val accessibilityActions = remember(
-        visibleSentences, accessibilityWords, sentenceIndexOffset, visibleViewport, enabled,
+        visibleSentences, accessibilityWords, sentenceIndexOffset, sourceStartOffset, visibleViewport, enabled,
         highlightedSentenceIndex,
         highlightSentenceActionPrefix, extractWordActionPrefix,
         playSentenceActionLabel, translateSentenceActionLabel, explainSentenceActionLabel,
@@ -228,7 +226,8 @@ fun InteractiveText(
                         sentence = selectedAccessibilitySentence,
                         sentenceIndexOffset = sentenceIndexOffset,
                         layoutResult = textLayoutResult,
-                        viewport = visibleViewport
+                        viewport = visibleViewport,
+                        sourceStartOffset = sourceStartOffset
                     )
                     if (target == null) {
                         false
@@ -245,7 +244,8 @@ fun InteractiveText(
                         sentence = selectedAccessibilitySentence,
                         sentenceIndexOffset = sentenceIndexOffset,
                         layoutResult = textLayoutResult,
-                        viewport = visibleViewport
+                        viewport = visibleViewport,
+                        sourceStartOffset = sourceStartOffset
                     )
                     if (target == null) {
                         false
@@ -262,7 +262,8 @@ fun InteractiveText(
                         sentence = selectedAccessibilitySentence,
                         sentenceIndexOffset = sentenceIndexOffset,
                         layoutResult = textLayoutResult,
-                        viewport = visibleViewport
+                        viewport = visibleViewport,
+                        sourceStartOffset = sourceStartOffset
                     )
                     if (target == null) {
                         false
@@ -280,13 +281,15 @@ fun InteractiveText(
     // 配不同列表），只键 text 会用旧列表拼出与当前句子不一致的 annotatedText。
     val annotatedText = remember(
         text, sentences, highlightedSentenceIndex, selectedWord, selectedWordStartOffset,
-        selectedWordEndOffset, sentenceIndexOffset, highlightColor
+        selectedWordEndOffset, sentenceIndexOffset, sourceStartOffset, highlightColor
     ) {
         buildAnnotatedString {
             append(text)
             sentences.forEach { sentence ->
                 if (sentence.index + sentenceIndexOffset == highlightedSentenceIndex) {
-                    addStyle(SpanStyle(background = highlightColor), sentence.startOffset, sentence.endOffset)
+                    val start = (sentence.startOffset - sourceStartOffset).coerceAtLeast(0)
+                    val end = (sentence.endOffset - sourceStartOffset).coerceAtMost(text.length)
+                    if (end > start) addStyle(SpanStyle(background = highlightColor), start, end)
                 }
             }
             selectedWord?.let { word ->
@@ -298,7 +301,7 @@ fun InteractiveText(
                     val wordBoundary = (start == 0 || !WordBoundaryDetector.isWordCharacter(text[start - 1])) &&
                         (end == text.length || !WordBoundaryDetector.isWordCharacter(text[end]))
                     val exact = selectedWordStartOffset == null ||
-                        (selectedWordStartOffset == start && selectedWordEndOffset == end)
+                        (selectedWordStartOffset == start + sourceStartOffset && selectedWordEndOffset == end + sourceStartOffset)
                     if (wordBoundary && exact) addStyle(SpanStyle(background = highlightColor), start, end)
                     from = start + 1
                 }
@@ -355,14 +358,14 @@ fun InteractiveText(
                 selectedSentence?.let { sentence ->
                     drawDashedTextRange(
                         layout = textLayoutResult,
-                        startOffset = sentence.startOffset,
-                        endOffset = sentence.endOffset,
+                        startOffset = sentence.startOffset - sourceStartOffset,
+                        endOffset = sentence.endOffset - sourceStartOffset,
                         color = underlineColor
                     )
                 }
 
-                val start = selectedWordStartOffset
-                val end = selectedWordEndOffset
+                val start = selectedWordStartOffset?.minus(sourceStartOffset)
+                val end = selectedWordEndOffset?.minus(sourceStartOffset)
                 val layout = textLayoutResult
                 if (start != null && end != null && layout != null && end > start) {
                     drawDashedTextRange(
@@ -373,7 +376,7 @@ fun InteractiveText(
                     )
                 }
             }
-            .pointerInput(text, sentences, sentenceIndexOffset, visibleViewport, enabled) {
+            .pointerInput(text, sentences, sentenceIndexOffset, sourceStartOffset, visibleViewport, enabled) {
                 if (!enabled) return@pointerInput
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
@@ -407,7 +410,7 @@ fun InteractiveText(
                     val charOffset = findGlyphOffsetAtPosition(down.position, layout)
                         ?.takeIf { it in visibleStart until visibleEnd }
                     val sentence = charOffset?.let { offset ->
-                        sentences.firstOrNull { offset in it.startOffset until it.endOffset }
+                        sentences.firstOrNull { offset + sourceStartOffset in it.startOffset until it.endOffset }
                     }
                     if (released != null) {
                         if (layout != null && charOffset != null && sentence != null) {
@@ -417,8 +420,8 @@ fun InteractiveText(
                                     sentenceRange = sentence,
                                     word = null,
                                     anchorBounds = layout.getBoundingBox(charOffset).inViewport(visibleViewport),
-                                    sentenceBounds = layout.sentenceBounds(sentence, visibleViewport),
-                                    glyphOffset = charOffset
+                                    sentenceBounds = layout.sentenceBounds(sentence, visibleViewport, sourceStartOffset),
+                                    glyphOffset = charOffset + sourceStartOffset
                                 )
                             )
                             currentOnSentenceClick(sentence.index + sentenceIndexOffset, sentence)
@@ -441,10 +444,10 @@ fun InteractiveText(
                         sentenceRange = sentence,
                         word = word,
                         anchorBounds = layout.getBoundingBox(charOffset).inViewport(visibleViewport),
-                        sentenceBounds = layout.sentenceBounds(sentence, visibleViewport),
-                        wordStartOffset = findWordStart(text, charOffset),
-                        wordEndOffset = findWordEnd(text, charOffset),
-                        glyphOffset = charOffset
+                        sentenceBounds = layout.sentenceBounds(sentence, visibleViewport, sourceStartOffset),
+                        wordStartOffset = findWordStart(text, charOffset) + sourceStartOffset,
+                        wordEndOffset = findWordEnd(text, charOffset) + sourceStartOffset,
+                        glyphOffset = charOffset + sourceStartOffset
                     )
                     currentEvent.changes.firstOrNull { it.id == down.id }?.consume()
                     currentOnWordPressStart?.invoke(target)
@@ -482,11 +485,12 @@ private fun createAccessibilityTarget(
     sentence: SentenceRange,
     sentenceIndexOffset: Int,
     layoutResult: TextLayoutResult?,
-    viewport: ReadingTextViewport? = null
+    viewport: ReadingTextViewport? = null,
+    sourceStartOffset: Int = 0
 ): InteractiveTextLongPressTarget? {
     layoutResult ?: return null
-    val glyphOffset = (maxOf(sentence.startOffset, viewport?.startOffset ?: 0) until
-        minOf(sentence.endOffset, viewport?.endOffset ?: text.length))
+    val glyphOffset = (maxOf(sentence.startOffset - sourceStartOffset, viewport?.startOffset ?: 0) until
+        minOf(sentence.endOffset - sourceStartOffset, viewport?.endOffset ?: text.length))
         .firstOrNull { !text[it].isWhitespace() }
         ?: return null
     return InteractiveTextLongPressTarget(
@@ -494,8 +498,8 @@ private fun createAccessibilityTarget(
         sentenceRange = sentence,
         word = null,
         anchorBounds = layoutResult.getBoundingBox(glyphOffset).inViewport(viewport),
-        sentenceBounds = layoutResult.sentenceBounds(sentence, viewport),
-        glyphOffset = glyphOffset
+        sentenceBounds = layoutResult.sentenceBounds(sentence, viewport, sourceStartOffset),
+        glyphOffset = glyphOffset + sourceStartOffset
     )
 }
 
@@ -523,14 +527,18 @@ private fun findWordEnd(text: String, offset: Int): Int {
  */
 private fun Rect.inViewport(viewport: ReadingTextViewport?): Rect = viewport?.toVisibleBounds(this) ?: this
 
-private fun TextLayoutResult.sentenceBounds(sentence: SentenceRange, viewport: ReadingTextViewport? = null): Rect {
+private fun TextLayoutResult.sentenceBounds(
+    sentence: SentenceRange,
+    viewport: ReadingTextViewport? = null,
+    sourceStartOffset: Int = 0
+): Rect {
     val textLength = layoutInput.text.length
     if (textLength == 0 || sentence.startOffset >= sentence.endOffset) {
         return Rect.Zero
     }
 
-    val rangeStart = maxOf(sentence.startOffset, viewport?.startOffset ?: 0).coerceIn(0, textLength)
-    val rangeEnd = minOf(sentence.endOffset, viewport?.endOffset ?: textLength).coerceIn(rangeStart, textLength)
+    val rangeStart = maxOf(sentence.startOffset - sourceStartOffset, viewport?.startOffset ?: 0).coerceIn(0, textLength)
+    val rangeEnd = minOf(sentence.endOffset - sourceStartOffset, viewport?.endOffset ?: textLength).coerceIn(rangeStart, textLength)
     val firstOffset = (rangeStart until rangeEnd)
         .firstOrNull { !layoutInput.text[it].isWhitespace() }
         ?: return Rect.Zero

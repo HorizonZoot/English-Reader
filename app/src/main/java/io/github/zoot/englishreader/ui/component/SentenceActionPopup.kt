@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -20,9 +21,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.GTranslate
-import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Translate
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -33,9 +35,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
@@ -196,6 +196,9 @@ fun SentenceActionPopup(
     onExplain: () -> Unit = {},
     onCancelExplanation: () -> Unit = {},
     onWholeTranslation: (() -> Unit)? = null,
+    hasTranslation: Boolean = false,
+    showTranslation: Boolean = false,
+    onToggleTranslation: (() -> Unit)? = null,
     readingViewportBounds: Rect? = null
 ) {
     key(
@@ -211,6 +214,9 @@ fun SentenceActionPopup(
             onTranslate = onTranslate,
             onExplain = onExplain,
             onWholeTranslation = onWholeTranslation,
+            hasTranslation = hasTranslation,
+            showTranslation = showTranslation,
+            onToggleTranslation = onToggleTranslation,
             onCancelTranslation = onCancelTranslation,
             onCancelExplanation = onCancelExplanation,
             onRetryTranslation = onRetryTranslation,
@@ -232,6 +238,9 @@ private fun SentenceActionPopupForTarget(
     onTranslate: () -> Unit,
     onExplain: () -> Unit,
     onWholeTranslation: (() -> Unit)?,
+    hasTranslation: Boolean,
+    showTranslation: Boolean,
+    onToggleTranslation: (() -> Unit)?,
     onCancelTranslation: () -> Unit,
     onCancelExplanation: () -> Unit,
     onRetryTranslation: () -> Unit,
@@ -249,6 +258,7 @@ private fun SentenceActionPopupForTarget(
     val currentOnTranslate by rememberUpdatedState(onTranslate)
     val currentOnExplain by rememberUpdatedState(onExplain)
     val currentOnWholeTranslation by rememberUpdatedState(onWholeTranslation)
+    val currentOnToggleTranslation by rememberUpdatedState(onToggleTranslation)
     val currentOnCancelTranslation by rememberUpdatedState(onCancelTranslation)
     val currentOnCancelExplanation by rememberUpdatedState(onCancelExplanation)
     val currentOnRetryTranslation by rememberUpdatedState(onRetryTranslation)
@@ -338,6 +348,11 @@ private fun SentenceActionPopupForTarget(
                                 onExplain = { if (!dismissGate.isAcquired) currentOnExplain() },
                                 onWholeTranslation = currentOnWholeTranslation?.let { action ->
                                     { if (!dismissGate.isAcquired) action() }
+                                },
+                                hasTranslation = hasTranslation,
+                                showTranslation = showTranslation,
+                                onToggleTranslation = currentOnToggleTranslation?.let { action ->
+                                    { if (!dismissGate.isAcquired) action() }
                                 }
                             )
                             SentencePopupMode.TRANSLATION, SentencePopupMode.EXPLANATION ->
@@ -376,11 +391,14 @@ private fun ActionContent(
     onPlay: () -> Unit,
     onTranslate: () -> Unit,
     onExplain: () -> Unit,
-    onWholeTranslation: (() -> Unit)?
+    onWholeTranslation: (() -> Unit)?,
+    hasTranslation: Boolean,
+    showTranslation: Boolean,
+    onToggleTranslation: (() -> Unit)?
 ) {
-    // 「更多」展开后在同一 FlowRow 内追加二级动作，不弹嵌套菜单：ACTIONS 模式的 Popup
-    // 不持焦点且指针透传（见 sentencePopupProperties），嵌套 Popup 会破坏这个约定。
-    var expanded by remember { mutableStateOf(false) }
+    // 所有一级动作都在同一 FlowRow 内平铺，不弹嵌套菜单：ACTIONS 模式的 Popup 不持焦点且
+    // 指针透传（见 sentencePopupProperties），嵌套 Popup 会破坏这个约定。窗口放不下时由
+    // verticalScroll 兜底，而不是把动作藏进二级菜单。
     FlowRow(
         modifier = Modifier
             .verticalScroll(rememberScrollState())
@@ -406,24 +424,39 @@ private fun ActionContent(
             contentDescription = stringResource(R.string.reading_sentence_explain_content_description),
             onClick = onExplain
         )
+        if (onToggleTranslation != null) {
+            val label = stringResource(
+                when {
+                    !hasTranslation -> R.string.reading_no_translation
+                    showTranslation -> R.string.hide_translation
+                    else -> R.string.show_translation
+                }
+            )
+            PopupAction(
+                icon = if (showTranslation) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                label = label,
+                contentDescription = if (hasTranslation) label else stringResource(R.string.reading_no_translation_hint),
+                onClick = onToggleTranslation,
+                enabled = hasTranslation,
+                testTag = "sentence-action-toggle-translation"
+            )
+        }
         if (onWholeTranslation != null) {
-            if (!expanded) {
-                PopupAction(
-                    icon = Icons.Default.MoreHoriz,
-                    label = stringResource(R.string.reading_sentence_more),
-                    contentDescription = stringResource(R.string.reading_sentence_more_content_description),
-                    onClick = { expanded = true },
-                    testTag = "sentence-action-more"
-                )
-            } else {
-                PopupAction(
-                    icon = Icons.Default.GTranslate,
-                    label = stringResource(R.string.reading_sentence_whole_translation),
-                    contentDescription = stringResource(R.string.reading_sentence_whole_translation_content_description),
-                    onClick = onWholeTranslation,
-                    testTag = "sentence-action-whole-translation"
-                )
-            }
+            PopupAction(
+                icon = Icons.Default.GTranslate,
+                label = stringResource(R.string.reading_sentence_whole_translation),
+                contentDescription = stringResource(R.string.reading_sentence_whole_translation_content_description),
+                onClick = onWholeTranslation,
+                testTag = "sentence-action-whole-translation"
+            )
+        }
+        if (onToggleTranslation != null && !hasTranslation && onWholeTranslation != null) {
+            Text(
+                text = stringResource(R.string.reading_no_translation_hint),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            )
         }
     }
 }
@@ -434,10 +467,12 @@ private fun PopupAction(
     label: String,
     contentDescription: String,
     onClick: () -> Unit,
+    enabled: Boolean = true,
     testTag: String? = null
 ) {
     TextButton(
         onClick = onClick,
+        enabled = enabled,
         modifier = Modifier
             .heightIn(min = 48.dp)
             .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
@@ -446,7 +481,7 @@ private fun PopupAction(
         Icon(icon, contentDescription = contentDescription)
         Text(
             text = label,
-            color = MaterialTheme.colorScheme.onSurface,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else 0.38f),
             modifier = Modifier.padding(start = 6.dp)
         )
     }

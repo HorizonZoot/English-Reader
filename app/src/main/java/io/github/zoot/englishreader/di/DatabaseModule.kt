@@ -8,6 +8,10 @@ import io.github.zoot.englishreader.data.dao.VocabularyDao
 import io.github.zoot.englishreader.data.dao.ExplanationCacheDao
 import io.github.zoot.englishreader.data.dao.DictionaryDao
 import io.github.zoot.englishreader.data.dao.WholeTranslationDao
+import io.github.zoot.englishreader.model.AppliedTranslationLayoutCodec
+import io.github.zoot.englishreader.model.DefaultTranslationMaterializationPolicy
+import io.github.zoot.englishreader.model.TranslationMaterializationPolicy
+import com.squareup.moshi.Moshi
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -57,4 +61,21 @@ object DatabaseModule {
     fun provideWholeTranslationDao(database: EnglishReaderDatabase): WholeTranslationDao {
         return database.wholeTranslationDao()
     }
+
+    /**
+     * 已发布对照布局的编解码。
+     *
+     * 复用未加限定的那份 Moshi（`SettingsModule.provideSettingsMoshi`），不自己再 new 一个：
+     * 布局的编码与解码必须出自同一份适配器配置，否则写进去的 JSON 与读出来的语义可能悄悄分叉。
+     */
+    @Provides
+    @Singleton
+    fun provideAppliedTranslationLayoutCodec(moshi: Moshi): AppliedTranslationLayoutCodec =
+        AppliedTranslationLayoutCodec(moshi)
+
+    @Provides
+    @Singleton
+    fun provideTranslationMaterializationPolicy(
+        codec: AppliedTranslationLayoutCodec
+    ): TranslationMaterializationPolicy = DefaultTranslationMaterializationPolicy(codec)
 }

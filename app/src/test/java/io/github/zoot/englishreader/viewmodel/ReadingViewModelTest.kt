@@ -214,7 +214,7 @@ class ReadingViewModelTest {
                 aiExplanationRepository.start(AiExplanationInput.SentenceTranslation("First sentence."))
             } coAnswers {
                 gate.await()
-                AiExplanationStartResult.Rejected(AiError.NoActiveProfile)
+                AiExplanationStartResult.Rejected(AiError.Offline)
             }
 
             viewModel.translateSelectedSentence()
@@ -232,7 +232,7 @@ class ReadingViewModelTest {
             advanceUntilIdle()
             assertEquals(
                 AiSheetState.Rejected(
-                    error = AiError.NoActiveProfile,
+                    error = AiError.Offline,
                     target = AiExplanationTarget.Sentence(
                         requireNotNull(viewModel.selectedSentence.value)
                     )
@@ -263,7 +263,8 @@ class ReadingViewModelTest {
         clearMocks(ttsPlayer, answers = false, recordedCalls = true)
         viewModel.selectSentence(41, 1, SentenceRange(1, "Second.", 7, 14))
         advanceUntilIdle()
-        verify(exactly = 1) { ttsPlayer.stop() }
+        verify(exactly = 1) { ttsPlayer.stopBeforeReading() }
+        verify(exactly = 0) { ttsPlayer.stop() }
         assertSame(AiSheetState.Hidden, viewModel.sentenceTranslationState.value)
 
         outcome.complete(AiOperationOutcome.Success("旧译文"))
@@ -437,7 +438,7 @@ class ReadingViewModelTest {
         advanceUntilIdle()
         viewModel.selectSentence(9, 0, SentenceRange(0, "  First.  ", 0, 10))
         coEvery { aiExplanationRepository.start(AiExplanationInput.Sentence("First.")) } returns
-            AiExplanationStartResult.Rejected(AiError.NoActiveProfile)
+            AiExplanationStartResult.Rejected(AiError.Offline)
 
         viewModel.explainSelectedSentence()
         advanceUntilIdle()
@@ -447,13 +448,56 @@ class ReadingViewModelTest {
         }
         assertEquals(
             AiSheetState.Rejected(
-                error = AiError.NoActiveProfile,
+                error = AiError.Offline,
                 target = AiExplanationTarget.Sentence(
                     requireNotNull(viewModel.selectedSentence.value)
                 )
             ),
             viewModel.aiSheetState.value
         )
+    }
+
+    @Test
+    fun translateSelectedSentence_configurationErrorRoutesToPromptNotSheet() = runTest {
+        coEvery { articleRepository.getArticleById(50) } returns
+            io.github.zoot.englishreader.data.entity.ArticleEntity(50, "t", "First.")
+        viewModel.loadArticle(50)
+        advanceUntilIdle()
+        viewModel.selectSentence(50, 0, SentenceRange(0, "First.", 0, 6))
+        runCurrent()
+        coEvery {
+            aiExplanationRepository.start(AiExplanationInput.SentenceTranslation("First."))
+        } returns AiExplanationStartResult.Rejected(AiError.NoActiveProfile)
+
+        viewModel.translateSelectedSentence()
+        advanceUntilIdle()
+
+        // 配置类拒绝不进弹层：弹层收回 Hidden，改由居中引导对话框接管，并清掉选句。
+        assertSame(AiSheetState.Hidden, viewModel.sentenceTranslationState.value)
+        assertTrue(viewModel.aiConfigurationPrompt.value)
+        assertNull(viewModel.selectedSentence.value)
+
+        viewModel.dismissAiConfigurationPrompt()
+        assertFalse(viewModel.aiConfigurationPrompt.value)
+    }
+
+    @Test
+    fun explainSelectedSentence_configurationErrorRoutesToPromptNotSheet() = runTest {
+        coEvery { articleRepository.getArticleById(51) } returns
+            io.github.zoot.englishreader.data.entity.ArticleEntity(51, "t", "First.")
+        viewModel.loadArticle(51)
+        advanceUntilIdle()
+        viewModel.selectSentence(51, 0, SentenceRange(0, "First.", 0, 6))
+        runCurrent()
+        coEvery { aiExplanationRepository.start(AiExplanationInput.Sentence("First.")) } returns
+            AiExplanationStartResult.Rejected(AiError.CredentialMissing)
+
+        viewModel.explainSelectedSentence()
+        advanceUntilIdle()
+
+        assertSame(AiSheetState.Hidden, viewModel.aiSheetState.value)
+        assertTrue(viewModel.aiConfigurationPrompt.value)
+        assertNull(viewModel.selectedSentence.value)
     }
 
     @Test
@@ -492,11 +536,11 @@ class ReadingViewModelTest {
             val loading = viewModel.aiSheetState.value as AiSheetState.Loading
             assertEquals(AiExplanationTarget.Sentence(snapshot), loading.target)
 
-            result.complete(AiExplanationStartResult.Rejected(AiError.NoActiveProfile))
+            result.complete(AiExplanationStartResult.Rejected(AiError.Offline))
             advanceUntilIdle()
             assertEquals(
                 AiSheetState.Rejected(
-                    error = AiError.NoActiveProfile,
+                    error = AiError.Offline,
                     target = AiExplanationTarget.Sentence(snapshot)
                 ),
                 viewModel.aiSheetState.value
@@ -812,7 +856,7 @@ class ReadingViewModelTest {
             }
         }
         coEvery { aiExplanationRepository.start(AiExplanationInput.Article("First.")) } returns
-            AiExplanationStartResult.Rejected(AiError.NoActiveProfile)
+            AiExplanationStartResult.Rejected(AiError.Offline)
 
         viewModel.explainSelectedSentence()
         viewModel.explainArticle()
@@ -821,7 +865,7 @@ class ReadingViewModelTest {
         assertTrue(olderCancelled.isCompleted)
         assertEquals(
             AiSheetState.Rejected(
-                error = AiError.NoActiveProfile,
+                error = AiError.Offline,
                 target = AiExplanationTarget.Article(13)
             ),
             viewModel.aiSheetState.value
@@ -1865,7 +1909,7 @@ class ReadingViewModelTest {
         val gate = CompletableDeferred<ReadingPosition?>()
         val saves = mutableListOf<ReadingPosition>()
         coEvery { articleRepository.getReadingPosition(107) } coAnswers { gate.await() }
-        coEvery { articleRepository.saveReadingPosition(any()) } coAnswers { saves += firstArg<ReadingPosition>() }
+        coEvery { articleRepository.saveReadingPosition(any(), "Body text.", any()) } coAnswers { saves += firstArg<ReadingPosition>() }
         var targetAtContext: ReadingPositionTarget? = null
         val watcher = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             viewModel.chapterContext.collect { if (it != null) targetAtContext = viewModel.pendingPositionTarget.value }

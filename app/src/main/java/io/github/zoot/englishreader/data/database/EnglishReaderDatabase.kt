@@ -11,6 +11,7 @@ import io.github.zoot.englishreader.data.dao.ExplanationCacheDao
 import io.github.zoot.englishreader.data.dao.DictionaryDao
 import io.github.zoot.englishreader.data.dao.WholeTranslationDao
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleTranslationStateEntity
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
@@ -32,6 +33,9 @@ import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
  * 版本 5：添加 reading_positions 表（两种阅读模式共用字符锚点）
  * 版本 6：添加 whole_translation_tasks, translation_task_articles, translation_segments 表
  *         （可恢复的全文段落翻译 checkpoint）
+ * 版本 7：翻译分块坐标。translation_task_articles 添加 segmentationMode/plannerVersion；
+ *         translation_segments 添加可空的 sourceParagraphIndex/sourceStartOffset/sourceEndOffset；
+ *         新增 article_translation_state 表（文章级分块偏好与已发布对照布局）
  */
 @Database(
     entities = [
@@ -45,9 +49,10 @@ import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
         ReadingPositionEntity::class,
         WholeTranslationTaskEntity::class,
         TranslationTaskArticleEntity::class,
-        TranslationSegmentEntity::class
+        TranslationSegmentEntity::class,
+        ArticleTranslationStateEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class EnglishReaderDatabase : RoomDatabase() {
@@ -80,7 +85,8 @@ abstract class EnglishReaderDatabase : RoomDatabase() {
                     MIGRATION_2_3,
                     MIGRATION_3_4,
                     MIGRATION_4_5,
-                    MIGRATION_5_6
+                    MIGRATION_5_6,
+                    MIGRATION_6_7
                 )
                 .build()
         }

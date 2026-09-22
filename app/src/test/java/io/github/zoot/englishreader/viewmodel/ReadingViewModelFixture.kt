@@ -20,7 +20,10 @@ import io.github.zoot.englishreader.util.TtsPlayer
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.github.zoot.englishreader.model.ReadingArticleState
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 
 /**
@@ -86,6 +89,14 @@ internal class ReadingViewModelFixture(
         every { settingsPreferences.allowNetworkTts } returns allowNetworkTts
         every { settingsPreferences.ttsReadingSettings } returns ttsReadingSettings
         coEvery { articleRepository.getReadingPosition(any()) } returns null
+        every { articleRepository.observeArticle(any()) } returns emptyFlow()
+        coEvery { articleRepository.getReadingArticle(any()) } coAnswers {
+            articleRepository.getArticleById(firstArg())?.let(::ReadingArticleState)
+        }
+        every { articleRepository.observeReadingArticle(any()) } answers {
+            articleRepository.observeArticle(firstArg()).map { it?.let(::ReadingArticleState) }
+        }
+        coEvery { wholeTranslationRepository.conflictFor(any()) } returns null
         // 默认有网：多数用例走真人音路径；无网用例各自覆盖
         every { networkChecker.isOnline() } returns true
         // 默认不是书章节：独立文章用例的 chapterContext 应保持 null

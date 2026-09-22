@@ -12,6 +12,7 @@ import androidx.compose.material.icons.automirrored.filled.NavigateBefore
 import androidx.compose.material.icons.automirrored.filled.NavigateNext
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
@@ -58,6 +59,10 @@ import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.model.AiExplanationTarget
 import io.github.zoot.englishreader.model.AiSheetState
 import io.github.zoot.englishreader.model.ReadingAnchor
+import io.github.zoot.englishreader.model.AppliedTranslationLayout
+import io.github.zoot.englishreader.model.ReadingTranslationProjection
+import io.github.zoot.englishreader.ui.component.ReadingTextBlock
+import io.github.zoot.englishreader.ui.component.blockFor
 import io.github.zoot.englishreader.model.ReadingEntry
 import io.github.zoot.englishreader.model.ReadingPosition
 import io.github.zoot.englishreader.model.ReadingPositionTarget
@@ -89,6 +94,7 @@ import io.github.zoot.englishreader.ui.component.WordDetailsBottomSheet
 import io.github.zoot.englishreader.ui.component.ReadingTtsControls
 import io.github.zoot.englishreader.ui.component.TtsRecoveryDialog
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
+import io.github.zoot.englishreader.util.ArticleParagraphFormatting
 import io.github.zoot.englishreader.util.ParagraphAligner
 import io.github.zoot.englishreader.util.SentenceSplitter
 import io.github.zoot.englishreader.viewmodel.DictionaryErrorType
@@ -112,9 +118,15 @@ fun ReadingScreen(
      * 不需要额外的数据流。
      */
     onOpenToc: (Long) -> Unit = {},
-    viewModel: ReadingViewModel = hiltViewModel()
+    viewModel: ReadingViewModel = hiltViewModel(),
+    onEditArticle: ((Long) -> Unit)? = null,
+    /** 打开 AI 服务配置页。AI 未配置时的居中引导对话框据此跳转；null 时对话框只留"暂不"。 */
+    onOpenAiProfile: (() -> Unit)? = null
 ) {
-    val article by viewModel.article.collectAsStateWithLifecycle()
+    val readingArticle by viewModel.readingArticle.collectAsStateWithLifecycle()
+    val article = readingArticle?.article
+    val renderedPublication = readingArticle?.publication
+    val renderedContent = article?.content
     val selectedSentence by viewModel.selectedSentence.collectAsStateWithLifecycle()
     val selectedWord by viewModel.selectedWord.collectAsStateWithLifecycle()
     val wordDefinition by viewModel.wordDefinition.collectAsStateWithLifecycle()
@@ -133,10 +145,21 @@ fun ReadingScreen(
     val ttsState by viewModel.readingTtsState.collectAsStateWithLifecycle()
     val voiceSettings by viewModel.voiceSettings.collectAsStateWithLifecycle()
     val wholeTranslationState by viewModel.wholeTranslationState.collectAsStateWithLifecycle()
+    val aiConfigurationPrompt by viewModel.aiConfigurationPrompt.collectAsStateWithLifecycle()
     val voiceSample = stringResource(R.string.reading_voice_sample)
     val ttsPositionTarget by viewModel.ttsPositionTarget.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val editArticle: ((Long) -> Unit)? = onEditArticle?.let { navigate ->
+        { id ->
+            if (article?.id == id && chapterContext == null && !isLoading) {
+                viewModel.closeVoiceSettings()
+                viewModel.dismissWholeTranslation()
+                viewModel.clearSelection()
+                navigate(id)
+            }
+        }
+    }
 
     var showTranslation by rememberSaveable { mutableStateOf(false) }
     var showReadingSettings by rememberSaveable { mutableStateOf(false) }
@@ -224,10 +247,18 @@ fun ReadingScreen(
                 state = wholeTranslationState,
                 onDismiss = viewModel::dismissWholeTranslation,
                 onSelectScope = viewModel::selectWholeTranslationScope,
+                onSelectMode = viewModel::selectWholeTranslationMode,
+                onPreserveParagraphs = viewModel::preserveWholeTranslationParagraphs,
                 onStart = viewModel::startWholeTranslation,
                 onResume = viewModel::resumeWholeTranslation,
                 onRetryFailed = viewModel::retryFailedWholeTranslation,
-                onCancelTask = viewModel::cancelWholeTranslation
+                onCancelTask = viewModel::cancelWholeTranslation,
+                onViewExistingTask = viewModel::viewExistingWholeTranslationTask,
+                onCancelExistingTask = viewModel::cancelExistingWholeTranslationTask,
+                paragraphFormattingSuggested = chapterContext == null && remember(renderedContent) {
+                    renderedContent?.let(ArticleParagraphFormatting::hasUnseparatedLines) == true
+                },
+                onEditArticle = article?.id?.let { id -> editArticle?.let { edit -> { edit(id) } } }
             )
         }
         if (voiceSettings.isOpen) {
@@ -242,6 +273,32 @@ fun ReadingScreen(
                 onReset = viewModel::resetReadingVoiceSettings,
                 onRecheck = viewModel::recheckVoiceSettings,
                 onSystemAction = viewModel::openVoiceSettingsSystemAction
+            )
+        }
+        if (aiConfigurationPrompt) {
+            AlertDialog(
+                onDismissRequest = viewModel::dismissAiConfigurationPrompt,
+                title = { Text(stringResource(R.string.reading_ai_not_configured_title)) },
+                text = { Text(stringResource(R.string.reading_ai_not_configured_message)) },
+                confirmButton = {
+                    // onOpenAiProfile 为空时（无导航宿主）不给"前往配置"，避免点了没有反应。
+                    if (onOpenAiProfile != null) {
+                        TextButton(
+                            onClick = {
+                                viewModel.dismissAiConfigurationPrompt()
+                                onOpenAiProfile()
+                            },
+                            modifier = Modifier.testTag("reading-ai-config-confirm")
+                        ) { Text(stringResource(R.string.reading_ai_not_configured_confirm)) }
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = viewModel::dismissAiConfigurationPrompt,
+                        modifier = Modifier.testTag("reading-ai-config-dismiss")
+                    ) { Text(stringResource(R.string.reading_ai_not_configured_dismiss)) }
+                },
+                modifier = Modifier.testTag("reading-ai-config-dialog")
             )
         }
         ttsFailure?.takeIf {
@@ -281,6 +338,8 @@ fun ReadingScreen(
 
         ReadingScreenContent(
             article = article,
+            appliedLayout = readingArticle?.layout,
+            onReadingPositionChanged = { viewModel.recordReadingPosition(it, renderedPublication) },
             selectedSentence = selectedSentence,
             selectedWord = selectedWord,
             wordDetailsVisible = wordDefinition != null,
@@ -337,7 +396,7 @@ fun ReadingScreen(
             pendingPositionTarget = pendingPositionTarget,
             onPositionTargetConsumed = viewModel::consumePositionTarget,
             highlightedParagraph = highlightedParagraph,
-            onSaveReadingPosition = viewModel::saveReadingPosition,
+            onSaveReadingPosition = { position -> viewModel.saveReadingPosition(position, renderedContent, renderedPublication) },
             ttsState = ttsState,
             ttsPositionTarget = ttsPositionTarget,
             onTtsPositioned = viewModel::consumeTtsPositionTarget,
@@ -353,7 +412,8 @@ fun ReadingScreen(
                 viewModel.loadArticle(targetArticleId)
             },
             onNavigatePageBoundary = viewModel::loadArticle,
-            onOpenToc = onOpenToc
+            onOpenToc = onOpenToc,
+            onEditArticle = editArticle
         )
     }
 }
@@ -417,7 +477,10 @@ fun ReadingScreenContent(
     onResumeTts: () -> Unit = {},
     onPreviousTtsSentence: () -> Unit = {},
     onNextTtsSentence: () -> Unit = {},
-    onStopTts: () -> Unit = {}
+    onStopTts: () -> Unit = {},
+    onEditArticle: ((Long) -> Unit)? = null,
+    appliedLayout: AppliedTranslationLayout? = null,
+    onReadingPositionChanged: (ReadingPosition) -> Unit = {}
 ) {
     val hasTranslation = !article?.translation.isNullOrBlank()
     val currentSelection = selectedSentence?.takeIf { it.articleId == article?.id }
@@ -442,7 +505,7 @@ fun ReadingScreenContent(
     var readingWindowSize by remember { mutableStateOf(IntSize.Zero) }
     var readingViewportSize by remember { mutableStateOf(IntSize.Zero) }
     var screenOrigin by remember { mutableStateOf(Offset.Zero) }
-    val paragraphBounds = remember(article?.id) { mutableMapOf<Int, Rect>() }
+    val paragraphBounds = remember(article?.id) { mutableMapOf<ReadingBlockKey, Rect>() }
     val currentSentenceActionAnchor by rememberUpdatedState(sentenceActionAnchor)
     fun dismissSentencePopup() {
         if (sentenceActionAnchor == null) return
@@ -502,12 +565,9 @@ fun ReadingScreenContent(
         ReadingAppearanceSheet(
             currentFontSize = fontSizeOption,
             currentTheme = themeOption,
-            hasTranslation = hasTranslation,
-            showTranslation = showTranslation,
             onDismiss = onToggleReadingSettings,
             onFontSizeChange = onFontSizeChange,
             onThemeChange = onThemeChange,
-            onToggleTranslation = onToggleTranslation,
             currentReadingMode = readingMode,
             onReadingModeChange = onReadingModeChange
         )
@@ -520,8 +580,11 @@ fun ReadingScreenContent(
             .pointerInput(article?.id) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                    val owner = currentSentenceActionAnchor?.paragraphIndex ?: return@awaitEachGesture
-                    val bounds = paragraphBounds[owner]
+                    val owner = currentSentenceActionAnchor ?: return@awaitEachGesture
+                    val glyph = owner.target.glyphOffset ?: owner.target.sentenceRange.startOffset
+                    val bounds = paragraphBounds.entries.filter {
+                        it.key.paragraphIndex == owner.paragraphIndex && it.key.textStartOffset <= glyph
+                    }.maxByOrNull { it.key.textStartOffset }?.value
                     if (bounds == null || !bounds.contains(down.position + screenOrigin)) {
                         currentDismissSentencePopup()
                         return@awaitEachGesture
@@ -553,6 +616,18 @@ fun ReadingScreenContent(
                     }
                 },
                 actions = {
+                    if (onEditArticle != null && chapterContext == null && article != null) {
+                        IconButton(
+                            onClick = {
+                                dismissSentencePopup()
+                                onEditArticle(article.id)
+                            },
+                            enabled = !isLoading,
+                            modifier = Modifier.size(48.dp).testTag("reading-edit-article")
+                        ) {
+                            Icon(Icons.Outlined.Edit, stringResource(R.string.action_edit_article))
+                        }
+                    }
                     IconButton(
                         onClick = {
                             dismissSentencePopup()
@@ -676,9 +751,8 @@ fun ReadingScreenContent(
                         )
                     } else {
                         val listState = rememberLazyListState()
-                        val paragraphItemOffset = 1
                         val layouts = remember(currentArticle.id) { mutableStateMapOf<ReadingBlockKey, TextLayoutResult>() }
-                        val blocks = rememberReadingTextBlocks(currentArticle, paragraphs, fontSizeOption, showTranslation)
+                        val blocks = rememberReadingTextBlocks(currentArticle, paragraphs, fontSizeOption, showTranslation, appliedLayout)
                         val layoutKey = ReadingLayoutKey(
                             viewport = readingViewportSize,
                             fontSize = fontSizeOption,
@@ -686,7 +760,7 @@ fun ReadingScreenContent(
                             fontScale = density.fontScale,
                             showTranslation = showTranslation
                         )
-                        var readingLayoutReady by remember(layoutKey, readingMode) { mutableStateOf(false) }
+                        var readingLayoutReady by remember(layoutKey, readingMode, blocks) { mutableStateOf(false) }
                         val selectionAnchor = sentenceActionAnchor?.takeIf { currentSelection != null }?.let {
                             ReadingAnchor(it.paragraphIndex, ReadingTextKind.ORIGINAL, it.target.glyphOffset ?: it.target.sentenceRange.startOffset)
                         } ?: wordSelectionAnchor?.takeIf { selectedWord != null }?.let {
@@ -701,26 +775,35 @@ fun ReadingScreenContent(
                                 else onPositionTargetConsumed(target)
                             }
                             readingLayoutReady = true
+                            onReadingPositionChanged(ReadingPosition(currentArticle.id, anchor))
                             onSaveReadingPosition(ReadingPosition(currentArticle.id, anchor))
                         }
                         val savePosition: (ReadingAnchor) -> Unit = { anchor ->
-                            onSaveReadingPosition(ReadingPosition(currentArticle.id, anchor))
+                            if (readingLayoutReady) onSaveReadingPosition(ReadingPosition(currentArticle.id, anchor))
                         }
                         LaunchedEffect(listState, sentenceActionAnchor, readingMode, layoutKey, readingLayoutReady) {
                             if (readingMode != ReadingMode.SCROLL) return@LaunchedEffect
-                            val owner = sentenceActionAnchor?.paragraphIndex ?: return@LaunchedEffect
+                            val owner = sentenceActionAnchor ?: return@LaunchedEffect
+                            val ownerBlock = blocks.blockFor(ReadingAnchor(owner.paragraphIndex, ReadingTextKind.ORIGINAL,
+                                owner.target.glyphOffset ?: owner.target.sentenceRange.startOffset)) ?: return@LaunchedEffect
+                            val ownerItem = blocks.indexOf(ownerBlock)
                             snapshotFlow {
-                                listState.layoutInfo.visibleItemsInfo.any { it.index == owner + 1 }
+                                listState.layoutInfo.visibleItemsInfo.any { it.index == ownerItem }
                             }.collect { visible ->
-                                if (!visible && readingLayoutReady && sentenceActionAnchor?.paragraphIndex == owner) {
+                                if (!visible && readingLayoutReady && sentenceActionAnchor == owner) {
                                     sentenceActionAnchor = null
                                     onDismissSentencePopup()
                                 }
                             }
                         }
-                        val renderOriginal: @Composable (Int, ReadingTextViewport?, Boolean) -> Unit =
-                            { paragraphIndex, visibleViewport, interactiveEnabled ->
+                        val renderOriginal: @Composable (ReadingTextBlock, ReadingTextViewport?, Boolean) -> Unit =
+                            { block, visibleViewport, interactiveEnabled ->
+                                val paragraphIndex = block.paragraphIndex
                                 val paragraph = paragraphs[paragraphIndex]
+                                fun containsGlyph(offset: Int): Boolean = block.contains(offset) &&
+                                    (visibleViewport == null || visibleViewport.contains(offset - block.textStartOffset))
+                                val itemIndex = blocks.indexOf(block)
+                                val itemGap = if (itemIndex == 0) 0 else with(density) { block.gapBeforeDp.dp.roundToPx() }
                                 // 生词本跳过来的那一段临时点亮。强度交给 InteractiveText 内部
                                 // 与高亮色相乘，所以这里不需要知道高亮色是什么。
                                 // 用动画而非布尔：到期熄灭时是渐隐，硬切会像页面闪了一下。
@@ -729,7 +812,9 @@ fun ReadingScreenContent(
                                     label = "paragraph-highlight"
                                 )
                                 val ownsResultPopup = popupMode != SentencePopupMode.ACTIONS &&
-                                    sentenceActionAnchor?.paragraphIndex == paragraphIndex
+                                    sentenceActionAnchor?.let {
+                                        it.paragraphIndex == paragraphIndex && containsGlyph(it.target.glyphOffset ?: it.target.sentenceRange.startOffset)
+                                    } == true
                                 if (readingMode == ReadingMode.SCROLL && readingLayoutReady && ownsResultPopup) {
                                     LaunchedEffect(
                                         sentenceActionAnchor,
@@ -744,10 +829,10 @@ fun ReadingScreenContent(
                                         val safeBounds = readingSafeBounds ?: return@LaunchedEffect
                                         val layoutInfo = listState.layoutInfo
                                         val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull {
-                                            it.index == paragraphIndex + paragraphItemOffset
+                                            it.index == itemIndex
                                         } ?: return@LaunchedEffect
                                         val delta = sentencePopupSafeScrollDelta(
-                                            itemTop = itemInfo.offset,
+                                            itemTop = itemInfo.offset + itemGap,
                                             sentenceBounds = anchor.target.sentenceBounds,
                                             viewportStart = layoutInfo.viewportStartOffset +
                                                 (safeBounds.top - viewport.top).roundToInt(),
@@ -767,31 +852,32 @@ fun ReadingScreenContent(
                                         )
                                     }
                                 }
-                                DisposableEffect(paragraphIndex, interactiveEnabled) {
-                                    onDispose { if (interactiveEnabled) paragraphBounds.remove(paragraphIndex) }
+                                DisposableEffect(block.key, interactiveEnabled) {
+                                    onDispose { if (interactiveEnabled) paragraphBounds.remove(block.key) }
                                 }
                                 Box(
                                     modifier = Modifier
                                         .widthIn(max = 600.dp)
                                         .fillMaxWidth()
                                         .onGloballyPositioned {
-                                            if (interactiveEnabled) paragraphBounds[paragraphIndex] = it.boundsInWindow()
+                                            if (interactiveEnabled) paragraphBounds[block.key] = it.boundsInWindow()
                                         }
                                 ) {
                                     val selectedWordAnchor = wordSelectionAnchor
-                                        ?.takeIf { it.paragraphIndex == paragraphIndex && (visibleViewport == null || visibleViewport.contains(it.glyphOffset)) }
+                                        ?.takeIf { it.paragraphIndex == paragraphIndex && containsGlyph(it.glyphOffset) }
                                     val speakingDescription = if (ttsState.phase == ReadingTtsPhase.PLAYING &&
                                         ttsState.sentenceIndex in paragraph.sentenceOffset until
                                         paragraph.sentenceOffset + paragraph.sentences.size
                                     ) stringResource(R.string.reading_tts_current_sentence, ttsState.sentenceIndex + 1) else null
                                     InteractiveText(
-                                        text = paragraph.english,
+                                        text = block.text,
+                                        sourceStartOffset = block.textStartOffset,
                                         fontSize = fontSizeOption.sizeSp.sp,
                                         fontFamily = FontFamily.Serif,
                                         visibleViewport = visibleViewport,
                                         enabled = interactiveEnabled,
                                         onTextLayout = { layout ->
-                                            if (visibleViewport == null) layouts.recordLayout(ReadingBlockKey(paragraphIndex, ReadingTextKind.ORIGINAL), layout)
+                                            if (visibleViewport == null) layouts.recordLayout(block.key, layout)
                                         },
                                         modifier = Modifier.fillMaxWidth().semantics {
                                             if (speakingDescription != null) stateDescription = speakingDescription
@@ -807,8 +893,7 @@ fun ReadingScreenContent(
                                         paragraphHighlight = paragraphHighlight,
                                         selectedSentenceTarget = sentenceActionAnchor
                                             ?.takeIf {
-                                                it.paragraphIndex == paragraphIndex && (visibleViewport == null ||
-                                                    visibleViewport.contains(it.target.glyphOffset ?: it.target.sentenceRange.startOffset))
+                                                it.paragraphIndex == paragraphIndex && containsGlyph(it.target.glyphOffset ?: it.target.sentenceRange.startOffset)
                                             }
                                             ?.target,
                                         onSentenceTargetLayoutChanged = { target ->
@@ -872,6 +957,9 @@ fun ReadingScreenContent(
                                                         anchor.target.sentenceIndex == target.sentenceIndex &&
                                                         anchor.target.sentenceRange == target.sentenceRange
                                                 } == true
+                                                if (sameSentence && currentAnchor != null &&
+                                                    !containsGlyph(currentAnchor.target.glyphOffset ?: currentAnchor.target.sentenceRange.startOffset)
+                                                ) sentenceActionAnchor = currentAnchor.copy(target = target)
                                                 if (!sameSentence) {
                                                     sentenceActionAnchor = SentenceActionAnchor(paragraphIndex, target)
                                                     sentencePopupHeightPx = 0
@@ -925,10 +1013,10 @@ fun ReadingScreenContent(
                                             withFrameNanos { }
                                             val layoutInfo = listState.layoutInfo
                                             val itemInfo = layoutInfo.visibleItemsInfo.firstOrNull {
-                                                it.index == paragraphIndex + 1
+                                                it.index == itemIndex
                                             } ?: return@LaunchedEffect
                                             val delta = wordSheetSafeScrollDelta(
-                                                itemTop = itemInfo.offset,
+                                                itemTop = itemInfo.offset + itemGap,
                                                 wordBounds = selectedWordAnchor.anchorBounds,
                                                 viewportStart = layoutInfo.viewportStartOffset,
                                                 viewportEnd = layoutInfo.viewportEndOffset,
@@ -949,7 +1037,7 @@ fun ReadingScreenContent(
                                         anchor.paragraphIndex == paragraphIndex &&
                                         currentSelection != null &&
                                         (readingMode == ReadingMode.SCROLL || interactiveEnabled) &&
-                                        (visibleViewport == null || visibleViewport.contains(anchor.target.glyphOffset ?: anchor.target.sentenceRange.startOffset)) &&
+                                        containsGlyph(anchor.target.glyphOffset ?: anchor.target.sentenceRange.startOffset) &&
                                         anchor.target.matches(currentSelection)
                                     ) {
                                         SentenceActionPopup(
@@ -976,6 +1064,14 @@ fun ReadingScreenContent(
                                                 onExplainSentence()
                                             },
                                             onWholeTranslation = onWholeTranslation,
+                                            hasTranslation = hasTranslation,
+                                            showTranslation = showTranslation,
+                                            onToggleTranslation = {
+                                                if (showTranslation && readingAnchor.textKind == ReadingTextKind.TRANSLATION) {
+                                                    readingAnchor = ReadingTranslationProjection.convertAnchorForNewPublication(readingAnchor, appliedLayout)
+                                                }
+                                                onToggleTranslation()
+                                            },
                                             onCancelExplanation = onCancelExplanation,
                                             onCancelTranslation = onCancelTranslation,
                                             onRetryTranslation = onRetryTranslation,
@@ -1008,7 +1104,10 @@ fun ReadingScreenContent(
                                 enabled = !isLoading && !showReadingSettings,
                                 bottomInset = with(density) { if (wordDetailsVisible) wordSheetObstructionHeightPx.toDp() else 0.dp },
                                 onRestored = restorePosition,
-                                onPositionChanged = { readingAnchor = it },
+                                onPositionChanged = {
+                                    readingAnchor = it
+                                    onReadingPositionChanged(ReadingPosition(currentArticle.id, it))
+                                },
                                 onPositionSettled = savePosition,
                                 onProgressChanged = { readingProgress = it },
                                 originalContent = { index, active -> renderOriginal(index, null, active) }

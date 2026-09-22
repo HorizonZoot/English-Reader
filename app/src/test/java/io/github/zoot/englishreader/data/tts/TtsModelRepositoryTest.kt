@@ -1,5 +1,9 @@
 package io.github.zoot.englishreader.data.tts
 
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import io.mockk.verify
+
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -152,6 +156,104 @@ class TtsModelRepositoryTest {
         val repo = repository(root, entry, bytes)
         assertFailure(TtsModelFailure.UNAVAILABLE) { repo.withModel(entry.id) { fail("No model should be handed out") } }
         assertTrue(root.listFiles()!!.isEmpty())
+    }
+
+    @Test fun withModel_verifiedInstallation_reusesHashesAndRevision() = runBlocking {
+        val bytes = zip(files)
+        val entry = entry(bytes)
+        val repo = repository(temporary.newFolder(), entry, bytes)
+        repo.install(entry.id)
+        mockkObject(TtsModelArchive)
+        try {
+            val first = repo.withModelRevision(entry.id) { _, revision -> revision }
+            repeat(3) {
+                assertEquals(first, repo.withModelRevision(entry.id) { _, revision -> revision })
+            }
+            verify(exactly = 0) { TtsModelArchive.sha256(any(), any()) }
+        } finally {
+            unmockkObject(TtsModelArchive)
+        }
+    }
+
+    @Test fun withModel_reopenedRepository_hashesPayloadOnceBeforeReusingIt() = runBlocking {
+        val bytes = zip(files)
+        val entry = entry(bytes)
+        val root = temporary.newFolder()
+        repository(root, entry, bytes).install(entry.id)
+        val reopened = repository(root, entry, bytes)
+        mockkObject(TtsModelArchive)
+        try {
+            reopened.withModel(entry.id) { }
+            reopened.withModel(entry.id) { }
+            verify(exactly = files.size) { TtsModelArchive.sha256(any(), any()) }
+        } finally {
+            unmockkObject(TtsModelArchive)
+        }
+    }
+
+    @Test fun withModel_changedMetadata_revalidatesAndChangesNativeRevision() = runBlocking {
+        val bytes = zip(files)
+        val entry = entry(bytes)
+        val root = temporary.newFolder()
+        val repo = repository(root, entry, bytes)
+        repo.install(entry.id)
+        val first = repo.withModelRevision(entry.id) { _, revision -> revision }
+        val model = File(root, "${entry.id}/model.onnx")
+        assertTrue(model.setLastModified(model.lastModified() + 5_000))
+        mockkObject(TtsModelArchive)
+        try {
+            val second = repo.withModelRevision(entry.id) { _, revision -> revision }
+            assertTrue(second > first)
+            assertEquals(second, repo.withModelRevision(entry.id) { _, revision -> revision })
+            verify(exactly = files.size) { TtsModelArchive.sha256(any(), any()) }
+        } finally {
+            unmockkObject(TtsModelArchive)
+        }
+    }
+
+    @Test fun refresh_sameSizeAndTimestampCorruption_invalidatesAndRepairsCachedModel() = runBlocking {
+        val bytes = zip(files)
+        val entry = entry(bytes)
+        val root = temporary.newFolder()
+        val repo = repository(root, entry, bytes)
+        repo.install(entry.id)
+        val first = repo.withModelRevision(entry.id) { _, revision -> revision }
+        val model = File(root, "${entry.id}/model.onnx")
+        val modified = model.lastModified()
+        model.writeText("broken data")
+        assertEquals(files.getValue("model.onnx").length.toLong(), model.length())
+        assertTrue(model.setLastModified(modified))
+
+        repo.refresh()
+        assertEquals(TtsModelState.NotInstalled, repo.states.value[entry.id])
+        repo.withModelRevision(entry.id) { directory, revision ->
+            assertTrue(revision > first)
+            assertEquals(files.getValue("model.onnx"), File(directory, "model.onnx").readText())
+        }
+    }
+
+    @Test fun refresh_unchangedVerifiedFiles_preservesNativeRevision() = runBlocking {
+        val bytes = zip(files)
+        val entry = entry(bytes)
+        val repo = repository(temporary.newFolder(), entry, bytes)
+        repo.install(entry.id)
+        val first = repo.withModelRevision(entry.id) { _, revision -> revision }
+        repo.refresh()
+        assertEquals(first, repo.withModelRevision(entry.id) { _, revision -> revision })
+    }
+
+    @Test fun withModel_removedRequiredFile_reinstallsBeforeHandingOutNewRevision() = runBlocking {
+        val bytes = zip(files)
+        val entry = entry(bytes)
+        val root = temporary.newFolder()
+        val repo = repository(root, entry, bytes)
+        repo.install(entry.id)
+        val first = repo.withModelRevision(entry.id) { _, revision -> revision }
+        assertTrue(File(root, "${entry.id}/tokens.txt").delete())
+        repo.withModelRevision(entry.id) { directory, revision ->
+            assertTrue(revision > first)
+            assertEquals(files.getValue("tokens.txt"), File(directory, "tokens.txt").readText())
+        }
     }
 
     private fun repository(root: File, entry: TtsModelEntry, bytes: ByteArray, dispatcher: CoroutineDispatcher = Dispatchers.IO) =

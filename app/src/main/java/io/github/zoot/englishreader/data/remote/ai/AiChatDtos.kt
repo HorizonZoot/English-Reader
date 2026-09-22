@@ -81,7 +81,10 @@ class AiChatCompletionResponse(
 @JsonClass(generateAdapter = true)
 class AiChatChoiceDto(
     @Json(name = "message")
-    val message: AiChatResponseMessageDto? = null
+    val message: AiChatResponseMessageDto? = null,
+
+    @Json(name = "finish_reason")
+    val finishReason: String? = null
 ) {
     override fun toString(): String = "AiChatChoiceDto(message=[REDACTED])"
 }

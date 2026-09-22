@@ -30,6 +30,7 @@ class AiErrorMessageMapperTest {
             AiError.DnsFailure to R.string.settings_ai_error_dns,
             AiError.TlsFailure to R.string.settings_ai_error_tls,
             AiError.MalformedResponse to R.string.settings_ai_error_malformed,
+            AiError.ResponseTruncated to R.string.settings_ai_error_truncated,
             AiError.NoContent to R.string.settings_ai_error_no_content,
             AiError.Unknown to R.string.settings_ai_error_unknown
         )

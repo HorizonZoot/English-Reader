@@ -9,6 +9,7 @@ import io.github.zoot.englishreader.model.TtsReadingSettings
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.Job
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
@@ -155,17 +156,79 @@ class LocalTtsPlayerTest {
         assertFalse(snapshots.single().catalogLoaded)
     }
 
+    @Test fun prepareReading_default_preparesJenWithoutAudioEngineOrNetwork() {
+        player.prepareReading(TtsReadingSettings(), allowNetwork = false)
+        assertEquals(listOf(TtsModelCatalog.defaultVoiceId), local.preparations)
+        assertTrue(local.callbacks.isEmpty())
+        assertEquals(0, initializations)
+        verify(exactly = 0) { network.isOnline() }
+    }
+
+    @Test fun prepareReading_optionalVoiceBeforeCatalogRefresh_attemptsOnlySelectedModel() {
+        val voiceId = TtsModelCatalog.kokoro.voiceId(1)
+        player.prepareReading(TtsReadingSettings(voiceId), allowNetwork = true)
+        assertEquals(listOf(voiceId), local.preparations)
+        assertTrue(local.callbacks.isEmpty())
+        assertEquals(0, initializations)
+        verify(exactly = 0) { network.isOnline() }
+    }
+
+    @Test fun prepareReading_systemOrUnknownVoice_cancelsPreparationWithoutFallback() {
+        player.prepareReading(TtsReadingSettings(), allowNetwork = false)
+        player.prepareReading(TtsReadingSettings("system/network"), allowNetwork = true)
+        player.prepareReading(TtsReadingSettings("model/unknown/1"), allowNetwork = false)
+        assertEquals(listOf(TtsModelCatalog.defaultVoiceId, null, null), local.preparations)
+        assertTrue(local.callbacks.isEmpty())
+        assertEquals(0, initializations)
+        verify(exactly = 0) { network.isOnline() }
+    }
+
+    @Test fun prepareReading_queuedBeforeShutdown_doesNotReopenBackend() {
+        val caller = Thread { player.prepareReading(TtsReadingSettings(), allowNetwork = false) }
+        caller.start()
+        caller.join(5_000)
+        assertFalse(caller.isAlive)
+        player.shutdown()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(local.preparations.isEmpty())
+        assertEquals(0, initializations)
+    }
+
+    @Test fun speakReading_localReplacement_leavesMatchingPreparationForBackendToReuse() {
+        player.prepareReading(TtsReadingSettings(), allowNetwork = false)
+        player.speakReading("Sentence.", TtsReadingSettings(), false) { }
+        assertEquals(listOf(true), local.stopModes)
+        assertEquals(1, local.callbacks.size)
+        player.stop()
+        assertEquals(listOf(true, false), local.stopModes)
+    }
+
+    @Test fun stopBeforeReading_preservesPreparationButExplicitStopDoesNot() {
+        player.prepareReading(TtsReadingSettings(), allowNetwork = false)
+        player.stopBeforeReading()
+        assertEquals(listOf(true), local.stopModes)
+        player.stop()
+        assertEquals(listOf(true, false), local.stopModes)
+        assertEquals(0, initializations)
+    }
+
     private class FakeLocal : LocalTtsBackend {
         val callbacks = mutableListOf<(TtsPlaybackResult) -> Unit>()
+        val preparations = mutableListOf<String?>()
+        val stopModes = mutableListOf<Boolean>()
         var voice = ""
         var text = ""
         var rate = 0f
         override fun voices() = listOf(TtsVoiceOption(TtsModelCatalog.defaultVoiceId, "en-US", TtsVoiceMode.LOCAL_MODEL, 500))
         override fun refresh(onComplete: () -> Unit) = onComplete()
+        override fun prepare(voiceId: String?): Job? {
+            preparations += voiceId
+            return null
+        }
         override fun speak(text: String, voiceId: String, rate: Float, callback: (TtsPlaybackResult) -> Unit) {
             this.text = text; voice = voiceId; this.rate = rate; callbacks += callback
         }
-        override fun stop() = Unit
+        override fun stop(preservePreparation: Boolean) { stopModes += preservePreparation }
         override fun shutdown() = Unit
     }
 }

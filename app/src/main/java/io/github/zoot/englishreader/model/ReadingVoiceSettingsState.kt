@@ -9,5 +9,7 @@ data class ReadingVoiceSettingsState(
     val allowNetwork: Boolean = false,
     val snapshot: TtsVoiceSnapshot = TtsVoiceSnapshot(),
     val previewing: Boolean = false,
-    val previewFailure: TtsFailureReason? = null
+    val previewFailure: TtsFailureReason? = null,
+    val rateChangeId: Long = 0,
+    val pendingSpeechRate: Float? = null
 )

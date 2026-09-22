@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -78,7 +79,26 @@ data class TranslationTaskArticleEntity(
     val ordinal: Int,
 
     /** 创建任务时 `ArticleEntity.content` 的指纹，见 `TranslationFingerprint.forArticle`。 */
-    val articleFingerprint: String
+    val articleFingerprint: String,
+
+    /**
+     * 本目标使用的分块方式 token，见 `TranslationSegmentationMode.toStableToken`。
+     *
+     * 存在**每个目标**上而不是任务上：整本书翻译是一个任务，但分块方式是按文章保存的偏好，
+     * 一本书里各章完全可能不同。挂在任务上就只能取一个值，于是其余章节的块会按别人的方式
+     * 被解释，译文整体错位。
+     */
+    @ColumnInfo(defaultValue = "'preserve'")
+    val segmentationMode: String = "preserve",
+
+    /**
+     * 范围解释的版本 token，见 `TranslationPlannerVersion`。
+     *
+     * v7 之前的行没有 offset，只有空行段落序号，默认 `legacy-v1` 让它们继续按旧语义读完。
+     * 未知版本必须在 profile、凭据与网络之前拒绝，不能猜一套坐标去发付费请求。
+     */
+    @ColumnInfo(defaultValue = "'legacy-v1'")
+    val plannerVersion: String = "legacy-v1"
 )
 
 /**
@@ -110,10 +130,24 @@ data class TranslationSegmentEntity(
     val taskId: Long,
     val articleId: Long,
 
-    /** 该 article 内的段落序号，与 `ParagraphAligner.splitParagraphs` 的顺序一致。 */
+    /**
+     * 该 article 内这一行的序号，含义由本目标的 `plannerVersion` 决定：
+     *
+     * - `legacy-v1`：`ParagraphAligner.splitParagraphs` 的空行段落序号。
+     * - `block-v1`：对照块序号，原段落由 [sourceParagraphIndex] 单独给出。
+     *
+     * 列名保持 `paragraphIndex` 不变，因为它是主键的一部分：改名就得重建表并重新编号所有在途
+     * 任务的行，而用户已经为那些段落付过费。语义分派必须按版本做，不能看这个名字。
+     */
     val paragraphIndex: Int,
 
-    /** 创建任务时该段落文本的指纹，见 `TranslationFingerprint.forParagraph`。 */
+    /**
+     * 创建任务时这一行源文本的指纹。
+     *
+     * `legacy-v1` 用 `TranslationFingerprint.forParagraph`，`block-v1` 用 `forBlock`。两者前缀
+     * 不同，因此同一段文本在两种语义下的指纹不会相等——这正是要的：一份按块切出来的 checkpoint
+     * 不应当被当作整段的 checkpoint 接受。
+     */
     val sourceFingerprint: String,
 
     /** 段落状态的稳定 token，见 `TranslationSegmentStatus.toStableToken`。 */
@@ -130,5 +164,22 @@ data class TranslationSegmentEntity(
     /** `translating` 状态下的 lease 到期时间；其余状态为 null。 */
     val leaseExpiresAt: Long? = null,
 
-    val updatedAt: Long
+    val updatedAt: Long,
+
+    /**
+     * `block-v1` 下这一块所属的原空行段落序号；`legacy-v1` 的行为 null。
+     *
+     * 与 [paragraphIndex] 分开存是整个分块方案的关键：阅读定位、句子身份和朗读全都以原段落为
+     * 坐标系，块只是叠在上面的展示与请求单位。让一个列同时充当两者，就必然有一方被错误解释。
+     *
+     * 三个 `source*` 列放在最后，与 `MIGRATION_6_7` 的 `ALTER TABLE ADD COLUMN` 追加位置一致：
+     * SQLite 只能把新列加在末尾，实体顺序跟着它，升级得到的库与全新安装的库物理列序才相同。
+     */
+    val sourceParagraphIndex: Int? = null,
+
+    /** `block-v1` 下这一块在原段落内的起始 UTF-16 下标；`legacy-v1` 为 null。 */
+    val sourceStartOffset: Int? = null,
+
+    /** `block-v1` 下这一块在原段落内的结束下标（半开区间）；`legacy-v1` 为 null。 */
+    val sourceEndOffset: Int? = null
 )

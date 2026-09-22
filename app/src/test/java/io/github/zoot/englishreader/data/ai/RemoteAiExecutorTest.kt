@@ -39,6 +39,31 @@ class RemoteAiExecutorTest {
     }
 
     @Test
+    fun execute_truncatedResponse_neverAcceptsPartialTextAsSuccess() = runTest {
+        for (text in listOf("Partial explanation", "   ", null)) {
+            coEvery { transport.complete(any(), any()) } returns AiChatTransportResult.Truncated(text)
+
+            val result = executor.execute(request(), AiOperationCompletionGate())
+
+            assertEquals(AiClientResult.Failure(AiError.ResponseTruncated), result)
+        }
+    }
+
+    @Test
+    fun testConnection_truncatedProbe_acceptsOnlyNonBlankContent() = runTest {
+        val cases = listOf(
+            "OK" to AiClientResult.Success("OK"),
+            "   " to AiClientResult.Failure(AiError.NoContent),
+            null to AiClientResult.Failure(AiError.NoContent)
+        )
+        for ((text, expected) in cases) {
+            coEvery { transport.complete(any(), any()) } returns AiChatTransportResult.Truncated(text)
+
+            assertEquals(expected, executor.testConnection(request().request.profile))
+        }
+    }
+
+    @Test
     fun transportException_yieldsFailureWithoutExceptionDetail() = runTest {
         coEvery { transport.complete(any(), any()) } throws
             IOException("timeout for https://private-proxy.internal/v1?token=sk-secret")

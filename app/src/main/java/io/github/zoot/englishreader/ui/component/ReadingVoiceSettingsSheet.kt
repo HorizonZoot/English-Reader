@@ -27,9 +27,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,7 +55,7 @@ fun ReadingVoiceSettingsSheet(
     state: ReadingVoiceSettingsState,
     onDismiss: () -> Unit,
     onVoiceChange: (String?) -> Unit,
-    onRateChange: (Float) -> Unit,
+    onRateChange: (Float) -> Long?,
     onNetworkAllowedChange: (Boolean) -> Unit,
     onPreview: () -> Unit,
     onStopPreview: () -> Unit,
@@ -86,7 +88,7 @@ internal fun ReadingVoiceSettingsContent(
     state: ReadingVoiceSettingsState,
     onDismiss: () -> Unit,
     onVoiceChange: (String?) -> Unit,
-    onRateChange: (Float) -> Unit,
+    onRateChange: (Float) -> Long?,
     onNetworkAllowedChange: (Boolean) -> Unit,
     onPreview: () -> Unit,
     onStopPreview: () -> Unit,
@@ -94,9 +96,16 @@ internal fun ReadingVoiceSettingsContent(
     onRecheck: () -> Unit,
     onSystemAction: (TtsSystemAction) -> Unit
 ) {
-    // Dragging the slider only changes a local draft, so playback never follows a half-chosen rate.
-    var draftRate by remember(state.settings.speechRate) { mutableStateOf<Float?>(null) }
-    val rate = draftRate ?: state.settings.speechRate
+    val draft = remember { ReadingSpeechRateDraft() }
+    val latestOnRateChange = rememberUpdatedState(onRateChange)
+    // Material3 1.2.0 用结束回调作为 SliderState 的 key，重组时替换它会中断拖动。
+    val finishRateChange: () -> Unit = remember(draft) {
+        { draft.submit(latestOnRateChange.value) }
+    }
+    val rate = draft.value ?: state.pendingSpeechRate ?: state.settings.speechRate
+    LaunchedEffect(state.rateChangeId, draft.requestId) {
+        draft.acknowledge(state.rateChangeId)
+    }
     val rateLabel = stringResource(R.string.reading_voice_rate)
 
     androidx.compose.foundation.layout.Box(Modifier.fillMaxWidth()) {
@@ -140,16 +149,9 @@ internal fun ReadingVoiceSettingsContent(
             )
             Slider(
                 value = rate,
-                onValueChange = { draftRate = TtsReadingSettings.normalizeRate(it) },
-                onValueChangeFinished = {
-                    val committedRate = draftRate ?: state.settings.speechRate
-                    if (committedRate != state.settings.speechRate) {
-                        onRateChange(committedRate)
-                    }
-                    draftRate = null
-                },
+                onValueChange = draft::drag,
+                onValueChangeFinished = finishRateChange,
                 valueRange = TtsReadingSettings.MIN_RATE..TtsReadingSettings.MAX_RATE,
-                steps = 14,
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 48.dp)
@@ -278,6 +280,38 @@ internal fun ReadingVoiceSettingsContent(
             ) {
                 Text(stringResource(R.string.tts_install_data))
             }
+        }
+    }
+}
+
+/** 手指拖动不随旧存储回流重置；提交后等同一请求的乐观状态接管，再交还给 ViewModel。 */
+internal class ReadingSpeechRateDraft {
+    var value by mutableStateOf<Float?>(null)
+        private set
+    var requestId by mutableStateOf<Long?>(null)
+        private set
+    private var dragging = false
+
+    fun drag(rate: Float) {
+        dragging = true
+        requestId = null
+        value = if (rate.isFinite()) rate.coerceIn(TtsReadingSettings.MIN_RATE, TtsReadingSettings.MAX_RATE)
+        else TtsReadingSettings.DEFAULT_RATE
+    }
+
+    fun submit(commit: (Float) -> Long?) {
+        val rate = value?.let { TtsReadingSettings.normalizeRate(it) } ?: return
+        dragging = false
+        value = rate
+        requestId = commit(rate)
+        if (requestId == null) value = null
+    }
+
+    fun acknowledge(acceptedRequestId: Long) {
+        val submitted = requestId ?: return
+        if (!dragging && acceptedRequestId >= submitted) {
+            value = null
+            requestId = null
         }
     }
 }

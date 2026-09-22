@@ -117,7 +117,7 @@ class AiExplanationRequestResolverTest {
         val ready = resolver.resolveActive(AiExplanationInput.Article(content)).requireReady()
 
         assertEquals(ExplanationType.ARTICLE_EXPLANATION, ready.operation.request.explanationType)
-        assertEquals("article-context-v1", ready.operation.request.promptVersion)
+        assertEquals("article-context-v2", ready.operation.request.promptVersion)
         assertEquals(content, ready.operation.request.preparedMessages[1].content)
         coVerify(exactly = 1) { profileRepository.resolveValidatedActiveProfile(any()) }
     }

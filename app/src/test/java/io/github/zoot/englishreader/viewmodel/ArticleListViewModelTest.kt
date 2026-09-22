@@ -138,6 +138,30 @@ class ArticleListViewModelTest {
     }
 
     @Test
+    fun importFromFile_incompleteEpub_reportsFailureWithoutPersistingBook() = runTest {
+        val uri = mockk<Uri>()
+        val releaseParser = CompletableDeferred<Unit>()
+        coEvery { formatProbe.detect(uri) } returns ImportFormat.EPUB
+        coEvery { bookImporter.importFromUri(uri) } coAnswers {
+            releaseParser.await()
+            throw ImportException(ImportFailure.InvalidEpub)
+        }
+
+        viewModel.uiEvent.test {
+            viewModel.importFromFile(uri)
+            advanceUntilIdle()
+            assertTrue(viewModel.isImporting.value)
+            releaseParser.complete(Unit)
+            assertEquals(ArticleListUiEvent.ImportFailed(ImportFailure.InvalidEpub), awaitItem())
+            advanceUntilIdle()
+            assertFalse(viewModel.isImporting.value)
+            expectNoEvents()
+        }
+        coVerify(exactly = 0) { bookRepository.persist(any(), any()) }
+        coVerify(exactly = 0) { articleRepository.insertArticle(any()) }
+    }
+
+    @Test
     fun importFromFile_sourceTooLarge_carriesLimitForPreciseMessage() = runTest {
         val uri = mockk<Uri>()
         coEvery { articleImporter.importFromUri(uri) } throws

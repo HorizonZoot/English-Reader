@@ -69,7 +69,7 @@ class LocalTtsUiTest {
                     snapshot = TtsVoiceSnapshot(
                         voices = listOf(TtsVoiceOption(voiceId, "en-US", TtsVoiceMode.LOCAL_MODEL, 500, R.string.tts_voice_jen)),
                         capability = TtsCapability.Ready(TtsVoiceMode.LOCAL_MODEL), catalogLoaded = true)),
-                onDismiss = {}, onVoiceChange = selections::add, onRateChange = {},
+                onDismiss = {}, onVoiceChange = selections::add, onRateChange = { null },
                 onNetworkAllowedChange = {}, onPreview = {}, onStopPreview = {}, onReset = {},
                 onRecheck = {}, onSystemAction = {}
             )

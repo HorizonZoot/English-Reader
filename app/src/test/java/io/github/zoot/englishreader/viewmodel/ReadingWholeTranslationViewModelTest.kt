@@ -6,6 +6,11 @@ import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.repository.WholeTranslationStartResult
 import io.github.zoot.englishreader.data.repository.WholeTranslationTaskView
 import io.github.zoot.englishreader.model.WholeTranslationPrimaryAction
+import io.github.zoot.englishreader.model.WholeTranslationPreview
+import io.github.zoot.englishreader.model.WholeTranslationPreviewResult
+import io.github.zoot.englishreader.model.TranslationSegmentationMode
+import io.github.zoot.englishreader.util.TranslationBlockPlanner
+import io.github.zoot.englishreader.core.SentenceRange
 import io.github.zoot.englishreader.model.WholeTranslationProgress
 import io.github.zoot.englishreader.model.WholeTranslationScope
 import io.github.zoot.englishreader.model.WholeTranslationScopeChoice
@@ -15,11 +20,19 @@ import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -46,6 +59,16 @@ class ReadingWholeTranslationViewModelTest {
     fun setUp() {
         fixture = ReadingViewModelFixture()
         coEvery { fixture.wholeTranslationRepository.findResumable(any()) } returns null
+        coEvery { fixture.wholeTranslationRepository.preview(any()) } coAnswers {
+            val scope = firstArg<WholeTranslationScope>()
+            val articles = scope.articleIds.map { requireNotNull(fixture.articleRepository.getArticleById(it)) }
+            val plans = articles.map { article ->
+                (TranslationBlockPlanner.plan(article.id, article.content, TranslationSegmentationMode.AUTO) { text ->
+                    listOf(SentenceRange(0, text, 0, text.length))
+                } as TranslationBlockPlanner.Result.Planned).plan
+            }
+            WholeTranslationPreviewResult.Ready(WholeTranslationPreview(scope, plans, articles.any { !it.translation.isNullOrBlank() }))
+        }
         viewModel = fixture.create()
     }
 
@@ -131,7 +154,7 @@ class ReadingWholeTranslationViewModelTest {
     fun startWholeTranslation_currentScope_startsRepositoryWithCurrentArticleAndTracks() = runTest {
         stubStandalone(ARTICLE_ID, "One.\n\nTwo.")
         val running = view(taskId = 11L, status = WholeTranslationTaskStatus.RUNNING, translated = 0, total = 2)
-        coEvery { fixture.wholeTranslationRepository.start(any()) } returns WholeTranslationStartResult.Started(11L)
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns WholeTranslationStartResult.Started(11L)
         every { fixture.wholeTranslationRepository.observe(11L) } returns MutableStateFlow(running)
         viewModel.loadArticle(ARTICLE_ID)
         advanceUntilIdle()
@@ -141,10 +164,176 @@ class ReadingWholeTranslationViewModelTest {
         viewModel.startWholeTranslation()
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { fixture.wholeTranslationRepository.start(WholeTranslationScope.CurrentArticle(ARTICLE_ID)) }
+        coVerify(exactly = 1) { fixture.wholeTranslationRepository.start(match<WholeTranslationPreview> { it.scope == WholeTranslationScope.CurrentArticle(ARTICLE_ID) }) }
         val state = viewModel.wholeTranslationState.value as WholeTranslationSheetState.Tracking
         assertEquals(11L, state.taskId)
         assertEquals(WholeTranslationPrimaryAction.CONTINUE_IN_BACKGROUND, state.primaryAction)
+    }
+
+    @Test
+    fun startWholeTranslation_repeatedTaps_stayBlockedUntilFirstTaskEmission() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        viewModel = fixture.create()
+        stubChapter(ARTICLE_ID, bookId = 7L, siblings = listOf(ARTICLE_ID))
+        val startGate = CompletableDeferred<Unit>()
+        val observationGate = CompletableDeferred<Unit>()
+        var starts = 0
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } coAnswers {
+            starts++
+            startGate.await()
+            WholeTranslationStartResult.Started(11L)
+        }
+        every { fixture.wholeTranslationRepository.observe(11L) } returns flow {
+            observationGate.await()
+            emit(view(11L, WholeTranslationTaskStatus.RUNNING, 0, 1))
+        }
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        viewModel.startWholeTranslation()
+        viewModel.startWholeTranslation()
+        viewModel.selectWholeTranslationScope(WholeTranslationScopeChoice.CHAPTER)
+        val starting = viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope
+        assertTrue(starting.isStarting)
+        assertEquals(WholeTranslationScopeChoice.CURRENT_ARTICLE, starting.selected)
+        runCurrent()
+        assertEquals(1, starts)
+        assertFalse(startGate.isCompleted)
+
+        startGate.complete(Unit)
+        runCurrent()
+        assertTrue((viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope).isStarting)
+        assertFalse(observationGate.isCompleted)
+        viewModel.startWholeTranslation()
+        runCurrent()
+        assertEquals(1, starts)
+
+        observationGate.complete(Unit)
+        runCurrent()
+        assertEquals(11L, (viewModel.wholeTranslationState.value as WholeTranslationSheetState.Tracking).taskId)
+        coVerify(exactly = 1) { fixture.wholeTranslationRepository.start(match<WholeTranslationPreview> { it.scope == WholeTranslationScope.CurrentArticle(ARTICLE_ID) }) }
+    }
+
+    @Test
+    fun startWholeTranslation_cancelledPreparation_releasesStartingState() = runTest {
+        stubStandalone(ARTICLE_ID, "One.")
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } throws CancellationException()
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+
+        assertFalse((viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope).isStarting)
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns WholeTranslationStartResult.Started(12L)
+        every { fixture.wholeTranslationRepository.observe(12L) } returns
+            MutableStateFlow(view(12L, WholeTranslationTaskStatus.RUNNING, 0, 1))
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+        assertEquals(12L, (viewModel.wholeTranslationState.value as WholeTranslationSheetState.Tracking).taskId)
+    }
+
+    @Test
+    fun startWholeTranslation_storageFailure_rejectsAndAllowsReopening() = runTest {
+        stubStandalone(ARTICLE_ID, "One.")
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } throws java.io.IOException()
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+
+        assertEquals(
+            WholeTranslationSheetState.Rejected(ARTICLE_ID, AiError.Unknown),
+            viewModel.wholeTranslationState.value
+        )
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+        assertFalse((viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope).isStarting)
+    }
+
+    @Test
+    fun startWholeTranslation_observationFailure_doesNotLeaveStartingState() = runTest {
+        stubStandalone(ARTICLE_ID, "One.")
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns WholeTranslationStartResult.Started(11L)
+        every { fixture.wholeTranslationRepository.observe(11L) } returns flow { throw java.io.IOException() }
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+
+        assertEquals(
+            WholeTranslationSheetState.Rejected(ARTICLE_ID, AiError.Unknown),
+            viewModel.wholeTranslationState.value
+        )
+    }
+
+    @Test
+    fun startWholeTranslation_observationCancelledBeforeFirstEmission_releasesStartingState() = runTest {
+        stubStandalone(ARTICLE_ID, "One.")
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns WholeTranslationStartResult.Started(11L)
+        every { fixture.wholeTranslationRepository.observe(11L) } returns flow { throw CancellationException() }
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+
+        assertFalse((viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope).isStarting)
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.cancel(any()) }
+    }
+
+    @Test
+    fun startWholeTranslation_oldFailureAfterReopen_doesNotUnlockNewStart() = runTest {
+        stubStandalone(ARTICLE_ID, "One.")
+        val oldGate = CompletableDeferred<Unit>()
+        val newGate = CompletableDeferred<Unit>()
+        var starts = 0
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } coAnswers {
+            if (++starts == 1) {
+                oldGate.await()
+                throw java.io.IOException()
+            }
+            newGate.await()
+            WholeTranslationStartResult.Started(12L)
+        }
+        every { fixture.wholeTranslationRepository.observe(12L) } returns
+            MutableStateFlow(view(12L, WholeTranslationTaskStatus.RUNNING, 0, 1))
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+        assertFalse(oldGate.isCompleted)
+
+        viewModel.dismissWholeTranslation()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+        assertFalse(newGate.isCompleted)
+        oldGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertTrue((viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope).isStarting)
+        viewModel.startWholeTranslation()
+        assertEquals(2, starts)
+        newGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(12L, (viewModel.wholeTranslationState.value as WholeTranslationSheetState.Tracking).taskId)
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.cancel(any()) }
     }
 
     @Test
@@ -152,7 +341,7 @@ class ReadingWholeTranslationViewModelTest {
         stubChapter(ARTICLE_ID, bookId = 7L, siblings = listOf(30L, ARTICLE_ID, 32L))
         coEvery { fixture.articleRepository.getArticleById(30L) } returns ArticleEntity(30L, "a", "P.")
         coEvery { fixture.articleRepository.getArticleById(32L) } returns ArticleEntity(32L, "c", "R.")
-        coEvery { fixture.wholeTranslationRepository.start(any()) } returns WholeTranslationStartResult.Started(12L)
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns WholeTranslationStartResult.Started(12L)
         every { fixture.wholeTranslationRepository.observe(12L) } returns
             MutableStateFlow(view(12L, WholeTranslationTaskStatus.RUNNING, 0, 3))
         viewModel.loadArticle(ARTICLE_ID)
@@ -165,14 +354,14 @@ class ReadingWholeTranslationViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) {
-            fixture.wholeTranslationRepository.start(WholeTranslationScope.Chapter(7L, listOf(30L, ARTICLE_ID, 32L)))
+            fixture.wholeTranslationRepository.start(match<WholeTranslationPreview> { it.scope == WholeTranslationScope.Chapter(7L, listOf(30L, ARTICLE_ID, 32L)) })
         }
     }
 
     @Test
     fun startWholeTranslation_noContent_showsRejected() = runTest {
         stubStandalone(ARTICLE_ID, "One.")
-        coEvery { fixture.wholeTranslationRepository.start(any()) } returns WholeTranslationStartResult.NoContent
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns WholeTranslationStartResult.NoContent
         viewModel.loadArticle(ARTICLE_ID)
         advanceUntilIdle()
         viewModel.openWholeTranslation()
@@ -208,8 +397,10 @@ class ReadingWholeTranslationViewModelTest {
     }
 
     @Test
-    fun tracking_completed_reloadsArticleSoBilingualParagraphsAppear() = runTest {
+    fun tracking_completed_observesArticleSoBilingualParagraphsAppear() = runTest {
         stubStandalone(ARTICLE_ID, "One.")
+        val article = MutableStateFlow(ArticleEntity(ARTICLE_ID, "t", "One."))
+        every { fixture.articleRepository.observeArticle(ARTICLE_ID) } returns article
         val flow = MutableStateFlow(view(taskId = 6L, status = WholeTranslationTaskStatus.RUNNING, translated = 0, total = 1))
         coEvery { fixture.wholeTranslationRepository.findResumable(any()) } returns flow.value
         every { fixture.wholeTranslationRepository.observe(6L) } returns flow
@@ -218,9 +409,7 @@ class ReadingWholeTranslationViewModelTest {
         viewModel.openWholeTranslation()
         advanceUntilIdle()
 
-        // 完成后 Room 里的文章已带译文
-        coEvery { fixture.articleRepository.getArticleById(ARTICLE_ID) } returns
-            ArticleEntity(ARTICLE_ID, "t", "One.", translation = "一。")
+        article.value = article.value.copy(translation = "一。")
         flow.value = view(taskId = 6L, status = WholeTranslationTaskStatus.COMPLETED, translated = 1, total = 1)
         advanceUntilIdle()
 
@@ -248,6 +437,34 @@ class ReadingWholeTranslationViewModelTest {
 
         assertEquals(WholeTranslationSheetState.Hidden, viewModel.wholeTranslationState.value)
         coVerify(exactly = 0) { fixture.wholeTranslationRepository.cancel(any()) }
+    }
+
+    @Test
+    fun dismissWholeTranslation_completionStillUpdatesArticleWithoutReopeningSheet() = runTest {
+        stubStandalone(ARTICLE_ID, "One.")
+        val article = MutableStateFlow(ArticleEntity(ARTICLE_ID, "t", "One."))
+        every { fixture.articleRepository.observeArticle(ARTICLE_ID) } returns article
+        val task = MutableStateFlow(view(8L, WholeTranslationTaskStatus.RUNNING, 0, 1))
+        coEvery { fixture.wholeTranslationRepository.findResumable(any()) } returns task.value
+        every { fixture.wholeTranslationRepository.observe(8L) } returns task
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.consumePositionTarget(requireNotNull(viewModel.pendingPositionTarget.value))
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+        assertTrue(viewModel.wholeTranslationState.value is WholeTranslationSheetState.Tracking)
+        viewModel.dismissWholeTranslation()
+        advanceUntilIdle()
+
+        article.value = article.value.copy(translation = "一。")
+        task.value = view(8L, WholeTranslationTaskStatus.COMPLETED, 1, 1)
+        advanceUntilIdle()
+
+        assertEquals("一。", viewModel.article.value?.translation)
+        assertNull(viewModel.pendingPositionTarget.value)
+        assertEquals(WholeTranslationSheetState.Hidden, viewModel.wholeTranslationState.value)
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.cancel(any()) }
+        coVerify(exactly = 1) { fixture.articleRepository.getArticleById(ARTICLE_ID) }
     }
 
     @Test

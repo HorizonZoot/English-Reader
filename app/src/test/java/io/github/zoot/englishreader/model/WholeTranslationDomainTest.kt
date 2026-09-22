@@ -364,8 +364,8 @@ class WholeTranslationDomainTest {
     }
 
     @Test
-    fun from_emptyOrMalformedResponse_isRetryableProviderIssue() {
-        listOf(AiError.NoContent, AiError.MalformedResponse).forEach { error ->
+    fun from_emptyMalformedOrTruncatedResponse_isRetryableProviderIssue() {
+        listOf(AiError.NoContent, AiError.MalformedResponse, AiError.ResponseTruncated).forEach { error ->
             val reason = TranslationFailureReason.from(error)
             assertEquals(TranslationFailureReason.PROVIDER_RESPONSE, reason)
             assertTrue(reason.category.isRetryable)
@@ -650,6 +650,10 @@ class WholeTranslationDomainTest {
         assertEquals(WholeTranslationPrimaryAction.RESUME, tracking(WholeTranslationTaskStatus.PAUSED, failed = 0).primaryAction)
         assertEquals(WholeTranslationPrimaryAction.RETRY_FAILED, tracking(WholeTranslationTaskStatus.FAILED, failed = 1).primaryAction)
         assertEquals(WholeTranslationPrimaryAction.RESUME, tracking(WholeTranslationTaskStatus.FAILED, failed = 0).primaryAction)
+        // 取消：终态只能关闭。两种失败计数都要覆盖——只测 failed>0 会漏掉「无失败时落回
+        // RESUME」那条分支，而那正是取消后最常见的形态（用户在处理到一半时取消）。
+        assertEquals(WholeTranslationPrimaryAction.CLOSE, tracking(WholeTranslationTaskStatus.CANCELLED, failed = 1).primaryAction)
+        assertEquals(WholeTranslationPrimaryAction.CLOSE, tracking(WholeTranslationTaskStatus.CANCELLED, failed = 0).primaryAction)
     }
 
     // ---- DAO SQL 字面量锁定 ----

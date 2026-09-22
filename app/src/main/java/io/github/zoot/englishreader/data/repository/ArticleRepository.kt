@@ -3,14 +3,26 @@ package io.github.zoot.englishreader.data.repository
 import io.github.zoot.englishreader.data.dao.ArticleDao
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ReadingPositionEntity
+import io.github.zoot.englishreader.data.importer.ImportBudgetValidator
+import io.github.zoot.englishreader.data.importer.ImportException
 import io.github.zoot.englishreader.di.ApplicationCoroutineScope
+import io.github.zoot.englishreader.model.ArticleEditResult
+import io.github.zoot.englishreader.model.ArticleEditSnapshot
 import io.github.zoot.englishreader.model.ReadingAnchor
 import io.github.zoot.englishreader.model.ReadingPosition
 import io.github.zoot.englishreader.model.ReadingTextKind
+import io.github.zoot.englishreader.model.AppliedTranslationLayoutCodec
+import io.github.zoot.englishreader.model.ReadingArticleRecord
+import io.github.zoot.englishreader.model.ReadingArticleState
+import io.github.zoot.englishreader.model.ReadingPublication
+import io.github.zoot.englishreader.model.TranslationFingerprint
+import io.github.zoot.englishreader.util.ParagraphAligner
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
@@ -24,7 +36,8 @@ import javax.inject.Singleton
 @Singleton
 class ArticleRepository @Inject constructor(
     private val articleDao: ArticleDao,
-    @ApplicationCoroutineScope private val applicationScope: CoroutineScope
+    @ApplicationCoroutineScope private val applicationScope: CoroutineScope,
+    private val layoutCodec: AppliedTranslationLayoutCodec
 ) {
     private val positionMutex = Mutex()
     private var positionTimestamp: Long? = null
@@ -42,26 +55,50 @@ class ArticleRepository @Inject constructor(
         }
     }
 
-    suspend fun saveReadingPosition(position: ReadingPosition) {
+    suspend fun saveReadingPosition(
+        position: ReadingPosition,
+        expectedContent: String? = null,
+        expectedPublication: ReadingPublication? = null
+    ) {
         // 离开阅读页可以取消观察，但已经提交的本地进度写入必须完成。
         // UNDISPATCHED 先取得/排队同一把锁，紧接着重新打开时的读取会等到写入完成。
         applicationScope.async(start = CoroutineStart.UNDISPATCHED) {
             positionMutex.withLock {
-                // 从持久记录续接顺序，系统时钟回拨也不会让新进度被当作旧写入丢弃。
-                val previous = positionTimestamp ?: (articleDao.latestReadingTimestamp() ?: 0)
-                val timestamp = maxOf(System.currentTimeMillis(), previous + 1)
-                positionTimestamp = timestamp
-                articleDao.saveReadingPosition(
-                    ReadingPositionEntity(
-                        articleId = position.articleId,
-                        paragraphIndex = position.anchor.paragraphIndex,
-                        textKind = position.anchor.textKind.name,
-                        characterOffset = position.anchor.characterOffset,
-                        updatedAt = timestamp
-                    )
+                val entity = ReadingPositionEntity(
+                    articleId = position.articleId,
+                    paragraphIndex = position.anchor.paragraphIndex,
+                    textKind = position.anchor.textKind.name,
+                    characterOffset = position.anchor.characterOffset,
+                    updatedAt = nextPositionTimestamp()
                 )
+                if (expectedContent == null) articleDao.saveReadingPosition(entity)
+                else articleDao.saveReadingPositionIfContent(entity, expectedContent, expectedPublication)
             }
         }.await()
+    }
+
+    /** 保存已确认的编辑；只有正文变化才使译文、任务与旧位置失效。 */
+    suspend fun saveEdit(original: ArticleEditSnapshot, title: String, content: String): ArticleEditResult {
+        val editedContent = if (content == original.content) content else content.trim()
+        if (editedContent != original.content) {
+            try {
+                ImportBudgetValidator.validate(editedContent)
+            } catch (failure: ImportException) {
+                return ArticleEditResult.InvalidContent(failure.failure)
+            }
+        }
+        val editedTitle = ImportBudgetValidator.normalizeTitle(title, original.title)
+        return applicationScope.async(start = CoroutineStart.UNDISPATCHED) {
+            positionMutex.withLock {
+                articleDao.saveEdit(original, editedTitle, editedContent, nextPositionTimestamp())
+            }
+        }.await()
+    }
+
+    private suspend fun nextPositionTimestamp(): Long {
+        // 从持久记录续接顺序，系统时钟回拨也不会让新进度被当作旧写入丢弃。
+        val previous = maxOf(positionTimestamp ?: 0, articleDao.latestReadingTimestamp() ?: 0)
+        return maxOf(System.currentTimeMillis(), previous + 1).also { positionTimestamp = it }
     }
 
     /**
@@ -86,6 +123,27 @@ class ArticleRepository @Inject constructor(
      */
     suspend fun getArticleById(id: Long): ArticleEntity? {
         return articleDao.getArticleById(id)
+    }
+
+    fun observeArticle(id: Long): Flow<ArticleEntity?> = articleDao.observeArticle(id)
+
+    suspend fun getReadingArticle(id: Long): ReadingArticleState? = articleDao.getReadingArticle(id)?.toReadingState()
+
+    fun observeReadingArticle(id: Long): Flow<ReadingArticleState?> =
+        articleDao.observeReadingArticle(id).map { it?.toReadingState() }
+
+    private fun ReadingArticleRecord.toReadingState(): ReadingArticleState {
+        val paragraphs = ParagraphAligner.splitParagraphs(article.content)
+        val translation = article.translation
+        val decoded = layoutCodec.decode(appliedPlan, paragraphs)
+        val layout = decoded?.takeIf {
+            translation != null && it.articleFingerprint == TranslationFingerprint.forArticle(article.content) &&
+                it.articleFingerprint == appliedSourceFingerprint &&
+                TranslationFingerprint.forTranslation(translation) == appliedTranslationFingerprint &&
+                it.matchesText(paragraphs, ParagraphAligner.splitParagraphs(translation))
+        }
+        if (appliedPlan != null && layout == null) Log.w("ArticleRepository", "stage=reading_layout category=invalid_layout")
+        return ReadingArticleState(article, ReadingPublication(translation, appliedPlan), layout)
     }
 
     /**

@@ -27,6 +27,7 @@ sealed interface AiError {
     data object DnsFailure : AiError
     data object TlsFailure : AiError
     data object MalformedResponse : AiError
+    data object ResponseTruncated : AiError
     data object NoContent : AiError
     data object Unknown : AiError
 }
@@ -57,6 +58,7 @@ internal val AiError.categoryName: String
         AiError.DnsFailure -> "dns_failure"
         AiError.TlsFailure -> "tls_failure"
         AiError.MalformedResponse -> "malformed_response"
+        AiError.ResponseTruncated -> "response_truncated"
         AiError.NoContent -> "no_content"
         AiError.Unknown -> "unknown"
     }

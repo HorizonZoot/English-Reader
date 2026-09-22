@@ -64,7 +64,7 @@ class AiChatMessage(
 /**
  * transport 的返回结果。
  *
- * 只区分「拿到内容」与「响应格式正确但无可用内容」。**不**对 HTTP 状态码、超时、网络故障
+ * 区分可用正文、被截断的响应与无可用内容。**不**对 HTTP 状态码、超时、网络故障
  * 做分类——那是 6.9 的错误分类法，此处让 Retrofit/OkHttp 的异常照常抛出。
  */
 sealed interface AiChatTransportResult {
@@ -77,6 +77,11 @@ sealed interface AiChatTransportResult {
     class Content(val text: String) : AiChatTransportResult {
         /** 正文是模型解释，不进日志。 */
         override fun toString(): String = "Content(text=[REDACTED])"
+    }
+
+    /** 达到输出上限；部分正文只供最小连接探测判断，不能作为完整解释或译文。 */
+    class Truncated(val text: String?) : AiChatTransportResult {
+        override fun toString(): String = "Truncated(text=[REDACTED])"
     }
 
     /**

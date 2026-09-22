@@ -56,8 +56,33 @@ object TranslationFingerprint {
     /** 单个段落文本的指纹。 */
     fun forParagraph(text: String): String = CacheKeyFactory.generate(PARAGRAPH_PREFIX, text)
 
+    /**
+     * 单个对照块文本的指纹。
+     *
+     * 前缀与 [forParagraph] 不同是有意的：同一段文本作为「整个原段落」和作为「恰好占满该段的
+     * 一个块」时得到不同的值。两种 checkpoint 的 `paragraphIndex` 列含义不同（段落序号 vs
+     * 块序号），若指纹相同，一份 legacy 行就能通过 block 路径的指纹校验并被当作块读取，而这种
+     * 错位不会抛异常。分开前缀让版本分派出错时表现为「校验失败、拒绝发布」而不是静默错位。
+     *
+     * 这不影响 AI 缓存复用：缓存身份由 `AiExplanationRequestResolver` 按输出决定因素独立构造，
+     * 与这里的完整性指纹无关，相同文本仍然命中同一条缓存。
+     */
+    fun forBlock(text: String): String = CacheKeyFactory.generate(BLOCK_PREFIX, text)
+
+    /**
+     * 已发布译文的指纹，绑定布局与它所描述的那一份确切译文。
+     *
+     * 只校验正文不够：布局里的中文 offset 只对发布当时写入的那个译文字符串成立，而
+     * `articles.translation` 可能被别的路径覆盖（旧版全文翻译、将来的手工编辑）。正文没变而
+     * 译文变了时，按旧 offset 裁切出来的中文会整体错位，且不会抛异常。
+     */
+    fun forTranslation(translation: String): String =
+        CacheKeyFactory.generate(TRANSLATION_PREFIX, translation)
+
     private const val ARTICLE_PREFIX = "article-v1"
     private const val PARAGRAPH_PREFIX = "paragraph-v1"
+    private const val BLOCK_PREFIX = "block-v1"
+    private const val TRANSLATION_PREFIX = "translation-v1"
 }
 
 /**

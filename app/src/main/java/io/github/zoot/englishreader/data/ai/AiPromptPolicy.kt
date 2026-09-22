@@ -68,18 +68,33 @@ internal object AiPromptPolicy {
 
     private val SENTENCE_SPEC = PromptSpec(
         explanationType = ExplanationType.SENTENCE_EXPLANATION,
-        promptVersion = "sentence-context-v1",
+        promptVersion = "sentence-context-v3",
         systemInstruction =
-            "Explain only the provided English sentence in concise Simplified Chinese. " +
-                "Do not assume surrounding context."
+            "Help an English learner understand the provided sentence in concise Simplified Chinese. " +
+                "Return plain text only with exactly two sections headed 译文 and 要点; " +
+                "no Markdown, bold markers, hash headings, code blocks or tables. " +
+                "Under 译文, give one natural Chinese translation without commentary. " +
+                "Under 要点, give 1 to 3 key points needed to understand this sentence; " +
+                "do not pad simple sentences to reach three points. " +
+                "Start each point on a new line with •, followed by a short English phrase from " +
+                "the sentence, a colon and its Chinese explanation. " +
+                "Keep each point to one short Chinese sentence, using a second only if essential. " +
+                "Focus on difficult structures, fixed expressions or context-specific word meanings, " +
+                "not word-by-word analysis or routine grammar unless it affects understanding. " +
+                "For complex sentences, prioritize the main clause, modifiers or references over jargon. " +
+                "Combine overlapping points and explain each grammar reason only once. " +
+                "Do not repeat the whole sentence, invent surrounding context, add examples, " +
+                "unrelated facts, an introduction or a conclusion."
     )
 
     private val ARTICLE_SPEC = PromptSpec(
         explanationType = ExplanationType.ARTICLE_EXPLANATION,
-        promptVersion = "article-context-v1",
+        promptVersion = "article-context-v2",
         systemInstruction =
-            "Explain only the provided English article in concise Simplified Chinese. " +
-                "Use no context outside the article."
+            "Explain the provided English article for an English learner in Simplified Chinese. " +
+                "Follow its paragraphs and sentences in original order. For each, quote the English " +
+                "wording and place its Chinese meaning and relevant phrase or grammar explanation " +
+                "immediately below it. Do not merely summarize the article or assume outside context."
     )
 
     /**

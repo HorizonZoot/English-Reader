@@ -23,16 +23,21 @@ import io.github.zoot.englishreader.data.repository.WholeTranslationRepository
 import io.github.zoot.englishreader.data.repository.WholeTranslationStartResult
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.model.ScopeOption
+import io.github.zoot.englishreader.model.WholeTranslationPreview
+import io.github.zoot.englishreader.model.WholeTranslationPreviewResult
+import io.github.zoot.englishreader.model.TranslationSegmentationMode
 import io.github.zoot.englishreader.model.WholeTranslationScope
 import io.github.zoot.englishreader.model.WholeTranslationScopeChoice
 import io.github.zoot.englishreader.model.WholeTranslationSheetState
-import io.github.zoot.englishreader.model.WholeTranslationTaskStatus
 import io.github.zoot.englishreader.model.AiSheetState
 import io.github.zoot.englishreader.model.AiOperationRef
 import io.github.zoot.englishreader.model.AiExplanationTarget
 import io.github.zoot.englishreader.model.AiExplanationTextNormalizer
 import io.github.zoot.englishreader.model.AiSheetRequestToken
 import io.github.zoot.englishreader.model.ReadingAnchor
+import io.github.zoot.englishreader.model.ReadingArticleState
+import io.github.zoot.englishreader.model.ReadingPublication
+import io.github.zoot.englishreader.model.ReadingTranslationProjection
 import io.github.zoot.englishreader.model.ReadingEntry
 import io.github.zoot.englishreader.model.ReadingPosition
 import io.github.zoot.englishreader.model.ReadingPositionTarget
@@ -200,6 +205,52 @@ class ReadingViewModel @Inject constructor(
     val aiSheetState: StateFlow<AiSheetState> = aiSheetCoordinator.state
     val sentenceTranslationState: StateFlow<AiSheetState> = sentenceTranslationCoordinator.state
 
+    /**
+     * AI 未配置时的居中引导对话框是否可见。
+     *
+     * 与句子弹层的运行期错误分成两条路：翻译/解释在**发请求之前**就因为没有可用 profile／凭据／
+     * endpoint 被拒时，问题不在这一句话上，而在"还没配置服务"。把它做成一次明确的前往设置引导，
+     * 比在紧贴文字的小弹层里塞一行红字更好操作，也不需要用户先看懂错误再自己找设置入口。
+     * 其余运行期错误（离线、超时、鉴权、服务端错误等）仍留在弹层内就地重试或关闭。
+     */
+    private val _aiConfigurationPrompt = MutableStateFlow(false)
+    val aiConfigurationPrompt: StateFlow<Boolean> = _aiConfigurationPrompt.asStateFlow()
+
+    fun dismissAiConfigurationPrompt() {
+        _aiConfigurationPrompt.value = false
+    }
+
+    /**
+     * 把一次拒绝分流：配置类错误弹居中对话框，其余进句子弹层。
+     *
+     * 配置类错误来自请求发出前的 profile 解析（[AiError.NoActiveProfile] 等五种），此时收起该路
+     * 弹层并清掉当前选句——弹层是贴着被选文字画的，留着它显示"译文不可用"只会和对话框叠着。
+     * 非配置错误按原样落到 [AiSheetCoordinator.reject]，保留就地重试/关闭。
+     */
+    private suspend fun rejectOrPromptConfiguration(
+        coordinator: AiSheetCoordinator,
+        token: AiSheetRequestToken,
+        error: AiError
+    ) {
+        if (error.isConfigurationError()) {
+            coordinator.invalidate(token)
+            _aiConfigurationPrompt.value = true
+            clearSelection()
+        } else {
+            coordinator.reject(token, error)
+        }
+    }
+
+    /** profile／凭据／endpoint 在请求前就不可用的那几类，等价于"尚未配置 AI 服务"。 */
+    private fun AiError.isConfigurationError(): Boolean = when (this) {
+        AiError.NoActiveProfile,
+        AiError.ProfileNotFound,
+        AiError.CredentialMissing,
+        AiError.CredentialStorageUnavailable,
+        AiError.InvalidEndpoint -> true
+        else -> false
+    }
+
     /** 只解除解释面板的观察者，不取消 application scope 持有的付费请求。 */
     fun dismissAiSheet() {
         explanationPreparationJob?.cancel()
@@ -274,6 +325,9 @@ class ReadingViewModel @Inject constructor(
 
     private val _article = MutableStateFlow<ArticleEntity?>(null)
     val article: StateFlow<ArticleEntity?> = _article.asStateFlow()
+    private val _readingArticle = MutableStateFlow<ReadingArticleState?>(null)
+    val readingArticle = _readingArticle.asStateFlow()
+    private var lastReadingPosition: ReadingPosition? = null
 
     private val _selectedSentence = MutableStateFlow<SelectedSentence?>(null)
     val selectedSentence: StateFlow<SelectedSentence?> = _selectedSentence.asStateFlow()
@@ -326,6 +380,8 @@ class ReadingViewModel @Inject constructor(
     private var positionRequestId = 0L
     private var ttsPreparationJob: Job? = null
     private var ttsRefreshJob: Job? = null
+    private var ttsWarmupJob: Job? = null
+    private var ttsSessionActive = true
     private var activeTtsUtterance: String? = null
     private var ttsSentences = emptyList<SpeechSentence>()
     private var sentenceRequest: SentenceSpeechRequest? = null
@@ -373,6 +429,7 @@ class ReadingViewModel @Inject constructor(
     private val _pendingPositionTarget = MutableStateFlow<ReadingPositionTarget?>(null)
     val pendingPositionTarget: StateFlow<ReadingPositionTarget?> = _pendingPositionTarget.asStateFlow()
     private var loadArticleJob: Job? = null
+    private var articleObserver: Job? = null
 
     /**
      * 要临时高亮的段落序号（生词本跳转过来的那一段），不等同于阅读位置。
@@ -428,6 +485,8 @@ class ReadingViewModel @Inject constructor(
         val generation = ++articleLoadGeneration
         requestedArticleId = articleId
         loadArticleJob?.cancel()
+        articleObserver?.cancel()
+        articleObserver = null
         closeVoiceSettings()
         clearSelection()
         // 换文章时作废全文翻译 sheet：它的范围快照与段落计数属于旧文章。只靠 articleId
@@ -441,11 +500,13 @@ class ReadingViewModel @Inject constructor(
         clearParagraphHighlight()
         loadArticleJob = viewModelScope.launch {
             try {
-                val loaded = articleRepository.getArticleById(articleId)
+                val loadedState = articleRepository.getReadingArticle(articleId)
+                val loaded = loadedState?.article
                 if (generation != articleLoadGeneration) return@launch
                 if (loaded == null) {
                     requestedArticleId = _article.value?.id
                     _pendingPositionTarget.value = previousTarget
+                    requestedArticleId?.let { observeArticle(it, generation) }
                     _readingErrors.trySend(ReadingError.LOAD)
                     return@launch
                 }
@@ -476,17 +537,92 @@ class ReadingViewModel @Inject constructor(
                 )
                 _chapterContext.value = context
                 _article.value = loaded
+                _readingArticle.value = loadedState
+                lastReadingPosition = position
                 savedStateHandle[READING_CURRENT_ARTICLE] = articleId
+                observeArticle(articleId, generation)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
                 if (generation == articleLoadGeneration) {
                     requestedArticleId = _article.value?.id
                     _pendingPositionTarget.value = previousTarget
+                    requestedArticleId?.let { observeArticle(it, generation) }
                     _readingErrors.trySend(ReadingError.LOAD)
                 }
             } finally {
-                if (generation == articleLoadGeneration) _isLoadingArticle.value = false
+                if (generation == articleLoadGeneration) {
+                    _isLoadingArticle.value = false
+                    if (requestedArticleId == articleId && _article.value?.id == articleId) {
+                        prepareReadingVoice()
+                    }
+                }
+            }
+        }
+    }
+
+    /** JOIN 快照独立于翻译面板；发布时先转换锚点，再开放新版渲染。 */
+    private fun observeArticle(articleId: Long, generation: Long) {
+        articleObserver = viewModelScope.launch {
+            try {
+                articleRepository.observeReadingArticle(articleId).collect { updatedState ->
+                    val updated = updatedState?.article
+                    if (generation != articleLoadGeneration || requestedArticleId != articleId) return@collect
+                    val previous = _article.value?.takeIf { it.id == articleId } ?: return@collect
+                    if (updated == null) {
+                        closeVoiceSettings()
+                        clearSelection()
+                        dismissWholeTranslation()
+                        ttsSentences = emptyList()
+                        _pendingPositionTarget.value = null
+                        _chapterContext.value = null
+                        _article.value = null
+                        _readingArticle.value = null
+                        lastReadingPosition = null
+                        _readingErrors.trySend(ReadingError.LOAD)
+                        return@collect
+                    }
+                    if (updated.content == previous.content && updated.title == previous.title &&
+                        updated.translation == previous.translation && updated.source == previous.source &&
+                        updatedState == _readingArticle.value
+                    ) return@collect
+                    if (updated.content != previous.content) {
+                        closeVoiceSettings()
+                        clearSelection()
+                        dismissWholeTranslation()
+                        clearParagraphHighlight()
+                        ttsSentences = emptyList()
+                        _pendingPositionTarget.value = ReadingPositionTarget(
+                            ReadingPosition(articleId, ReadingAnchor(textKind = ReadingTextKind.TITLE)),
+                            entry = ReadingEntry.START,
+                            requestId = ++positionRequestId
+                        )
+                    }
+                    if (updated.content == previous.content &&
+                        updatedState.publication != _readingArticle.value?.publication
+                    ) {
+                        val current = _pendingPositionTarget.value?.position
+                            ?: lastReadingPosition?.takeIf { it.articleId == articleId }
+                        if (current?.anchor?.textKind == ReadingTextKind.TRANSLATION) {
+                            val converted = current.copy(anchor = ReadingTranslationProjection.convertAnchorForNewPublication(
+                                current.anchor, _readingArticle.value?.layout
+                            ))
+                            lastReadingPosition = converted
+                            _pendingPositionTarget.value = ReadingPositionTarget(
+                                converted, entry = _pendingPositionTarget.value?.entry ?: ReadingEntry.RESUME,
+                                requestId = ++positionRequestId
+                            )
+                        }
+                    }
+                    _article.value = updated
+                    _readingArticle.value = updatedState
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == articleLoadGeneration && requestedArticleId == articleId) {
+                    _readingErrors.trySend(ReadingError.LOAD)
+                }
             }
         }
     }
@@ -512,13 +648,27 @@ class ReadingViewModel @Inject constructor(
         }
     }
 
-    fun saveReadingPosition(position: ReadingPosition) {
+    fun recordReadingPosition(position: ReadingPosition, expectedPublication: ReadingPublication?) {
+        if (!_isLoadingArticle.value && _pendingPositionTarget.value == null &&
+            position.articleId == requestedArticleId && position.articleId == _article.value?.id &&
+            expectedPublication == _readingArticle.value?.publication
+        ) lastReadingPosition = position
+    }
+
+    fun saveReadingPosition(
+        position: ReadingPosition,
+        expectedContent: String? = _article.value?.content,
+        expectedPublication: ReadingPublication? = _readingArticle.value?.publication
+    ) {
         if (_isLoadingArticle.value || _pendingPositionTarget.value != null ||
-            position.articleId != requestedArticleId || position.articleId != _article.value?.id
+            position.articleId != requestedArticleId || position.articleId != _article.value?.id ||
+            expectedContent == null || expectedContent != _article.value?.content ||
+            expectedPublication != _readingArticle.value?.publication
         ) return
+        lastReadingPosition = position
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                articleRepository.saveReadingPosition(position)
+                articleRepository.saveReadingPosition(position, expectedContent, expectedPublication)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
@@ -547,12 +697,14 @@ class ReadingViewModel @Inject constructor(
         _selectedSentence.value = snapshot
         dismissAiSheet()
         dismissSentenceTranslation()
-        stopAudio()
+        stopAudio(preserveTtsPreparation = true)
         // 点击句子时清除单词高亮
         _selectedWord.value = null
     }
 
-    fun clearSelection() {
+    fun clearSelection() = clearSelection(preserveTtsPreparation = false)
+
+    private fun clearSelection(preserveTtsPreparation: Boolean) {
         _wordDefinition.value = null
         _isLoadingDefinition.value = false
         wordSelectionGeneration++
@@ -561,7 +713,7 @@ class ReadingViewModel @Inject constructor(
         dismissSentenceTranslation()
         _selectedWord.value = null
         _selectedSentence.value = null
-        stopAudio()
+        stopAudio(preserveTtsPreparation)
     }
 
     /** 只用不可变快照里的规范化文本发起句子解释。 */
@@ -593,7 +745,9 @@ class ReadingViewModel @Inject constructor(
                         sentenceTranslationCoordinator.attach(requestToken, result.handle)
                     }
                     is AiExplanationStartResult.Rejected -> {
-                        sentenceTranslationCoordinator.reject(requestToken, result.error)
+                        rejectOrPromptConfiguration(
+                            sentenceTranslationCoordinator, requestToken, result.error
+                        )
                     }
                 }
             } catch (cancellation: CancellationException) {
@@ -619,95 +773,175 @@ class ReadingViewModel @Inject constructor(
     private var wholeTranslationObserver: Job? = null
     private var wholeTranslationGeneration = 0L
 
-    /** 从段落浮窗「更多 → 全文翻译」进入范围选择。 */
-    fun openWholeTranslation() {
+    private var wholeTranslationPreviews = emptyMap<WholeTranslationScopeChoice, WholeTranslationPreview>()
+    private val wholeTranslationPreferenceMutex = Mutex()
+
+    /** 只预览本地计划；存在未完成任务时优先显示其固定快照。 */
+    fun openWholeTranslation() = prepareWholeTranslation()
+
+    private fun prepareWholeTranslation(
+        selected: WholeTranslationScopeChoice = WholeTranslationScopeChoice.CURRENT_ARTICLE,
+        mode: TranslationSegmentationMode? = null,
+        previewChanged: Boolean = false
+    ) {
         val article = _article.value ?: return
         if (_isLoadingArticle.value || article.id != requestedArticleId) return
         val generation = ++wholeTranslationGeneration
         wholeTranslationObserver?.cancel()
+        wholeTranslationPreviews = emptyMap()
+        val choosing = _wholeTranslation.value as? WholeTranslationSheetState.ChoosingScope
+        _wholeTranslation.value = choosing?.copy(isPreviewing = true, segmentationMode = mode ?: choosing.segmentationMode)
+            ?: WholeTranslationSheetState.Preparing(article.id)
         dismissSentenceActions()
         viewModelScope.launch {
-            val chapter = _chapterContext.value
-            val currentScope = WholeTranslationScope.CurrentArticle(article.id)
-            val chapterScope = chapter?.let { ctx ->
-                bookRepository.getChaptersOnce(ctx.bookId)
-                    .map { it.articleId }
-                    .takeIf { it.isNotEmpty() }
-                    ?.let { WholeTranslationScope.Chapter(ctx.bookId, it) }
-            }
-            // 已有任务优先：同源任务可继续时直接进入跟踪态，用户不必重新选范围。
-            val existingCurrent = wholeTranslationRepository.findResumable(currentScope)
-            val existingChapter = chapterScope?.let { wholeTranslationRepository.findResumable(it) }
-            if (generation != wholeTranslationGeneration || _article.value?.id != article.id) return@launch
-            val existing = existingChapter ?: existingCurrent
-            if (existing != null) {
-                track(existing.taskId, generation)
-                return@launch
-            }
-
-            val currentCount = ParagraphAligner.splitParagraphs(article.content).size
-            val chapterCount = chapterScope?.let { scope ->
-                scope.articleIds.sumOf { id ->
-                    articleRepository.getArticleById(id)?.content
-                        ?.let { ParagraphAligner.splitParagraphs(it).size } ?: 0
+            try {
+                if (mode != null) wholeTranslationPreferenceMutex.withLock {
+                    if (generation != wholeTranslationGeneration) return@withLock
+                    wholeTranslationRepository.savePreferredMode(article.id, mode)
+                }
+                if (generation != wholeTranslationGeneration) return@launch
+                val currentScope = WholeTranslationScope.CurrentArticle(article.id)
+                val chapterScope = _chapterContext.value?.let { ctx ->
+                    bookRepository.getChaptersOnce(ctx.bookId).map { it.articleId }.takeIf { it.isNotEmpty() }
+                        ?.let { WholeTranslationScope.Chapter(ctx.bookId, it) }
+                }
+                val existing = chapterScope?.let { wholeTranslationRepository.findResumable(it) }
+                    ?: wholeTranslationRepository.findResumable(currentScope)
+                if (generation != wholeTranslationGeneration || _article.value?.id != article.id) return@launch
+                if (existing != null) {
+                    track(existing.taskId, generation, article.id)
+                    return@launch
+                }
+                val previews = mutableMapOf<WholeTranslationScopeChoice, WholeTranslationPreview>()
+                val scopes = buildMap {
+                    put(WholeTranslationScopeChoice.CURRENT_ARTICLE, currentScope)
+                    if (chapterScope != null) put(WholeTranslationScopeChoice.CHAPTER, chapterScope)
+                }
+                for ((choice, scope) in scopes) {
+                    val result = wholeTranslationRepository.preview(scope)
+                    if (generation != wholeTranslationGeneration || _article.value?.id != article.id) return@launch
+                    when (result) {
+                        is WholeTranslationPreviewResult.Ready -> previews[choice] = result.preview
+                        is WholeTranslationPreviewResult.TooManyBlocks -> {
+                            _wholeTranslation.value = WholeTranslationSheetState.TooManyBlocks(
+                                article.id, result.actualBlocks, result.maxBlocks,
+                                canPreserve = result.articleId == article.id
+                            )
+                            return@launch
+                        }
+                        is WholeTranslationPreviewResult.Rejected -> {
+                            _wholeTranslation.value = WholeTranslationSheetState.Rejected(article.id, result.error)
+                            return@launch
+                        }
+                    }
+                }
+                wholeTranslationPreviews = previews.toMap()
+                val current = previews.getValue(WholeTranslationScopeChoice.CURRENT_ARTICLE)
+                val chosen = previews[selected] ?: current
+                _wholeTranslation.value = WholeTranslationSheetState.ChoosingScope(
+                    articleId = article.id,
+                    selected = if (selected in previews) selected else WholeTranslationScopeChoice.CURRENT_ARTICLE,
+                    currentArticleOption = current.option,
+                    chapterOption = previews[WholeTranslationScopeChoice.CHAPTER]?.option,
+                    existing = null,
+                    segmentationMode = current.plans.single().mode,
+                    hasTranslation = chosen.hasTranslation,
+                    previewChanged = previewChanged
+                )
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == wholeTranslationGeneration) {
+                    _wholeTranslation.value = WholeTranslationSheetState.Rejected(article.id, AiError.Unknown)
                 }
             }
-            if (generation != wholeTranslationGeneration || _article.value?.id != article.id) return@launch
-            _wholeTranslation.value = WholeTranslationSheetState.ChoosingScope(
-                articleId = article.id,
-                selected = WholeTranslationScopeChoice.CURRENT_ARTICLE,
-                currentArticleOption = ScopeOption(paragraphCount = currentCount, articleCount = 1),
-                chapterOption = chapterScope?.let {
-                    ScopeOption(paragraphCount = chapterCount ?: 0, articleCount = it.articleIds.size)
-                },
-                existing = null
-            )
         }
     }
 
     fun selectWholeTranslationScope(choice: WholeTranslationScopeChoice) {
         val current = _wholeTranslation.value as? WholeTranslationSheetState.ChoosingScope ?: return
-        if (choice == WholeTranslationScopeChoice.CHAPTER && current.chapterOption == null) return
-        _wholeTranslation.value = current.copy(selected = choice)
+        if (current.isStarting || current.isPreviewing) return
+        val preview = wholeTranslationPreviews[choice] ?: return
+        _wholeTranslation.value = current.copy(selected = choice, hasTranslation = preview.hasTranslation)
     }
 
-    /** 开始所选范围。开始后立刻切到跟踪态，进度由 repository 的 Flow 驱动。 */
+    fun selectWholeTranslationMode(mode: TranslationSegmentationMode) {
+        val current = _wholeTranslation.value as? WholeTranslationSheetState.ChoosingScope ?: return
+        if (current.isStarting) return
+        prepareWholeTranslation(current.selected, mode)
+    }
+
+    fun preserveWholeTranslationParagraphs() {
+        val state = _wholeTranslation.value as? WholeTranslationSheetState.TooManyBlocks ?: return
+        if (state.canPreserve) prepareWholeTranslation(mode = TranslationSegmentationMode.PRESERVE)
+    }
+
+    /** 显式确认后提交预览原件；正文、偏好或整书范围变化都要求重新预览。 */
     fun startWholeTranslation() {
         val choosing = _wholeTranslation.value as? WholeTranslationSheetState.ChoosingScope ?: return
-        if (choosing.articleId != _article.value?.id) return
+        if (choosing.isStarting || choosing.isPreviewing || choosing.articleId != _article.value?.id) return
+        val preview = wholeTranslationPreviews[choosing.selected] ?: return
+        val starting = choosing.copy(isStarting = true)
+        if (!_wholeTranslation.compareAndSet(choosing, starting)) return
         val generation = ++wholeTranslationGeneration
         viewModelScope.launch {
-            val scope = when (choosing.selected) {
-                WholeTranslationScopeChoice.CURRENT_ARTICLE ->
-                    WholeTranslationScope.CurrentArticle(choosing.articleId)
-                WholeTranslationScopeChoice.CHAPTER -> {
-                    val ctx = _chapterContext.value ?: return@launch
-                    val ids = bookRepository.getChaptersOnce(ctx.bookId).map { it.articleId }
-                    if (ids.isEmpty()) return@launch
-                    WholeTranslationScope.Chapter(ctx.bookId, ids)
+            try {
+                val result = wholeTranslationRepository.start(preview)
+                if (generation != wholeTranslationGeneration || _article.value?.id != choosing.articleId) return@launch
+                when (result) {
+                    is WholeTranslationStartResult.Started -> track(result.taskId, generation, choosing.articleId)
+                    is WholeTranslationStartResult.Existing -> track(result.taskId, generation, choosing.articleId)
+                    WholeTranslationStartResult.SourceChanged -> prepareWholeTranslation(choosing.selected, previewChanged = true)
+                    WholeTranslationStartResult.NoContent ->
+                        _wholeTranslation.value = WholeTranslationSheetState.Rejected(choosing.articleId, AiError.NoContent)
+                    is WholeTranslationStartResult.TooManyBlocks ->
+                        _wholeTranslation.value = WholeTranslationSheetState.TooManyBlocks(
+                            choosing.articleId, result.actualBlocks, result.maxBlocks,
+                            canPreserve = result.articleId == choosing.articleId
+                        )
+                    is WholeTranslationStartResult.Conflict ->
+                        _wholeTranslation.value = WholeTranslationSheetState.Conflict(
+                            choosing.articleId, result.taskId, result.scopeKey
+                        )
+                    is WholeTranslationStartResult.Rejected ->
+                        _wholeTranslation.value = WholeTranslationSheetState.Rejected(choosing.articleId, result.error)
                 }
-            }
-            val result = wholeTranslationRepository.start(scope)
-            if (generation != wholeTranslationGeneration) return@launch
-            when (result) {
-                is WholeTranslationStartResult.Started -> track(result.taskId, generation)
-                is WholeTranslationStartResult.Existing -> track(result.taskId, generation)
-                WholeTranslationStartResult.NoContent ->
-                    _wholeTranslation.value = WholeTranslationSheetState.Rejected(choosing.articleId, AiError.NoContent)
-                is WholeTranslationStartResult.Rejected ->
-                    _wholeTranslation.value = WholeTranslationSheetState.Rejected(choosing.articleId, result.error)
+            } catch (cancellation: CancellationException) {
+                if (generation == wholeTranslationGeneration) _wholeTranslation.compareAndSet(starting, choosing)
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == wholeTranslationGeneration) {
+                    _wholeTranslation.value = WholeTranslationSheetState.Rejected(choosing.articleId, AiError.Unknown)
+                }
             }
         }
     }
 
-    fun resumeWholeTranslation() {
-        val tracking = _wholeTranslation.value as? WholeTranslationSheetState.Tracking ?: return
-        viewModelScope.launch { wholeTranslationRepository.resume(tracking.taskId) }
-    }
+    fun resumeWholeTranslation() = continueWholeTranslation(retryFailed = false)
 
-    fun retryFailedWholeTranslation() {
+    fun retryFailedWholeTranslation() = continueWholeTranslation(retryFailed = true)
+
+    private fun continueWholeTranslation(retryFailed: Boolean) {
         val tracking = _wholeTranslation.value as? WholeTranslationSheetState.Tracking ?: return
-        viewModelScope.launch { wholeTranslationRepository.retryFailed(tracking.taskId) }
+        val generation = wholeTranslationGeneration
+        val articleId = _article.value?.id ?: return
+        viewModelScope.launch {
+            try {
+                val conflict = wholeTranslationRepository.conflictFor(tracking.taskId)
+                if (generation != wholeTranslationGeneration) return@launch
+                if (conflict != null) {
+                    wholeTranslationObserver?.cancel()
+                    _wholeTranslation.value = WholeTranslationSheetState.Conflict(articleId, conflict.taskId, conflict.scopeKey)
+                } else if (retryFailed) wholeTranslationRepository.retryFailed(tracking.taskId)
+                else wholeTranslationRepository.resume(tracking.taskId)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == wholeTranslationGeneration) {
+                    _wholeTranslation.value = WholeTranslationSheetState.Rejected(articleId, AiError.Unknown)
+                }
+            }
+        }
     }
 
     /** 显式取消任务本身（付费工作停止）。与 [dismissWholeTranslation] 不同。 */
@@ -716,35 +950,81 @@ class ReadingViewModel @Inject constructor(
         viewModelScope.launch { wholeTranslationRepository.cancel(tracking.taskId) }
     }
 
+    /**
+     * 从冲突提示切到那个既有任务的进度。
+     *
+     * 只换观察目标，不动任务本身：用户点「查看已有任务」是想知道它到哪了，而不是让它停下。
+     */
+    fun viewExistingWholeTranslationTask(taskId: Long) {
+        val conflict = _wholeTranslation.value as? WholeTranslationSheetState.Conflict ?: return
+        if (taskId != conflict.existingTaskId) return
+        track(taskId, ++wholeTranslationGeneration, conflict.articleId)
+    }
+
+    /**
+     * 取消冲突的既有任务，随后回到范围选择。
+     *
+     * 只在用户**显式**点下时才走这里。代码绝不自行取消：既有任务里可能已有付费成功的块，替他
+     * 取消等于让那些钱作废。取消后重开选择器而不是直接建新任务——范围与分段方式都该由他再确认
+     * 一次，尤其他刚刚才知道这里有两个任务在抢同一篇文章。
+     */
+    fun cancelExistingWholeTranslationTask(taskId: Long) {
+        val conflict = _wholeTranslation.value as? WholeTranslationSheetState.Conflict ?: return
+        if (taskId != conflict.existingTaskId) return
+        val generation = wholeTranslationGeneration
+        viewModelScope.launch {
+            try {
+                wholeTranslationRepository.cancel(taskId)
+                if (generation == wholeTranslationGeneration && _wholeTranslation.value == conflict) openWholeTranslation()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == wholeTranslationGeneration) {
+                    _wholeTranslation.value = WholeTranslationSheetState.Rejected(conflict.articleId, AiError.Unknown)
+                }
+            }
+        }
+    }
+
     /** 只关闭 sheet 并解除观察；任务在后台继续。 */
     fun dismissWholeTranslation() {
         ++wholeTranslationGeneration
         wholeTranslationObserver?.cancel()
         wholeTranslationObserver = null
         _wholeTranslation.value = WholeTranslationSheetState.Hidden
+        wholeTranslationPreviews = emptyMap()
     }
 
-    private fun track(taskId: Long, generation: Long) {
+    private fun track(taskId: Long, generation: Long, articleId: Long) {
         wholeTranslationObserver?.cancel()
         wholeTranslationObserver = viewModelScope.launch {
-            wholeTranslationRepository.observe(taskId).collect { view ->
-                if (generation != wholeTranslationGeneration) return@collect
-                if (view == null) {
-                    _wholeTranslation.value = WholeTranslationSheetState.Hidden
-                    return@collect
+            try {
+                wholeTranslationRepository.observe(taskId).collect { view ->
+                    if (generation != wholeTranslationGeneration) return@collect
+                    if (view == null) {
+                        _wholeTranslation.value = WholeTranslationSheetState.Hidden
+                        return@collect
+                    }
+                    _wholeTranslation.value = WholeTranslationSheetState.Tracking(
+                        taskId = view.taskId,
+                        scopeKey = view.scopeKey,
+                        status = view.status,
+                        progress = view.progress,
+                        failureReason = view.failureReason,
+                        segmentationModes = view.segmentationModes
+                    )
                 }
-                _wholeTranslation.value = WholeTranslationSheetState.Tracking(
-                    taskId = view.taskId,
-                    scopeKey = view.scopeKey,
-                    status = view.status,
-                    progress = view.progress,
-                    failureReason = view.failureReason
-                )
-                // 完成后文章译文已写入 Room；重新读取让段落对照立即可见。
-                if (view.status == WholeTranslationTaskStatus.COMPLETED) {
-                    val current = _article.value ?: return@collect
-                    articleRepository.getArticleById(current.id)?.let { refreshed ->
-                        if (_article.value?.id == refreshed.id) _article.value = refreshed
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == wholeTranslationGeneration) {
+                    _wholeTranslation.value = WholeTranslationSheetState.Rejected(articleId, AiError.Unknown)
+                }
+            } finally {
+                if (generation == wholeTranslationGeneration) {
+                    val choosing = _wholeTranslation.value as? WholeTranslationSheetState.ChoosingScope
+                    if (choosing?.isStarting == true) {
+                        _wholeTranslation.compareAndSet(choosing, choosing.copy(isStarting = false))
                     }
                 }
             }
@@ -773,6 +1053,7 @@ class ReadingViewModel @Inject constructor(
                 )
             }
         }
+        val speechAnchor = ReadingTranslationProjection.convertAnchorForNewPublication(anchor, _readingArticle.value?.layout)
         val selected = _selectedSentence.value
         val start = ttsSentences.firstOrNull {
             selected != null && it.index == selected.sentenceIndex && it.rawText == selected.rawText &&
@@ -780,14 +1061,13 @@ class ReadingViewModel @Inject constructor(
         } ?: ttsSentences.firstOrNull { sentence ->
             val location = requireNotNull(sentence.anchor)
             when {
-                anchor.textKind == ReadingTextKind.TITLE || anchor.textKind == ReadingTextKind.SOURCE -> true
-                location.paragraphIndex > anchor.paragraphIndex -> true
-                location.paragraphIndex < anchor.paragraphIndex -> false
-                anchor.textKind == ReadingTextKind.TRANSLATION -> true
-                else -> location.characterOffset + sentence.rawText.length > anchor.characterOffset
+                speechAnchor.textKind == ReadingTextKind.TITLE || speechAnchor.textKind == ReadingTextKind.SOURCE -> true
+                location.paragraphIndex > speechAnchor.paragraphIndex -> true
+                location.paragraphIndex < speechAnchor.paragraphIndex -> false
+                else -> location.characterOffset + sentence.rawText.length > speechAnchor.characterOffset
             }
         } ?: ttsSentences.lastOrNull() ?: return
-        clearSelection()
+        clearSelection(preserveTtsPreparation = true)
         prepareSentenceSpeech(start, continuous = true)
     }
 
@@ -799,7 +1079,7 @@ class ReadingViewModel @Inject constructor(
     ) {
         val articleId = _article.value?.id ?: return
         if (_isLoadingArticle.value || articleId != requestedArticleId) return
-        stopAudio()
+        stopAudio(preserveTtsPreparation = true)
         val request = SentenceSpeechRequest(ttsGeneration, articleId, sentence, continuous, allowNetworkOnce, recheck)
         sentenceRequest = request
         _readingTtsState.value = ReadingTtsState(
@@ -967,8 +1247,12 @@ class ReadingViewModel @Inject constructor(
         saveVoicePreference { settingsPreferences.setTtsVoiceId(voiceId) }
     }
 
-    fun setReadingSpeechRate(rate: Float) {
-        if (_voiceSettings.value.isOpen) saveVoicePreference { settingsPreferences.setTtsSpeechRate(rate) }
+    fun setReadingSpeechRate(rate: Float): Long? {
+        if (!_voiceSettings.value.isOpen) return null
+        val normalized = TtsReadingSettings.normalizeRate(rate)
+        val requestId = beginRateChange(normalized)
+        saveVoicePreference(rateRequestId = requestId) { settingsPreferences.setTtsSpeechRate(normalized) }
+        return requestId
     }
 
     fun setReadingNetworkVoiceAllowed(allowed: Boolean) {
@@ -976,18 +1260,49 @@ class ReadingViewModel @Inject constructor(
     }
 
     fun resetReadingVoiceSettings() {
-        if (_voiceSettings.value.isOpen) saveVoicePreference { settingsPreferences.resetReadingVoiceSettings() }
+        if (!_voiceSettings.value.isOpen) return
+        val requestId = beginRateChange(TtsReadingSettings.DEFAULT_RATE)
+        saveVoicePreference(rateRequestId = requestId) { settingsPreferences.resetReadingVoiceSettings() }
     }
 
-    private fun saveVoicePreference(write: suspend () -> Unit) {
+    private fun beginRateChange(rate: Float): Long {
+        val requestId = _voiceSettings.value.rateChangeId + 1
+        _voiceSettings.value = _voiceSettings.value.copy(rateChangeId = requestId, pendingSpeechRate = rate)
+        return requestId
+    }
+
+    private fun settleRateChange(requestId: Long, persisted: TtsReadingSettings) {
+        if (_voiceSettings.value.rateChangeId == requestId) {
+            _voiceSettings.value = _voiceSettings.value.copy(settings = persisted, pendingSpeechRate = null)
+        }
+    }
+
+    private fun saveVoicePreference(rateRequestId: Long? = null, write: suspend () -> Unit) {
         stopVoicePreview()
         voicePreferenceWriteJob = viewModelScope.launch {
             try {
-                voicePreferenceMutex.withLock { write() }
+                voicePreferenceMutex.withLock {
+                    write()
+                    if (rateRequestId != null) {
+                        settleRateChange(rateRequestId, settingsPreferences.ttsReadingSettings.first())
+                    }
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
-                _readingErrors.trySend(ReadingError.SAVE_PREFERENCE)
+                if (rateRequestId != null) {
+                    val persisted = try {
+                        settingsPreferences.ttsReadingSettings.first()
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (_: Exception) {
+                        _voiceSettings.value.settings
+                    }
+                    settleRateChange(rateRequestId, persisted)
+                }
+                if (rateRequestId == null || _voiceSettings.value.rateChangeId == rateRequestId) {
+                    _readingErrors.trySend(ReadingError.SAVE_PREFERENCE)
+                }
             }
         }
     }
@@ -1011,6 +1326,7 @@ class ReadingViewModel @Inject constructor(
             if (generation == voiceInspectionGeneration && _voiceSettings.value.isOpen) {
                 _voiceSettings.value = _voiceSettings.value.copy(snapshot = snapshot)
                 clearMissingVoice(state.settings, snapshot)
+                if (ttsSessionActive) ttsPlayer.prepareReading(state.settings, state.allowNetwork)
             }
         }
     }
@@ -1052,16 +1368,44 @@ class ReadingViewModel @Inject constructor(
         }
     }
 
-    fun stopVoicePreview() {
+    fun stopVoicePreview() = stopVoicePreview(preserveTtsPreparation = false)
+
+    private fun stopVoicePreview(preserveTtsPreparation: Boolean) {
         previewGeneration++
         previewJob?.cancel()
         previewJob = null
-        if (_voiceSettings.value.previewing) ttsPlayer.stop()
+        if (_voiceSettings.value.previewing) {
+            if (preserveTtsPreparation) ttsPlayer.stopBeforeReading() else ttsPlayer.stop()
+        }
         previewUtteranceId = null
         _voiceSettings.value = _voiceSettings.value.copy(previewing = false, previewFailure = null)
     }
 
+    private fun prepareReadingVoice() {
+        val articleId = _article.value?.id ?: return
+        if (!ttsSessionActive || _isLoadingArticle.value || articleId != requestedArticleId) return
+        ttsWarmupJob?.cancel()
+        val generation = ttsGeneration
+        ttsWarmupJob = viewModelScope.launch {
+            try {
+                voicePreferenceWriteJob?.join()
+                val settings = settingsPreferences.ttsReadingSettings.first()
+                val allowed = settingsPreferences.allowNetworkTts.first()
+                if (generation == ttsGeneration && ttsSessionActive &&
+                    articleId == requestedArticleId && articleId == _article.value?.id && !_isLoadingArticle.value
+                ) {
+                    ttsPlayer.prepareReading(settings, allowed)
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                Log.w("ReadingViewModel", "Reading voice preparation unavailable")
+            }
+        }
+    }
+
     fun refreshTtsCapability() {
+        ttsSessionActive = true
         if (_voiceSettings.value.isOpen) {
             recheckVoiceSettings()
             return
@@ -1070,11 +1414,15 @@ class ReadingViewModel @Inject constructor(
         val generation = ttsGeneration
         ttsRefreshJob = viewModelScope.launch {
             val allowed = settingsPreferences.allowNetworkTts.first()
-            if (generation == ttsGeneration) ttsPlayer.refresh(allowed) { }
+            if (generation == ttsGeneration) {
+                ttsPlayer.refresh(allowed) { }
+                prepareReadingVoice()
+            }
         }
     }
 
     fun releaseTts() {
+        ttsSessionActive = false
         closeVoiceSettings()
         stopAudio()
         ttsPlayer.shutdown()
@@ -1117,7 +1465,7 @@ class ReadingViewModel @Inject constructor(
                         aiSheetCoordinator.attach(requestToken, result.handle)
                     }
                     is AiExplanationStartResult.Rejected -> {
-                        aiSheetCoordinator.reject(requestToken, result.error)
+                        rejectOrPromptConfiguration(aiSheetCoordinator, requestToken, result.error)
                     }
                 }
             } catch (cancellation: CancellationException) {
@@ -1524,13 +1872,17 @@ class ReadingViewModel @Inject constructor(
     /**
      * 停止播放
      */
-    fun stopAudio() {
-        stopVoicePreview()
+    fun stopAudio() = stopAudio(preserveTtsPreparation = false)
+
+    private fun stopAudio(preserveTtsPreparation: Boolean) {
+        stopVoicePreview(preserveTtsPreparation)
         ttsGeneration++
         ttsPreparationJob?.cancel()
         ttsPreparationJob = null
         ttsRefreshJob?.cancel()
         ttsRefreshJob = null
+        ttsWarmupJob?.cancel()
+        ttsWarmupJob = null
         activeTtsUtterance = null
         sentenceRequest = null
         _ttsPositionTarget.value = null
@@ -1545,7 +1897,7 @@ class ReadingViewModel @Inject constructor(
         audioPlayer.stop()
         // 混合读音下发声可能来自 TTS 而非 MediaPlayer，两者都要停，
         // 否则关闭弹窗后机器音仍会继续读完。
-        ttsPlayer.stop()
+        if (preserveTtsPreparation) ttsPlayer.stopBeforeReading() else ttsPlayer.stop()
     }
 
     /**

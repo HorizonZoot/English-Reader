@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextContains
@@ -17,6 +18,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.dp
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.model.ScopeOption
@@ -89,10 +91,78 @@ class WholeTranslationSheetTest {
 
         composeRule.onNodeWithTag("whole-translation-scope-current").assertIsDisplayed()
         composeRule.onAllNodesWithTagCount("whole-translation-scope-chapter", 0)
+        composeRule.onNodeWithTag("whole-translation-paragraph-hint").assertDoesNotExist()
+        composeRule.onNodeWithTag("whole-translation-edit-article").assertDoesNotExist()
         composeRule.onNodeWithTag("whole-translation-primary").assertTextEquals("开始翻译")
 
-        composeRule.onNodeWithTag("whole-translation-primary").performClick()
+        composeRule.onNodeWithTag("whole-translation-primary").performScrollTo().performClick()
         assertEquals(listOf("start"), clicks)
+    }
+
+    @Test
+    fun choosingScope_paragraphFormattingSuggestedOffersEditorWithoutStartingTranslation() {
+        setContent(
+            state = mutableStateOf(
+                WholeTranslationSheetState.ChoosingScope(
+                    articleId = 1,
+                    selected = WholeTranslationScopeChoice.CURRENT_ARTICLE,
+                    currentArticleOption = ScopeOption(paragraphCount = 1, articleCount = 1),
+                    chapterOption = null,
+                    existing = null
+                )
+            ),
+            paragraphFormattingSuggested = true,
+            onEditArticle = { clicks += "edit" }
+        )
+
+        composeRule.onNodeWithTag("whole-translation-paragraph-hint")
+            .performScrollTo().assertIsDisplayed().assertTextContains("自动对照分块", substring = true)
+        composeRule.onNodeWithTag("whole-translation-edit-article")
+            .performScrollTo().assertIsDisplayed().performClick()
+        composeRule.runOnIdle { assertEquals(listOf("edit"), clicks) }
+        composeRule.onNodeWithTag("whole-translation-primary")
+            .performScrollTo().assertIsDisplayed().assertTextEquals("开始翻译")
+    }
+
+    @Test
+    fun choosingScope_starting_disablesSubmissionScopeAndEditingButAllowsDismissal() {
+        setContent(
+            state = mutableStateOf(
+                WholeTranslationSheetState.ChoosingScope(
+                    articleId = 1,
+                    selected = WholeTranslationScopeChoice.CURRENT_ARTICLE,
+                    currentArticleOption = ScopeOption(paragraphCount = 1, articleCount = 1),
+                    chapterOption = ScopeOption(paragraphCount = 2, articleCount = 2),
+                    existing = null,
+                    isStarting = true
+                )
+            ),
+            paragraphFormattingSuggested = true,
+            onEditArticle = { clicks += "edit" },
+            onSelectScope = { clicks += "scope" }
+        )
+
+        composeRule.onNodeWithTag("whole-translation-scope-current").assertIsNotEnabled()
+        composeRule.onNodeWithTag("whole-translation-scope-chapter").assertIsNotEnabled()
+        composeRule.onNodeWithTag("whole-translation-edit-article").performScrollTo().assertIsNotEnabled()
+        composeRule.onNodeWithTag("whole-translation-primary")
+            .performScrollTo().assertIsNotEnabled().assertTextEquals("正在启动翻译…")
+        composeRule.onNodeWithTag("whole-translation-close").performScrollTo().performClick()
+        assertEquals(listOf("dismiss"), clicks)
+    }
+
+    @Test
+    fun tracking_doesNotOfferParagraphEditingEvenIfSuggestionWasPresent() {
+        setContent(
+            state = mutableStateOf(tracking(WholeTranslationTaskStatus.RUNNING, translated = 0, total = 1)),
+            paragraphFormattingSuggested = true,
+            onEditArticle = { clicks += "edit" }
+        )
+
+        composeRule.onNodeWithTag("whole-translation-paragraph-hint").assertDoesNotExist()
+        composeRule.onNodeWithTag("whole-translation-edit-article").assertDoesNotExist()
+        composeRule.onNodeWithTag("whole-translation-primary").assertTextEquals("后台继续")
+        composeRule.runOnIdle { assertEquals(emptyList<String>(), clicks) }
     }
 
     @Test
@@ -103,7 +173,7 @@ class WholeTranslationSheetTest {
         composeRule.onNodeWithTag("whole-translation-status").assertTextEquals("正在翻译…")
         composeRule.onNodeWithTag("whole-translation-primary").assertTextEquals("后台继续")
 
-        composeRule.onNodeWithTag("whole-translation-primary").performClick()
+        composeRule.onNodeWithTag("whole-translation-primary").performScrollTo().performClick()
 
         // 「后台继续」只关闭面板，绝不取消任务
         assertEquals(listOf("dismiss"), clicks)
@@ -116,7 +186,7 @@ class WholeTranslationSheetTest {
         composeRule.onNodeWithTag("whole-translation-progress").assertTextEquals("已翻译 7 / 10，失败 2")
         composeRule.onNodeWithTag("whole-translation-primary").assertTextEquals("重试失败项")
 
-        composeRule.onNodeWithTag("whole-translation-primary").performClick()
+        composeRule.onNodeWithTag("whole-translation-primary").performScrollTo().performClick()
         assertEquals(listOf("retry"), clicks)
     }
 
@@ -160,7 +230,21 @@ class WholeTranslationSheetTest {
         composeRule.onNodeWithTag("whole-translation-primary").assertTextEquals("完成")
         composeRule.onAllNodesWithTagCount("whole-translation-cancel-task", 0)
 
-        composeRule.onNodeWithTag("whole-translation-primary").performClick()
+        composeRule.onNodeWithTag("whole-translation-primary").performScrollTo().performClick()
+        assertEquals(listOf("dismiss"), clicks)
+    }
+
+    @Test
+    fun tracking_cancelled_offersOnlyCloseAndNeverADeadAction() {
+        // 带失败计数：旧推导会在这里给出「重试失败项」，而终态任务的 beginTask 恒返回 false，
+        // 于是那个按钮点下去既不请求也不改变状态——用户看到的是没有任何反馈的死按钮。
+        setContent(tracking(WholeTranslationTaskStatus.CANCELLED, translated = 2, total = 5, failed = 1))
+
+        composeRule.onNodeWithTag("whole-translation-primary").assertTextEquals("关闭")
+        composeRule.onAllNodesWithTagCount("whole-translation-cancel-task", 0)
+
+        composeRule.onNodeWithTag("whole-translation-primary").performScrollTo().performClick()
+        // 只收起面板：既不能重新发起付费请求，也不能再次取消
         assertEquals(listOf("dismiss"), clicks)
     }
 
@@ -184,6 +268,8 @@ class WholeTranslationSheetTest {
      */
     private fun setContent(
         state: State<WholeTranslationSheetState>,
+        paragraphFormattingSuggested: Boolean = false,
+        onEditArticle: (() -> Unit)? = null,
         onSelectScope: (WholeTranslationScopeChoice) -> Unit = {}
     ) {
         composeRule.setContent {
@@ -196,7 +282,9 @@ class WholeTranslationSheetTest {
                         onStart = { clicks += "start" },
                         onResume = { clicks += "resume" },
                         onRetryFailed = { clicks += "retry" },
-                        onCancelTask = { clicks += "cancel" }
+                        onCancelTask = { clicks += "cancel" },
+                        paragraphFormattingSuggested = paragraphFormattingSuggested,
+                        onEditArticle = onEditArticle
                     )
                 }
             }

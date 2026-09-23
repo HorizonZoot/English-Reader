@@ -246,9 +246,7 @@ class EncryptedAiCredentialStorageTest {
     private class FakeCredentialPreferences(
         val values: MutableMap<String, String> = mutableMapOf(),
         var getFailure: RuntimeException? = null,
-        private val removeResults: MutableMap<String, Boolean> = mutableMapOf(),
-        private var putResult: Boolean = true,
-        private var clearResult: Boolean = true
+        private val removeResults: MutableMap<String, Boolean> = mutableMapOf()
     ) : CredentialPreferences {
         val removeCalls = mutableListOf<String>()
         var clearCalls: Int = 0
@@ -260,8 +258,8 @@ class EncryptedAiCredentialStorageTest {
         }
 
         override fun putString(key: String, value: String): Boolean {
-            if (putResult) values[key] = value
-            return putResult
+            values[key] = value
+            return true
         }
 
         override fun remove(key: String): Boolean {
@@ -273,8 +271,8 @@ class EncryptedAiCredentialStorageTest {
 
         override fun clear(): Boolean {
             clearCalls += 1
-            if (clearResult) values.clear()
-            return clearResult
+            values.clear()
+            return true
         }
     }
 

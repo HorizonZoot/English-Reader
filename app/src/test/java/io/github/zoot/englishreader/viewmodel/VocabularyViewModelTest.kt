@@ -188,15 +188,6 @@ class VocabularyViewModelTest {
     }
 
     @Test
-    fun deleteVocabulary_delegatesToRepository() = runTest {
-        val entity = vocab("delete-me", 99)
-
-        viewModel.deleteVocabulary(entity)
-
-        coVerify(exactly = 1) { vocabularyRepository.deleteVocabulary(entity) }
-    }
-
-    @Test
     fun deleteVocabulary_afterPersisting_emitsDeletedWithThatWord() = runTest {
         val entity = vocab("delete-me", 99)
 

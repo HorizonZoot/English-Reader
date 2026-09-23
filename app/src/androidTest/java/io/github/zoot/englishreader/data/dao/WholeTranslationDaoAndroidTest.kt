@@ -6,6 +6,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.BookChapterEntity
+import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
 import com.squareup.moshi.Moshi
@@ -88,10 +90,11 @@ class WholeTranslationDaoAndroidTest {
     fun createTask_multipleArticles_persistsProcessingOrder() = runBlocking {
         val first = insertArticle(ONE_PARAGRAPH)
         val second = insertArticle(TWO_PARAGRAPHS)
+        val bookId = insertBook(second, first)
 
         // 刻意反序传入：ordinal 必须反映传入顺序，而非 articleId 升序
         val taskId = dao.createTask(
-            task = taskRow(scopeKey = "book:7", bookId = 7),
+            task = taskRow(scopeKey = "book:$bookId", bookId = bookId),
             articles = listOf(
                 legacyTarget(second, TWO_PARAGRAPHS),
                 legacyTarget(first, ONE_PARAGRAPH)
@@ -280,9 +283,10 @@ class WholeTranslationDaoAndroidTest {
         dao.tryClaimSegment(taskId, articleId, 2, NOW + LEASE, NOW, 0)
         dao.checkpointFailure(taskId, articleId, 2, "paragraph_too_long", NOW)
         val before = dao.getSegments(taskId)
-        val otherTask = createTask(articleId)
-        dao.tryClaimSegment(otherTask, articleId, 0, NOW + LEASE, NOW, 0)
-        dao.checkpointFailure(otherTask, articleId, 0, "configuration", NOW)
+        val otherArticleId = insertArticle(content)
+        val otherTask = createTask(otherArticleId)
+        dao.tryClaimSegment(otherTask, otherArticleId, 0, NOW + LEASE, NOW, 0)
+        dao.checkpointFailure(otherTask, otherArticleId, 0, "configuration", NOW)
         val otherSegments = dao.getSegments(otherTask)
         assertTrue(dao.beginTask(taskId, NOW + 1))
 
@@ -461,8 +465,9 @@ class WholeTranslationDaoAndroidTest {
     fun materialize_oneTargetInvalid_writesNoArticleAtAll() = runBlocking {
         val first = insertArticle(ONE_PARAGRAPH)
         val second = insertArticle(TWO_PARAGRAPHS)
+        val bookId = insertBook(first, second)
         val taskId = dao.createTask(
-            task = taskRow(scopeKey = "book:3", bookId = 3),
+            task = taskRow(scopeKey = "book:$bookId", bookId = bookId),
             articles = listOf(
                 legacyTarget(first, ONE_PARAGRAPH),
                 legacyTarget(second, TWO_PARAGRAPHS)
@@ -501,6 +506,24 @@ class WholeTranslationDaoAndroidTest {
 
     private suspend fun insertArticle(content: String): Long =
         articleDao.insertArticle(ArticleEntity(title = "T", content = content))
+
+    private suspend fun insertBook(vararg articleIds: Long): Long {
+        val bookDao = db.bookDao()
+        val bookId = bookDao.insertBookRow(
+            BookEntity(
+                title = "Book", contentFingerprint = "test-book", sourceFormat = "epub3",
+                chapterCount = articleIds.size,
+                totalChars = articleIds.sumOf { requireNotNull(articleDao.getArticleById(it)).content.length },
+                createdAt = NOW
+            )
+        )
+        articleIds.forEachIndexed { index, articleId ->
+            bookDao.insertChapterRelation(
+                BookChapterEntity(bookId = bookId, articleId = articleId, chapterIndex = index, sourceHref = "$index.xhtml")
+            )
+        }
+        return bookId
+    }
 
     private fun taskRow(scopeKey: String, bookId: Long? = null) = WholeTranslationTaskEntity(
         scopeKey = scopeKey,

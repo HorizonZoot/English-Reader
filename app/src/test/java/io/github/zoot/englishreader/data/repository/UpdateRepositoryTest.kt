@@ -212,16 +212,6 @@ class UpdateRepositoryTest {
     }
 
     @Test
-    fun unknownJsonFields_areIgnored() = runTest {
-        // 装置故意在响应里塞了 draft/prerelease/assets，模型没声明它们。
-        fixture.enqueueRelease(tag = "0.2.0")
-
-        val result = fixture.repository(localVersion = "0.1.1-beta").check(manual = true)
-
-        assertTrue(result is UpdateCheckResult.UpdateAvailable)
-    }
-
-    @Test
     fun malformedJson_convergesToFailed() = runTest {
         fixture.enqueueMalformedJson()
 

@@ -64,6 +64,20 @@ class ReadingPaginatorTest {
         assertEquals(3, result.pageFor(ReadingAnchor(999)))
     }
 
+    @Test
+    fun pagination_keepsParagraphAnchorsSeparateFromLocalViewportOffsets() {
+        val result = paginateReadingBlocks(listOf(
+            ReadingBlockMetrics(0, ReadingTextKind.TRANSLATION,
+                listOf(ReadingLine(0, 10, 0, 20), ReadingLine(10, 20, 20, 40)), 0, textStartOffset = 40)
+        ), 20) as ReadingPagination.Ready
+        assertEquals(1, result.pageFor(ReadingAnchor(0, ReadingTextKind.TRANSLATION, 51)))
+        val fragment = result.pages[1].fragments.single()
+        assertEquals(50, fragment.anchor.characterOffset)
+        assertEquals(60, fragment.endOffset)
+        assertEquals(10, fragment.localStartOffset)
+        assertEquals(20, fragment.localEndOffset)
+    }
+
     private fun block(index: Int, kind: ReadingTextKind, count: Int, lineHeight: Int, gap: Int) =
         ReadingBlockMetrics(
             paragraphIndex = index,

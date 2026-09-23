@@ -49,17 +49,7 @@ class AiChatTransportTest {
         fixture.start()
         server = fixture.server
 
-        val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
-        val api = Retrofit.Builder()
-            // @Url 逐次覆盖此占位符；它绝不应出现在真实请求中。
-            // Retrofit 要求 baseUrl 以 / 结尾，故此处必须带尾斜杠。
-            .baseUrl("https://localhost/placeholder/")
-            .client(fixture.client)
-            .addConverterFactory(MoshiConverterFactory.create(moshi))
-            .build()
-            .create(AiChatCompletionApi::class.java)
-
-        transport = RetrofitAiChatTransport(api)
+        transport = transportFor(fixture.client)
     }
 
     @After

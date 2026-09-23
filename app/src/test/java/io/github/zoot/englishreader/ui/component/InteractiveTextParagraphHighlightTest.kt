@@ -1,6 +1,7 @@
 package io.github.zoot.englishreader.ui.component
 
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -75,22 +76,39 @@ class InteractiveTextParagraphHighlightTest {
     fun paragraphHighlightStrength_doesNotChangeTheRenderedText() {
         val highlight = mutableFloatStateOf(0f)
         val layouts = mutableListOf<TextLayoutResult>()
-        render(highlight = highlight.floatValue) { layouts += it }
+        val appliedHighlights = mutableListOf<Float>()
+        composeRule.setContent {
+            val currentHighlight = highlight.floatValue
+            InteractiveText(
+                text = text,
+                fontSize = 16.sp,
+                modifier = Modifier.width(200.dp),
+                precomputedSentences = sentences,
+                paragraphHighlight = currentHighlight,
+                onSentenceClick = { _, _ -> },
+                onWordLongPress = {},
+                onTextLayout = { layouts += it }
+            )
+            SideEffect { appliedHighlights += currentHighlight }
+        }
+        composeRule.waitForIdle()
 
         val before = layouts.last().layoutInput.text
+        assertEquals(0f, appliedHighlights.last(), 0f)
 
         // 走几帧不同的强度，模拟渐隐过程。
         listOf(1f, 0.6f, 0.25f, 0f).forEach { value ->
             composeRule.runOnIdle { highlight.floatValue = value }
             composeRule.waitForIdle()
-        }
+            assertEquals("highlight=$value must reach composition", value, appliedHighlights.last(), 0f)
 
-        // 同一个实例：强度变化连 AnnotatedString 的重建都不该触发，更不必重新布局。
-        assertSame(
-            "paragraph highlight must not rebuild the AnnotatedString",
-            before,
-            layouts.last().layoutInput.text
-        )
+            // 同一个实例：强度变化连 AnnotatedString 的重建都不该触发，更不必重新布局。
+            assertSame(
+                "paragraph highlight must not rebuild the AnnotatedString at $value",
+                before,
+                layouts.last().layoutInput.text
+            )
+        }
     }
 
     @Test

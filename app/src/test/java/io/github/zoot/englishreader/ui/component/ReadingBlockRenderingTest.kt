@@ -12,11 +12,7 @@ import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.sp
-import io.github.zoot.englishreader.core.ReadingBlockMetrics
-import io.github.zoot.englishreader.core.ReadingLine
-import io.github.zoot.englishreader.core.ReadingPagination
 import io.github.zoot.englishreader.core.SentenceRange
-import io.github.zoot.englishreader.core.paginateReadingBlocks
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.local.FontSizeOption
 import io.github.zoot.englishreader.data.local.ReadingMode
@@ -91,20 +87,6 @@ class ReadingBlockRenderingTest {
             .first { it.label.startsWith("Highlight sentence") }
         compose.runOnIdle { assertTrue(action.action()) }
         compose.runOnIdle { assertEquals(8 to sentence, selected) }
-    }
-
-    @Test
-    fun pagination_keepsParagraphAnchorsSeparateFromLocalViewportOffsets() {
-        val result = paginateReadingBlocks(listOf(
-            ReadingBlockMetrics(0, ReadingTextKind.TRANSLATION,
-                listOf(ReadingLine(0, 10, 0, 20), ReadingLine(10, 20, 20, 40)), 0, textStartOffset = 40)
-        ), 20) as ReadingPagination.Ready
-        assertEquals(1, result.pageFor(ReadingAnchor(0, ReadingTextKind.TRANSLATION, 51)))
-        val fragment = result.pages[1].fragments.single()
-        assertEquals(50, fragment.anchor.characterOffset)
-        assertEquals(60, fragment.endOffset)
-        assertEquals(10, fragment.localStartOffset)
-        assertEquals(20, fragment.localEndOffset)
     }
 
     @Test fun scroll_secondTranslationBlock_restoresParagraphLocalOffset() = verifyRestore(ReadingMode.SCROLL)

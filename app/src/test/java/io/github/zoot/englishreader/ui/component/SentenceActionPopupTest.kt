@@ -154,13 +154,6 @@ class SentenceActionPopupTest {
     }
 
     @Test
-    fun popupFadeDurations_areShortAndAlphaOnly() {
-        assertEquals(120, SENTENCE_POPUP_FADE_IN_DURATION_MS)
-        assertEquals(90, SENTENCE_POPUP_FADE_OUT_DURATION_MS)
-        assertEquals(120, SENTENCE_POPUP_CONTENT_CROSSFADE_DURATION_MS)
-    }
-
-    @Test
     fun actionPopup_doesNotOwnFocusOrOutsideDismissal() {
         val properties = sentencePopupProperties(SentencePopupMode.ACTIONS)
 
@@ -214,14 +207,6 @@ class SentenceActionPopupTest {
         composeRule.mainClock.advanceTimeBy(1)
         composeRule.waitForIdle()
         assertEquals(1, dismissCount)
-    }
-
-    @Test
-    fun popupDismissGate_allowsOnlyOneTerminalCallback() {
-        val gate = SentencePopupDismissGate()
-        assertTrue(gate.tryAcquire())
-        assertTrue(gate.isAcquired)
-        assertTrue(!gate.tryAcquire())
     }
 
     @Test

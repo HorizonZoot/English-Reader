@@ -174,29 +174,17 @@ class ReadingViewModelTest {
     }
     @Test
     fun userPreferenceChanges_persistThroughSharedSettingsPreferences() = runTest {
-        data class Case(val name: String, val action: () -> Unit, val verify: () -> Unit)
-        listOf(
-            Case(
-                name = "setReadingMode",
-                action = { viewModel.setReadingMode(ReadingMode.PAGED) },
-                verify = { coVerify(exactly = 1) { settingsPreferences.setReadingMode(ReadingMode.PAGED) } }
-            ),
-            Case(
-                name = "setFontSizeOption",
-                action = { viewModel.setFontSizeOption(FontSizeOption.LARGE) },
-                verify = { coVerify(exactly = 1) { settingsPreferences.setFontSizeOption(FontSizeOption.LARGE) } }
-            ),
-            Case(
-                name = "setThemeOption",
-                action = { viewModel.setThemeOption(ThemeOption.DARK) },
-                verify = { coVerify(exactly = 1) { settingsPreferences.setThemeOption(ThemeOption.DARK) } }
-            )
-        ).forEach { case ->
-            clearMocks(settingsPreferences, answers = false)
-            case.action()
-            advanceUntilIdle()
-            case.verify()
-        }
+        viewModel.setReadingMode(ReadingMode.PAGED)
+        advanceUntilIdle()
+        coVerify(exactly = 1) { settingsPreferences.setReadingMode(ReadingMode.PAGED) }
+
+        viewModel.setFontSizeOption(FontSizeOption.LARGE)
+        advanceUntilIdle()
+        coVerify(exactly = 1) { settingsPreferences.setFontSizeOption(FontSizeOption.LARGE) }
+
+        viewModel.setThemeOption(ThemeOption.DARK)
+        advanceUntilIdle()
+        coVerify(exactly = 1) { settingsPreferences.setThemeOption(ThemeOption.DARK) }
     }
 
     @Test
@@ -1072,7 +1060,7 @@ class ReadingViewModelTest {
     @Test
     fun playWordAudio_offlineWithCacheHit_playsLocalFileNotTts() = runTest {
         every { networkChecker.isOnline() } returns false
-        val local = java.io.File.createTempFile("pron", ".mp3").apply { deleteOnExit() }
+        val local = java.io.File("cache/pron.mp3")
         coEvery { pronunciationAudioCache.get("lives") } returns local
 
         viewModel.playWordAudio("lives", "https://dict.youdao.com/dictvoice?audio=lives&type=2", silent = false)
@@ -1111,7 +1099,7 @@ class ReadingViewModelTest {
      */
     @Test
     fun playWordAudio_cacheHit_playsLocalFileInsteadOfRemote() = runTest {
-        val local = java.io.File.createTempFile("pron", ".mp3").apply { deleteOnExit() }
+        val local = java.io.File("cache/pron.mp3")
         coEvery { pronunciationAudioCache.get("lives") } returns local
 
         viewModel.playWordAudio("lives", "https://dict.youdao.com/dictvoice?audio=lives&type=2")
@@ -1145,7 +1133,7 @@ class ReadingViewModelTest {
      */
     @Test
     fun playWordAudio_cacheHit_neverRaisesTheSpinnerAtAll() = runTest {
-        val local = java.io.File.createTempFile("pron", ".mp3").apply { deleteOnExit() }
+        val local = java.io.File("cache/pron.mp3")
         val playStarted = CompletableDeferred<Unit>()
         val releasePlay = CompletableDeferred<Unit>()
         coEvery { pronunciationAudioCache.get("lives") } returns local
@@ -1466,7 +1454,7 @@ class ReadingViewModelTest {
      */
     @Test
     fun playWordAudio_localFileFailsToPlay_invalidatesThatCacheEntry() = runTest {
-        val local = java.io.File.createTempFile("pron", ".mp3").apply { deleteOnExit() }
+        val local = java.io.File("cache/pron.mp3")
         coEvery { pronunciationAudioCache.get("lives") } returns local
         coEvery { audioPlayer.play(any(), any(), any()) } answers {
             thirdArg<(Exception) -> Unit>().invoke(java.io.IOException("unplayable"))

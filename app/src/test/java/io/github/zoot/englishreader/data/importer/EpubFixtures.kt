@@ -71,13 +71,7 @@ object EpubFixtures {
         """</package>"""
     )
 
-    fun xhtml(body: String): String = lines(
-        """<?xml version="1.0" encoding="UTF-8"?>""",
-        """<html xmlns="http://www.w3.org/1999/xhtml">""",
-        """  <head><title>chapter</title></head>""",
-        """  <body><p>$body</p></body>""",
-        """</html>"""
-    )
+    fun xhtml(body: String): String = xhtmlRawBody("<p>$body</p>")
 
     /** [bodyInner] 直接作为 `<body>` 的内容，用于测试段落标签/br/script 等结构。 */
     fun xhtmlRawBody(bodyInner: String): String = lines(

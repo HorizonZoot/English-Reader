@@ -212,10 +212,10 @@ class ArticleDaoAndroidTest {
         val opened = articleDao.getArticleById(id)!!
         articleDao.upsertReadingPosition(ReadingPositionEntity(id, 1, "TRANSLATION", 7, 100))
         vocabularyDao.insertVocabulary(VocabularyEntity(word = "first", articleId = id))
-        val taskId = editingTask(opened)
-        val checkpoint = db.wholeTranslationDao().getSegments(taskId)
         val completedTask = editingTask(opened)
         db.wholeTranslationDao().updateTaskStatus(completedTask, "completed", null, 100)
+        val taskId = editingTask(opened)
+        val checkpoint = db.wholeTranslationDao().getSegments(taskId)
         val unrelatedId = articleDao.insertArticle(ArticleEntity(title = "Other", content = "Unchanged."))
         val unrelated = articleDao.getArticleById(unrelatedId)!!
         val unrelatedTask = editingTask(unrelated)

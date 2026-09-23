@@ -820,6 +820,8 @@ class ReadingViewModel @Inject constructor(
                 for ((choice, scope) in scopes) {
                     val result = wholeTranslationRepository.preview(scope)
                     if (generation != wholeTranslationGeneration || _article.value?.id != article.id) return@launch
+                    // 整书是可选范围：预览失败只移除该选项，不阻断已就绪的当前文章。
+                    if (choice == WholeTranslationScopeChoice.CHAPTER && result !is WholeTranslationPreviewResult.Ready) continue
                     when (result) {
                         is WholeTranslationPreviewResult.Ready -> previews[choice] = result.preview
                         is WholeTranslationPreviewResult.TooManyBlocks -> {

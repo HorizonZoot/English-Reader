@@ -18,7 +18,7 @@ sealed interface WholeTranslationSheetState {
     /**
      * 范围选择。
      *
-     * [chapterOption] 为 null 表示当前文章不属于任何书，只提供「当前页面」。
+     * [chapterOption] 为 null 时只提供「当前页面」：文章不属于任何书，或整书预览不可用。
      * [existing] 非 null 表示该范围已有同源可继续任务；主按钮应显示「继续翻译」而非「开始」。
      */
     data class ChoosingScope(

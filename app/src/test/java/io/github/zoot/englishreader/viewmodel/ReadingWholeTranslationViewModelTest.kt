@@ -109,6 +109,142 @@ class ReadingWholeTranslationViewModelTest {
     }
 
     @Test
+    fun openWholeTranslation_otherChapterTooManyBlocks_keepsCurrentScopeStartable() = runTest {
+        stubChapter(ARTICLE_ID, bookId = 7L, siblings = listOf(ARTICLE_ID, OTHER_ID))
+        val chapterScope = WholeTranslationScope.Chapter(7L, listOf(ARTICLE_ID, OTHER_ID))
+        coEvery { fixture.wholeTranslationRepository.preview(chapterScope) } returns
+            WholeTranslationPreviewResult.TooManyBlocks(OTHER_ID, 1_201, 1_200)
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns
+            WholeTranslationStartResult.Started(11L)
+        every { fixture.wholeTranslationRepository.observe(11L) } returns
+            MutableStateFlow(view(11L, WholeTranslationTaskStatus.RUNNING, 0, 1))
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        val state = viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope
+        assertEquals(WholeTranslationScopeChoice.CURRENT_ARTICLE, state.selected)
+        assertEquals(1, state.currentArticleOption.blockCount)
+        assertNull(state.chapterOption)
+        assertFalse(state.isPreviewing)
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) }
+
+        viewModel.selectWholeTranslationScope(WholeTranslationScopeChoice.CHAPTER)
+        assertEquals(state, viewModel.wholeTranslationState.value)
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            fixture.wholeTranslationRepository.start(match<WholeTranslationPreview> {
+                it.scope == WholeTranslationScope.CurrentArticle(ARTICLE_ID)
+            })
+        }
+        assertEquals(11L, (viewModel.wholeTranslationState.value as WholeTranslationSheetState.Tracking).taskId)
+    }
+
+    @Test
+    fun openWholeTranslation_chapterPreviewRejected_keepsCurrentScopeStartable() = runTest {
+        stubChapter(ARTICLE_ID, bookId = 7L, siblings = listOf(ARTICLE_ID, OTHER_ID))
+        coEvery {
+            fixture.wholeTranslationRepository.preview(WholeTranslationScope.Chapter(7L, listOf(ARTICLE_ID, OTHER_ID)))
+        } returns WholeTranslationPreviewResult.Rejected(AiError.NoContent)
+        coEvery { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) } returns
+            WholeTranslationStartResult.Started(11L)
+        every { fixture.wholeTranslationRepository.observe(11L) } returns
+            MutableStateFlow(view(11L, WholeTranslationTaskStatus.RUNNING, 0, 1))
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        val state = viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope
+        assertEquals(WholeTranslationScopeChoice.CURRENT_ARTICLE, state.selected)
+        assertNull(state.chapterOption)
+        assertFalse(state.isPreviewing)
+        viewModel.startWholeTranslation()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) {
+            fixture.wholeTranslationRepository.start(match<WholeTranslationPreview> {
+                it.scope == WholeTranslationScope.CurrentArticle(ARTICLE_ID)
+            })
+        }
+        assertEquals(11L, (viewModel.wholeTranslationState.value as WholeTranslationSheetState.Tracking).taskId)
+    }
+
+    @Test
+    fun selectWholeTranslationMode_selectedChapterBecomesUnavailable_fallsBackToCurrentScope() = runTest {
+        stubChapter(ARTICLE_ID, bookId = 7L, siblings = listOf(ARTICLE_ID, OTHER_ID))
+        coEvery { fixture.articleRepository.getArticleById(OTHER_ID) } returns
+            ArticleEntity(OTHER_ID, "other", "Other.", translation = "其他。")
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+        viewModel.selectWholeTranslationScope(WholeTranslationScopeChoice.CHAPTER)
+        val selected = viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope
+        assertEquals(WholeTranslationScopeChoice.CHAPTER, selected.selected)
+        assertTrue(selected.hasTranslation)
+        val previewGate = CompletableDeferred<WholeTranslationPreviewResult>()
+        coEvery {
+            fixture.wholeTranslationRepository.preview(WholeTranslationScope.Chapter(7L, listOf(ARTICLE_ID, OTHER_ID)))
+        } coAnswers { previewGate.await() }
+
+        viewModel.selectWholeTranslationMode(TranslationSegmentationMode.PRESERVE)
+        advanceUntilIdle()
+        assertTrue((viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope).isPreviewing)
+        assertFalse(previewGate.isCompleted)
+        previewGate.complete(WholeTranslationPreviewResult.TooManyBlocks(OTHER_ID, 1_201, 1_200))
+        advanceUntilIdle()
+
+        val state = viewModel.wholeTranslationState.value as WholeTranslationSheetState.ChoosingScope
+        assertEquals(WholeTranslationScopeChoice.CURRENT_ARTICLE, state.selected)
+        assertNull(state.chapterOption)
+        assertFalse(state.hasTranslation)
+        assertFalse(state.isPreviewing)
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) }
+    }
+
+    @Test
+    fun openWholeTranslation_currentArticleTooManyBlocks_keepsPreserveRecovery() = runTest {
+        stubChapter(ARTICLE_ID, bookId = 7L, siblings = listOf(ARTICLE_ID, OTHER_ID))
+        coEvery { fixture.wholeTranslationRepository.preview(WholeTranslationScope.CurrentArticle(ARTICLE_ID)) } returns
+            WholeTranslationPreviewResult.TooManyBlocks(ARTICLE_ID, 1_201, 1_200)
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        assertEquals(
+            WholeTranslationSheetState.TooManyBlocks(ARTICLE_ID, 1_201, 1_200, canPreserve = true),
+            viewModel.wholeTranslationState.value
+        )
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) }
+    }
+
+    @Test
+    fun openWholeTranslation_currentArticleRejected_preservesError() = runTest {
+        stubChapter(ARTICLE_ID, bookId = 7L, siblings = listOf(ARTICLE_ID, OTHER_ID))
+        coEvery { fixture.wholeTranslationRepository.preview(WholeTranslationScope.CurrentArticle(ARTICLE_ID)) } returns
+            WholeTranslationPreviewResult.Rejected(AiError.NoContent)
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        assertEquals(
+            WholeTranslationSheetState.Rejected(ARTICLE_ID, AiError.NoContent),
+            viewModel.wholeTranslationState.value
+        )
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.start(any<WholeTranslationPreview>()) }
+    }
+
+    @Test
     fun openWholeTranslation_existingResumableTask_skipsChooserAndTracks() = runTest {
         stubStandalone(ARTICLE_ID, "One.")
         val existing = view(taskId = 9L, status = WholeTranslationTaskStatus.PAUSED, translated = 1, total = 3)

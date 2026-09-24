@@ -14,8 +14,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -33,13 +33,31 @@ class TrimmedEspeakDataAndroidTest {
     private val entry = TtsModelCatalog.libritts
     @get:Rule val temporary = TemporaryFolder(context.cacheDir)
 
+    // Supported ABIs can include translated architectures; inspect the installed libraries too.
+    private fun requireNativelyInstalledAbi() {
+        val directory = File(context.applicationInfo.nativeLibraryDir).name
+        val installedAbi = when (directory) {
+            "arm64" -> "arm64-v8a"
+            "x86_64" -> "x86_64"
+            else -> null
+        }
+        assertNotNull(
+            "package ships no arm64-v8a/x86_64 native libraries: " +
+                "${context.applicationInfo.nativeLibraryDir} " +
+                "(device offers ${Build.SUPPORTED_ABIS.joinToString()})",
+            installedAbi
+        )
+        assertEquals(
+            "package runs $installedAbi through ARM translation, not natively; " +
+                "install a debug APK built with ${Build.SUPPORTED_ABIS.first()}",
+            Build.SUPPORTED_ABIS.first(),
+            installedAbi
+        )
+    }
+
     @Test
     fun bundledModel_afterDictionaryTrim_synthesizesEnglishAudio() {
-        // An x86_64 emulator may advertise arm64 translation; require arm64 as its primary ABI.
-        assumeTrue(
-            "Native TTS test requires arm64-v8a as the primary ABI; found ${Build.SUPPORTED_ABIS.joinToString()}",
-            Build.SUPPORTED_ABIS.firstOrNull() == "arm64-v8a"
-        )
+        requireNativelyInstalledAbi()
         val repository = TtsModelRepository(
             temporary.newFolder(), { context.assets.open(it) }, OkHttpClient(), Dispatchers.IO, listOf(entry)
         )

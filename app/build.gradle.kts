@@ -30,10 +30,6 @@ android {
         versionName = "0.1.2-beta"
         testInstrumentationRunner = "io.github.zoot.englishreader.HiltTestRunner"
 
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
-
         ksp {
             arg("room.schemaLocation", "$projectDir/schemas")
         }
@@ -64,7 +60,17 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 模拟器直接使用 x86_64 原生库，避免依赖 ARM 转译。
+            ndk {
+                abiFilters += listOf("arm64-v8a", "x86_64")
+            }
+        }
         release {
+            // 发布包仍然只带 arm64-v8a：x86_64 仅用于本地模拟器调试，不进入分发。
+            ndk {
+                abiFilters += "arm64-v8a"
+            }
             isMinifyEnabled = true
             // 资源压缩依赖代码压缩（isMinifyEnabled 必须为 true），它会移除未被引用的资源。
             // 注意：通过 getIdentifier()/反射在运行时才解析的资源名不在「被引用」之列，会被删掉。

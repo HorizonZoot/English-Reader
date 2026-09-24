@@ -60,7 +60,7 @@ internal class RemoteAiExecutor(
         }
         val config = AiChatRequestConfig(
             baseUrl = profile.baseUrl,
-            modelId = profile.modelId,
+            modelId = profile.modelId.trim(),
             providerTemplate = profile.providerTemplate,
             authStrategy = profile.authStrategy,
             apiKey = profile.apiKey,
@@ -76,18 +76,23 @@ internal class RemoteAiExecutor(
                 null
             }
         )
-        when (val result = transport.complete(
-            config,
-            listOf(AiChatMessage(role = "user", content = probeMessage))
-        )) {
-            is AiChatTransportResult.Content -> AiClientResult.Success(result.text)
-            is AiChatTransportResult.Truncated -> {
-                // 探测刻意只给 1/4 token；非空响应已证明连通，但不能复用这条规则处理正文。
-                val text = result.text
-                if (text.isNullOrBlank()) AiClientResult.Failure(AiError.NoContent)
-                else AiClientResult.Success(text)
+        val models = transport.listModels(config)
+        if (config.modelId !in models) {
+            AiClientResult.Failure(AiError.ModelUnavailable)
+        } else {
+            when (val result = transport.complete(
+                config,
+                listOf(AiChatMessage(role = "user", content = probeMessage))
+            )) {
+                is AiChatTransportResult.Content -> AiClientResult.Success(result.text, models)
+                is AiChatTransportResult.Truncated -> {
+                    // 探测刻意只给 1/4 token；非空响应已证明连通，但正文不能复用此规则。
+                    val text = result.text
+                    if (text.isNullOrBlank()) AiClientResult.Failure(AiError.NoContent)
+                    else AiClientResult.Success(text, models)
+                }
+                AiChatTransportResult.NoContent -> AiClientResult.Failure(AiError.NoContent)
             }
-            AiChatTransportResult.NoContent -> AiClientResult.Failure(AiError.NoContent)
         }
     } catch (cancellation: CancellationException) {
         throw cancellation

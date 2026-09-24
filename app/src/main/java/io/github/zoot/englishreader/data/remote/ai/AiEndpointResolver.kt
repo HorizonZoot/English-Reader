@@ -23,7 +23,11 @@ internal object AiEndpointResolver {
      * 用户粘错了整条请求 URL 或把令牌写进了查询串。静默接受会让令牌进入缓存身份，
      * 也会让 endpoint 归一化结果与真实请求不一致。
      */
-    fun chatCompletionsUrl(baseUrl: String): String {
+    fun chatCompletionsUrl(baseUrl: String): String = endpointUrl(baseUrl, "chat", "completions")
+
+    fun modelsUrl(baseUrl: String): String = endpointUrl(baseUrl, "models")
+
+    private fun endpointUrl(baseUrl: String, vararg path: String): String {
         val parsed = baseUrl.trim().toHttpUrlOrNull()
             ?: throw IllegalArgumentException("Invalid AI base URL")
 
@@ -39,10 +43,8 @@ internal object AiEndpointResolver {
 
         // addPathSegment 会把 base path 的尾斜杠视为空段并复用它，故三种尾部形态
         // （无斜杠 / 有斜杠 / 带端口）都收敛到同一结果。
-        return parsed.newBuilder()
-            .addPathSegment("chat")
-            .addPathSegment("completions")
-            .build()
-            .toString()
+        return parsed.newBuilder().apply {
+            path.forEach { addPathSegment(it) }
+        }.build().toString()
     }
 }

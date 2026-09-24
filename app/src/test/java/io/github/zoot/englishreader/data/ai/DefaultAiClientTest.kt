@@ -352,12 +352,13 @@ class DefaultAiClientTest {
             )
             coEvery { profileRepository.resolveValidatedProfile(eq("p1"), any()) } returns
                 ProfileResolutionResult.Available(connectionProfile())
+            coEvery { transport.listModels(any()) } returns listOf("deepseek-chat")
             coEvery { transport.complete(any(), any()) } returns
                 AiChatTransportResult.Content("ok")
 
             val result = client.testConnection("p1")
 
-            assertEquals(AiClientResult.Success("ok"), result)
+            assertEquals(AiClientResult.Success("ok", listOf("deepseek-chat")), result)
             val config = slot<AiChatRequestConfig>()
             val messages = slot<List<AiChatMessage>>()
             coVerify(exactly = 1) { profileRepository.resolveValidatedProfile(eq("p1"), any()) }
@@ -386,6 +387,7 @@ class DefaultAiClientTest {
             resolutionGate.await()
             ProfileResolutionResult.Available(connectionProfile())
         }
+        coEvery { transport.listModels(any()) } returns listOf("deepseek-chat")
         coEvery { transport.complete(any(), any()) } returns AiChatTransportResult.Content("ok")
 
         val first = async { client.testConnection("p1") }
@@ -394,8 +396,9 @@ class DefaultAiClientTest {
         runCurrent()
         resolutionGate.complete(Unit)
 
-        assertEquals(AiClientResult.Success("ok"), first.await())
-        assertEquals(AiClientResult.Success("ok"), second.await())
+        assertEquals(AiClientResult.Success("ok", listOf("deepseek-chat")), first.await())
+        assertEquals(AiClientResult.Success("ok", listOf("deepseek-chat")), second.await())
+        coVerify(exactly = 1) { transport.listModels(any()) }
         coVerify(exactly = 1) { profileRepository.resolveValidatedProfile(eq("p1"), any()) }
         coVerify(exactly = 1) { transport.complete(any(), any()) }
     }
@@ -434,12 +437,29 @@ class DefaultAiClientTest {
         )
         coEvery { profileRepository.resolveValidatedProfile(eq("p1"), any()) } returns
             ProfileResolutionResult.Available(connectionProfile())
+        coEvery { transport.listModels(any()) } returns listOf("deepseek-chat")
         coEvery { transport.complete(any(), any()) } throws CancellationException("cancelled")
 
         val thrown = runCatching { client.testConnection("p1") }.exceptionOrNull()
 
         assertTrue(thrown is CancellationException)
         assertTrue(registry.inFlightProfileIds.value.isEmpty())
+    }
+
+    @Test
+    fun testConnection_temperatureOverride_usesStoredCredentialWithDraftTemperature() = runTest {
+        coEvery { profileRepository.resolveValidatedProfile(eq("p1"), any()) } returns
+            ProfileResolutionResult.Available(connectionProfile())
+        val captured = slot<ResolvedAiProfile>()
+        coEvery { connectionExecutor.testConnection(capture(captured)) } returns
+            AiClientResult.Success("OK", listOf("deepseek-chat"))
+
+        client.testConnection("p1", temperature = 0.8)
+
+        assertEquals(0.8, captured.captured.temperature, 0.0)
+        assertEquals("secret", captured.captured.apiKey)
+        assertEquals("deepseek-chat", captured.captured.modelId)
+        coVerify(exactly = 1) { profileRepository.resolveValidatedProfile(eq("p1"), any()) }
     }
 
     private fun connectionProfile() = resolvedProfile(modelId = "deepseek-chat").copy(

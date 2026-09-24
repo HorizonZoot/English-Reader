@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.data.remote.ai
 
 import retrofit2.http.Body
 import retrofit2.http.Header
+import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Url
 import retrofit2.Response
@@ -21,6 +22,12 @@ import retrofit2.Response
  * 逐请求状态。
  */
 interface AiChatCompletionApi {
+
+    @GET
+    suspend fun listModels(
+        @Url url: String,
+        @Header("Authorization") authorization: String
+    ): Response<AiModelListResponse>
 
     @POST
     suspend fun createChatCompletion(

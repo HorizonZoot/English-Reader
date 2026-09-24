@@ -127,7 +127,7 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_provider_option_KIMI").performClick()
         composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
         composeTestRule.onNodeWithTag("profile_api_key").performTextInput("replacement-key")
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
     }
 
     @Test
@@ -187,7 +187,7 @@ class AiProfileConfigScreenTest {
     fun unsavedDraft_connectionTestConfirmsFeeAndDoesNotPersistProfile() {
         val harness = harness()
         coEvery { harness.aiClient.testConnectionDraft(any()) } returns
-            AiClientResult.Success("ok")
+            AiClientResult.Success("ok", listOf("deepseek-v4-flash", "other-model"))
         setScreen(harness)
 
         composeTestRule.onNodeWithTag("profile_add_empty").performClick()
@@ -207,6 +207,13 @@ class AiProfileConfigScreenTest {
             .performScrollTo()
             .assertIsDisplayed()
         composeTestRule.onNodeWithText("连接测试成功").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+        composeTestRule.onNodeWithTag("profile_model_dropdown").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("other-model").performClick()
+        composeTestRule.onNodeWithTag("profile_model_id").assertEditableTextEquals("other-model")
+        composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_model_verified").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
     }
 
     @Test
@@ -224,9 +231,12 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithText("确认发送").performClick()
         composeTestRule.waitForIdle()
 
-        composeTestRule.onNodeWithText("认证失败，请检查 API Key")
-            .performScrollTo()
-            .assertIsDisplayed()
+        composeTestRule.onNodeWithTag("profile_api_key_error")
+            .performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("profile_api_key_hidden").performClick()
+        composeTestRule.onNodeWithTag("profile_api_key").assertEditableTextEquals("sk-draft")
+        composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
     }
 
     @Test
@@ -235,7 +245,7 @@ class AiProfileConfigScreenTest {
         val harness = harness()
         coEvery { harness.aiClient.testConnectionDraft(any()) } coAnswers {
             releaseProbe.await()
-            AiClientResult.Success("ok")
+            AiClientResult.Success("ok", listOf("deepseek-v4-flash"))
         }
         setScreen(harness)
 
@@ -262,7 +272,7 @@ class AiProfileConfigScreenTest {
         val harness = harness()
         coEvery { harness.aiClient.testConnectionDraft(any()) } coAnswers {
             releaseProbe.await()
-            AiClientResult.Success("ok")
+            AiClientResult.Success("ok", listOf("deepseek-v4-flash"))
         }
         setScreen(harness)
 
@@ -288,9 +298,9 @@ class AiProfileConfigScreenTest {
         val releaseProbe = CompletableDeferred<Unit>()
         val target = profile("profile-1", "Primary")
         val harness = harness(listOf(target), activeProfileId = target.profileId)
-        coEvery { harness.aiClient.testConnection(target.profileId) } coAnswers {
+        coEvery { harness.aiClient.testConnection(target.profileId, any()) } coAnswers {
             releaseProbe.await()
-            AiClientResult.Success("ok")
+            AiClientResult.Success("ok", listOf("deepseek-v4-flash"))
         }
         setScreen(harness)
 
@@ -319,11 +329,14 @@ class AiProfileConfigScreenTest {
             releaseMutation.await()
             ProfileMutationResult.Success
         }
+        coEvery { harness.aiClient.testConnectionDraft(any()) } returns
+            AiClientResult.Success("ok", listOf("deepseek-v4-flash"))
         setScreen(harness)
 
         composeTestRule.onNodeWithTag("profile_add_empty").performClick()
         composeTestRule.onNodeWithTag("profile_display_name").performTextInput("Primary")
         composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        confirmProbe()
         composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
@@ -337,6 +350,87 @@ class AiProfileConfigScreenTest {
 
         composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
         coVerify(exactly = 1) { harness.repository.createProfile(any(), "sk-draft") }
+    }
+
+    @Test
+    fun testConnection_blankFields_showInlineErrorsWithoutSending() {
+        val harness = harness()
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        for (tag in listOf("profile_display_name", "profile_base_url", "profile_model_id", "profile_temperature")) {
+            composeTestRule.onNodeWithTag(tag).performScrollTo().performTextClearance()
+        }
+        composeTestRule.onNodeWithTag("profile_editor_test_connection").performScrollTo().performClick()
+
+        composeTestRule.onNodeWithText("确认测试连接").assertDoesNotExist()
+        for (tag in listOf("profile_display_name", "profile_base_url", "profile_model_id", "profile_api_key", "profile_temperature")) {
+            composeTestRule.onNodeWithTag("${tag}_error").performScrollTo().assertIsDisplayed()
+        }
+        composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+    }
+
+    @Test
+    fun testConnection_invalidEndpointAndTemperature_blockConfirmationUntilCorrected() {
+        val harness = harness()
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        composeTestRule.onNodeWithTag("profile_base_url").performTextClearance()
+        composeTestRule.onNodeWithTag("profile_base_url").performTextInput("http://example.com")
+        composeTestRule.onNodeWithTag("profile_temperature").performScrollTo().performTextClearance()
+        composeTestRule.onNodeWithTag("profile_temperature").performTextInput("NaN")
+        composeTestRule.onNodeWithTag("profile_editor_test_connection").performScrollTo().performClick()
+
+        composeTestRule.onNodeWithTag("profile_base_url_error").assertExists()
+        composeTestRule.onNodeWithTag("profile_temperature_error").assertExists()
+        composeTestRule.onNodeWithText("确认测试连接").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_base_url").performScrollTo().performTextClearance()
+        composeTestRule.onNodeWithTag("profile_base_url").performTextInput("https://example.com")
+        composeTestRule.onNodeWithTag("profile_temperature").performScrollTo().performTextClearance()
+        composeTestRule.onNodeWithTag("profile_temperature").performTextInput("0.5")
+        composeTestRule.onNodeWithTag("profile_editor_test_connection").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("确认测试连接").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("profile_base_url_error").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_temperature_error").assertDoesNotExist()
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+    }
+
+    @Test
+    fun testConnection_modelUnavailable_marksModelFieldAndKeepsInput() {
+        val harness = harness()
+        coEvery { harness.aiClient.testConnectionDraft(any()) } returns
+            AiClientResult.Failure(io.github.zoot.englishreader.data.ai.AiError.ModelUnavailable)
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        confirmProbe()
+
+        composeTestRule.onNodeWithTag("profile_model_id_error").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("profile_model_id").assertEditableTextEquals("deepseek-v4-flash")
+        composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
+    }
+
+    @Test
+    fun testConnection_successWithoutCatalog_doesNotEnableSaveOrShowVerifiedArrow() {
+        val harness = harness()
+        coEvery { harness.aiClient.testConnectionDraft(any()) } returns AiClientResult.Success("ok")
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        confirmProbe()
+
+        composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_model_verified").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
+        composeTestRule.onNodeWithText("连接测试成功").assertDoesNotExist()
+    }
+
+    private fun confirmProbe() {
+        composeTestRule.onNodeWithTag("profile_editor_test_connection").performScrollTo().performClick()
+        composeTestRule.onNodeWithText("确认发送").performClick()
+        composeTestRule.waitForIdle()
     }
 
     private fun setScreen(harness: Harness) {

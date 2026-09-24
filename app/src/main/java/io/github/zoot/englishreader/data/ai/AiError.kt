@@ -12,6 +12,7 @@ sealed interface AiError {
     data object CredentialMissing : AiError
     data object CredentialStorageUnavailable : AiError
     data object InvalidEndpoint : AiError
+    data object ModelUnavailable : AiError
     data class InputTooLong(val actualChars: Int, val maxChars: Int) : AiError
 
     data class HttpAuth(val status: Int) : AiError
@@ -45,6 +46,7 @@ internal val AiError.categoryName: String
         AiError.CredentialMissing -> "credential_missing"
         AiError.CredentialStorageUnavailable -> "credential_storage_unavailable"
         AiError.InvalidEndpoint -> "invalid_endpoint"
+        AiError.ModelUnavailable -> "model_unavailable"
         is AiError.InputTooLong -> "input_too_long"
         is AiError.HttpAuth -> "http_auth"
         is AiError.HttpNotFound -> "http_not_found"

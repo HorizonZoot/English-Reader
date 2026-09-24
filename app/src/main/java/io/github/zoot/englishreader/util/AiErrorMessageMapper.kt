@@ -16,6 +16,7 @@ fun AiError.toUiMessage(): AiErrorMessage = when (this) {
     AiError.CredentialStorageUnavailable ->
         AiErrorMessage(R.string.settings_ai_error_credential_storage)
     AiError.InvalidEndpoint -> AiErrorMessage(R.string.settings_ai_error_invalid_endpoint)
+    AiError.ModelUnavailable -> AiErrorMessage(R.string.ai_error_model_unavailable)
     is AiError.InputTooLong -> AiErrorMessage(
         resourceId = R.string.ai_explanation_error_input_too_long,
         formatArgs = listOf(actualChars, maxChars)

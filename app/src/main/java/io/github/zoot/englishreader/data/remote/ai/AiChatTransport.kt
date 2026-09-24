@@ -12,6 +12,8 @@ import javax.inject.Inject
  */
 interface AiChatTransport {
 
+    suspend fun listModels(config: AiChatRequestConfig): List<String>
+
     suspend fun complete(
         config: AiChatRequestConfig,
         messages: List<AiChatMessage>
@@ -27,6 +29,17 @@ interface AiChatTransport {
 class RetrofitAiChatTransport @Inject constructor(
     private val api: AiChatCompletionApi
 ) : AiChatTransport {
+
+    override suspend fun listModels(config: AiChatRequestConfig): List<String> {
+        val response = api.listModels(
+            url = AiEndpointResolver.modelsUrl(config.baseUrl),
+            authorization = authorizationHeader(config)
+        )
+        if (response.code() != HTTP_OK) throw HttpException(response)
+        val models = response.body()?.data
+            ?: throw com.squareup.moshi.JsonDataException("Missing model catalog")
+        return models.mapNotNull { it.id?.trim()?.takeIf(String::isNotEmpty) }.distinct().sorted()
+    }
 
     override suspend fun complete(
         config: AiChatRequestConfig,

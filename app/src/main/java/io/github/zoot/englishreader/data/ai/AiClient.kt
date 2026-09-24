@@ -33,6 +33,9 @@ interface AiClient {
     /** 为 [profileId] 发送一次显式、不走缓存、兼容 provider 的有界诊断请求。 */
     suspend fun testConnection(profileId: String): AiClientResult
 
+    /** 使用已保存凭据，但测试当前编辑器的温度，不提前持久化。 */
+    suspend fun testConnection(profileId: String, temperature: Double): AiClientResult
+
     /** 测试编辑器中的草稿，不持久化元数据，也不持久化凭据明文。 */
     suspend fun testConnectionDraft(draft: AiConnectionDraft): AiClientResult
 
@@ -68,8 +71,12 @@ sealed interface AiClientResult {
      *
      * [text] 保证非空且非纯空白（transport 已保证）。
      */
-    data class Success(val text: String) : AiClientResult {
-        override fun toString(): String = "Success(text=[REDACTED])"
+    data class Success(
+        val text: String,
+        val availableModelIds: List<String> = emptyList()
+    ) : AiClientResult {
+        override fun toString(): String =
+            "Success(text=[REDACTED], modelCount=${availableModelIds.size})"
     }
 
     /**

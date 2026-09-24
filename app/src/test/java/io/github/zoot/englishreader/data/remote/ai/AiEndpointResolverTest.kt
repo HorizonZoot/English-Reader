@@ -40,6 +40,22 @@ class AiEndpointResolverTest {
     }
 
     @Test
+    fun modelsUrl_preservesPrefixAndRejectsUnsafeEndpoints() {
+        assertEquals(
+            "https://example.com:8443/proxy/v1/models",
+            AiEndpointResolver.modelsUrl(" https://example.com:8443/proxy/v1/ ")
+        )
+        for (input in listOf(
+            "http://example.com/v1", "https://user:secret@example.com",
+            "https://example.com?key=secret", "https://example.com#fragment", "not a url"
+        )) {
+            assertThrows(IllegalArgumentException::class.java) {
+                AiEndpointResolver.modelsUrl(input)
+            }
+        }
+    }
+
+    @Test
     fun `root path vs v1 path must differ`() {
         val root = AiEndpointResolver.chatCompletionsUrl("https://example.com/")
         val v1 = AiEndpointResolver.chatCompletionsUrl("https://example.com/v1/")

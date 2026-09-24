@@ -20,6 +20,8 @@
 -keepclasseswithmembers class * {
     @retrofit2.http.* <methods>;
 }
+# R8 full mode must retain suspend return types for Retrofit reflection.
+-keep,allowobfuscation,allowshrinking class kotlin.coroutines.Continuation
 
 # Keep Moshi
 -keep class com.squareup.moshi.** { *; }

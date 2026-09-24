@@ -63,7 +63,16 @@ internal class DefaultAiClient(
         }
     }
 
-    override suspend fun testConnection(profileId: String): AiClientResult {
+    override suspend fun testConnection(profileId: String): AiClientResult =
+        testSavedConnection(profileId, temperature = null)
+
+    override suspend fun testConnection(profileId: String, temperature: Double): AiClientResult =
+        testSavedConnection(profileId, temperature)
+
+    private suspend fun testSavedConnection(profileId: String, temperature: Double?): AiClientResult {
+        if (temperature != null && !temperature.isFinite()) {
+            return AiClientResult.Failure(AiError.ProfileNotFound)
+        }
         if (profileId.isBlank()) return AiClientResult.Failure(AiError.ProfileNotFound)
         return connectionRegistry.run(profileId) {
             try {
@@ -76,7 +85,9 @@ internal class DefaultAiClient(
                         errorMapper.mapProfileResolution(result)!!
                     )
                 }
-                connectionExecutor.testConnection(resolved)
+                connectionExecutor.testConnection(
+                    if (temperature == null) resolved else resolved.copy(temperature = temperature)
+                )
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Exception) {

@@ -110,6 +110,7 @@ enum class TranslationFailureReason(
             AiError.CredentialMissing,
             AiError.CredentialStorageUnavailable,
             AiError.InvalidEndpoint,
+            AiError.ModelUnavailable,
             is AiError.HttpAuth,
             is AiError.HttpNotFound -> CONFIGURATION
 

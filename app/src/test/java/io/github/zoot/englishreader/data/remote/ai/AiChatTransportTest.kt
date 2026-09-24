@@ -302,6 +302,87 @@ class AiChatTransportTest {
         assertTrue(callCancelled.await(5, TimeUnit.SECONDS))
     }
 
+    @Test
+    fun listModels_providerEndpoints_preservePathAndSendBearerWithoutBody() = runTest {
+        val cases = listOf(
+            AiProviderTemplate.DEEPSEEK to "",
+            AiProviderTemplate.KIMI to "/v1",
+            AiProviderTemplate.ZHIPU to "/api/paas/v4/",
+            AiProviderTemplate.OPENAI_COMPATIBLE to "/proxy/openai/v1"
+        )
+        for ((provider, prefix) in cases) {
+            server.enqueue(MockResponse().setBody(
+                """{"data":[{"id":" model-a "},{"id":"model-a"},{"id":""},{"id":"model-b"}]}"""
+            ))
+
+            val catalog = transport.listModels(config(provider, serverUrl(prefix), apiKey = "sk-models"))
+            val request = server.awaitRequest()
+
+            assertEquals(listOf("model-a", "model-b"), catalog)
+            assertEquals("${prefix.trimEnd('/')}/models", request.path)
+            assertEquals("GET", request.method)
+            assertEquals("Bearer sk-models", request.getHeader("Authorization"))
+            assertEquals(0L, request.bodySize)
+        }
+    }
+
+    @Test
+    fun listModels_missingOrMalformedData_isNotASuccessfulCatalog() = runTest {
+        for (body in listOf("{}", """{"data":null}""", "<html>secret</html>")) {
+            server.enqueue(MockResponse().setBody(body))
+
+            val thrown = runCatching {
+                transport.listModels(config(AiProviderTemplate.DEEPSEEK, serverUrl("")))
+            }.exceptionOrNull()
+
+            assertTrue(thrown is Exception)
+            assertEquals(AiError.MalformedResponse, AiErrorMapper(isOnline = { true }).map(thrown as Exception))
+        }
+    }
+
+    @Test
+    fun listModels_httpErrors_preserveSafeClassification() = runTest {
+        for ((status, error) in listOf(
+            401 to AiError.HttpAuth(401),
+            404 to AiError.HttpNotFound(),
+            201 to AiError.UnexpectedHttp(201)
+        )) {
+            server.enqueue(MockResponse().setResponseCode(status)
+                .setBody("""{"data":[],"detail":"secret-response"}"""))
+
+            val thrown = runCatching {
+                transport.listModels(config(AiProviderTemplate.DEEPSEEK, serverUrl("")))
+            }.exceptionOrNull()
+
+            assertTrue(thrown is Exception)
+            assertEquals(error, AiErrorMapper(isOnline = { true }).map(thrown as Exception))
+            assertFalse(thrown.toString().contains("secret-response"))
+        }
+    }
+
+    @Test
+    fun listModels_cancellation_cancelsUnderlyingCall() = runTest {
+        val cancelled = CountDownLatch(1)
+        val client = fixture.client.newBuilder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .eventListener(object : EventListener() {
+                override fun canceled(call: Call) {
+                    cancelled.countDown()
+                }
+            }).build()
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val job = launch {
+            transportFor(client).listModels(config(AiProviderTemplate.DEEPSEEK, serverUrl("")))
+        }
+        try {
+            runCurrent()
+            server.awaitRequest()
+        } finally {
+            job.cancelAndJoin()
+        }
+        assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+    }
+
     // ---- 脱敏 ----
 
     @Test
@@ -323,6 +404,9 @@ class AiChatTransportTest {
         assertFalse(AiChatRequestMessageDto("user", sentence).toString().contains(sentence))
         assertFalse(AiChatResponseMessageDto("assistant", sentence).toString().contains(sentence))
         assertFalse(AiChatTransportResult.Content(sentence).toString().contains(sentence))
+        assertFalse(AiModelDto("private-model").toString().contains("private-model"))
+        assertFalse(AiModelListResponse(listOf(AiModelDto("private-model")))
+            .toString().contains("private-model"))
     }
 
     // ---- 辅助方法 ----

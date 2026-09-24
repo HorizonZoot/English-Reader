@@ -7,6 +7,10 @@ import io.github.zoot.englishreader.data.remote.ai.AiChatRequestConfig
 import io.github.zoot.englishreader.data.remote.ai.AiChatTransport
 import io.github.zoot.englishreader.data.remote.ai.AiChatTransportResult
 import io.github.zoot.englishreader.data.remote.ai.AiThinkingMode
+import com.squareup.moshi.JsonDataException
+import retrofit2.HttpException
+import retrofit2.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
@@ -51,8 +55,9 @@ class RemoteAiExecutorTest {
 
     @Test
     fun testConnection_truncatedProbe_acceptsOnlyNonBlankContent() = runTest {
+        coEvery { transport.listModels(any()) } returns listOf("deepseek-v4-flash")
         val cases = listOf(
-            "OK" to AiClientResult.Success("OK"),
+            "OK" to AiClientResult.Success("OK", listOf("deepseek-v4-flash")),
             "   " to AiClientResult.Failure(AiError.NoContent),
             null to AiClientResult.Failure(AiError.NoContent)
         )
@@ -139,11 +144,12 @@ class RemoteAiExecutorTest {
 
     @Test
     fun testConnection_deepSeek_disablesThinkingAndUsesFourTokenAcknowledgement() = runTest {
+        coEvery { transport.listModels(any()) } returns listOf("deepseek-v4-flash")
         coEvery { transport.complete(any(), any()) } returns AiChatTransportResult.Content("OK")
 
         val result = executor.testConnection(request().request.profile)
 
-        assertEquals(AiClientResult.Success("OK"), result)
+        assertEquals(AiClientResult.Success("OK", listOf("deepseek-v4-flash")), result)
         val configSlot = slot<AiChatRequestConfig>()
         val messagesSlot = slot<List<AiChatMessage>>()
         coVerify(exactly = 1) { transport.complete(capture(configSlot), capture(messagesSlot)) }
@@ -167,6 +173,7 @@ class RemoteAiExecutorTest {
 
     @Test
     fun testConnection_nonDeepSeekProfile_keepsOneTokenProbeWithoutThinkingControl() = runTest {
+        coEvery { transport.listModels(any()) } returns listOf("glm-5.2")
         coEvery { transport.complete(any(), any()) } returns AiChatTransportResult.Content("OK")
 
         val profile = request().request.profile.copy(
@@ -176,13 +183,63 @@ class RemoteAiExecutorTest {
         )
         val result = executor.testConnection(profile)
 
-        assertEquals(AiClientResult.Success("OK"), result)
+        assertEquals(AiClientResult.Success("OK", listOf("glm-5.2")), result)
         val configSlot = slot<AiChatRequestConfig>()
         val messagesSlot = slot<List<AiChatMessage>>()
         coVerify(exactly = 1) { transport.complete(capture(configSlot), capture(messagesSlot)) }
         assertEquals(1, configSlot.captured.maxTokens)
         assertEquals(null, configSlot.captured.thinkingMode)
         assertEquals("Connection test", messagesSlot.captured.single().content)
+    }
+
+    @Test
+    fun testConnection_modelMissing_doesNotSendPaidProbe() = runTest {
+        for (ids in listOf(emptyList(), listOf("another-model"), listOf("DEEPSEEK-V4-FLASH"))) {
+            coEvery { transport.listModels(any()) } returns ids
+
+            assertEquals(
+                AiClientResult.Failure(AiError.ModelUnavailable),
+                executor.testConnection(request().request.profile)
+            )
+        }
+        coVerify(exactly = 0) { transport.complete(any(), any()) }
+    }
+
+    @Test
+    fun testConnection_catalogFailure_preservesTypedErrorWithoutSendingProbe() = runTest {
+        val cases = listOf(
+            HttpException(Response.error<Any>(401, "unauthorized".toResponseBody())) to AiError.HttpAuth(401),
+            HttpException(Response.error<Any>(404, "not found".toResponseBody())) to AiError.HttpNotFound(),
+            JsonDataException("malformed") to AiError.MalformedResponse
+        )
+        for ((exception, error) in cases) {
+            coEvery { transport.listModels(any()) } throws exception
+
+            assertEquals(AiClientResult.Failure(error), executor.testConnection(request().request.profile))
+        }
+        coVerify(exactly = 0) { transport.complete(any(), any()) }
+    }
+
+    @Test
+    fun testConnection_catalogCancellation_propagatesWithoutSendingProbe() = runTest {
+        coEvery { transport.listModels(any()) } throws CancellationException("cancelled")
+
+        val thrown = runCatching { executor.testConnection(request().request.profile) }.exceptionOrNull()
+
+        assertTrue(thrown is CancellationException)
+        coVerify(exactly = 0) { transport.complete(any(), any()) }
+    }
+
+    @Test
+    fun testConnection_catalogFoundButProbeFailed_doesNotReturnVerifiedModels() = runTest {
+        coEvery { transport.listModels(any()) } returns listOf("deepseek-v4-flash")
+        coEvery { transport.complete(any(), any()) } throws
+            HttpException(Response.error<Any>(403, "forbidden".toResponseBody()))
+
+        assertEquals(
+            AiClientResult.Failure(AiError.HttpAuth(403)),
+            executor.testConnection(request().request.profile)
+        )
     }
 
     // ---- 辅助方法 ----

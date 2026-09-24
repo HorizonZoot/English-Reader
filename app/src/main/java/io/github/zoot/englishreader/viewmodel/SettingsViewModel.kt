@@ -158,10 +158,11 @@ class SettingsViewModel @Inject constructor(
     val profileMutationInFlight: StateFlow<Boolean> =
         _profileMutationInFlight.asStateFlow()
 
-    fun testConnection(profileId: String, requestId: String) {
+    fun testConnection(profileId: String, requestId: String, temperature: Double? = null) {
         viewModelScope.launch {
             val result = try {
-                aiClient.testConnection(profileId)
+                if (temperature == null) aiClient.testConnection(profileId)
+                else aiClient.testConnection(profileId, temperature)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             }

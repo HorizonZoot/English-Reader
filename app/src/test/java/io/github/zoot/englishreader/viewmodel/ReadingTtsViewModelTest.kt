@@ -23,9 +23,12 @@ import io.mockk.every
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.job
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -108,6 +111,70 @@ class ReadingTtsViewModelTest {
 
         verify(exactly = 1) { player.prepareReading(chosen, false) }
         assertTrue(calls.isEmpty())
+    }
+
+    @Test
+    fun selectSentence_pendingWarmup_preservesPreparationBeforePlayback() = runTest {
+        val chosen = TtsReadingSettings("model/libritts_r-medium-int8/100", 1.4f)
+        val readStarted = CompletableDeferred<Job>()
+        val settings = CompletableDeferred<TtsReadingSettings>()
+        every { preferences.ttsReadingSettings } returns flow {
+            readStarted.complete(currentCoroutineContext().job)
+            emit(settings.await())
+        }
+        val vm = loadedViewModel()
+        assertTrue(readStarted.isCompleted)
+        val warmup = readStarted.await()
+
+        try {
+            assertTrue(warmup.isActive)
+            vm.selectSentence(1, 0, first)
+            vm.selectSentence(1, 1, second)
+            runCurrent()
+            assertTrue("Selecting a sentence must keep the pending silent preparation", warmup.isActive)
+
+            settings.complete(chosen)
+            runCurrent()
+            verify(exactly = 1) { player.prepareReading(chosen, false) }
+            assertTrue(calls.isEmpty())
+
+            vm.playSelectedSentence()
+            runCurrent()
+            assertEquals(second.text, calls.single().text)
+        } finally {
+            settings.complete(chosen)
+            vm.releaseTts()
+            runCurrent()
+        }
+    }
+
+    @Test
+    fun stopAudio_pendingWarmup_cancelsPreparationWithoutStartingSpeech() = runTest {
+        val readStarted = CompletableDeferred<Job>()
+        val settings = CompletableDeferred<TtsReadingSettings>()
+        every { preferences.ttsReadingSettings } returns flow {
+            readStarted.complete(currentCoroutineContext().job)
+            emit(settings.await())
+        }
+        val vm = loadedViewModel()
+        assertTrue(readStarted.isCompleted)
+        val warmup = readStarted.await()
+
+        try {
+            assertTrue(warmup.isActive)
+            vm.stopAudio()
+            runCurrent()
+            assertTrue(warmup.isCancelled)
+
+            settings.complete(TtsReadingSettings())
+            runCurrent()
+            verify(exactly = 0) { player.prepareReading(any(), any()) }
+            assertTrue(calls.isEmpty())
+        } finally {
+            settings.complete(TtsReadingSettings())
+            vm.releaseTts()
+            runCurrent()
+        }
     }
 
     @Test

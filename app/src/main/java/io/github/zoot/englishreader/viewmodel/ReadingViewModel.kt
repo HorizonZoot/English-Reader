@@ -381,6 +381,7 @@ class ReadingViewModel @Inject constructor(
     private var ttsPreparationJob: Job? = null
     private var ttsRefreshJob: Job? = null
     private var ttsWarmupJob: Job? = null
+    private var ttsWarmupGeneration = 0L
     private var ttsSessionActive = true
     private var activeTtsUtterance: String? = null
     private var ttsSentences = emptyList<SpeechSentence>()
@@ -1386,14 +1387,14 @@ class ReadingViewModel @Inject constructor(
     private fun prepareReadingVoice() {
         val articleId = _article.value?.id ?: return
         if (!ttsSessionActive || _isLoadingArticle.value || articleId != requestedArticleId) return
+        val generation = ++ttsWarmupGeneration
         ttsWarmupJob?.cancel()
-        val generation = ttsGeneration
         ttsWarmupJob = viewModelScope.launch {
             try {
                 voicePreferenceWriteJob?.join()
                 val settings = settingsPreferences.ttsReadingSettings.first()
                 val allowed = settingsPreferences.allowNetworkTts.first()
-                if (generation == ttsGeneration && ttsSessionActive &&
+                if (generation == ttsWarmupGeneration && ttsSessionActive &&
                     articleId == requestedArticleId && articleId == _article.value?.id && !_isLoadingArticle.value
                 ) {
                     ttsPlayer.prepareReading(settings, allowed)
@@ -1883,8 +1884,11 @@ class ReadingViewModel @Inject constructor(
         ttsPreparationJob = null
         ttsRefreshJob?.cancel()
         ttsRefreshJob = null
-        ttsWarmupJob?.cancel()
-        ttsWarmupJob = null
+        if (!preserveTtsPreparation) {
+            ttsWarmupGeneration++
+            ttsWarmupJob?.cancel()
+            ttsWarmupJob = null
+        }
         activeTtsUtterance = null
         sentenceRequest = null
         _ttsPositionTarget.value = null

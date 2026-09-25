@@ -65,6 +65,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -92,8 +93,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.zoot.englishreader.R
-import io.github.zoot.englishreader.data.ai.AI_DRAFT_CONNECTION_TEST_ID
-import io.github.zoot.englishreader.data.ai.AiClientResult
+import io.github.zoot.englishreader.data.ai.AiModelDiscoveryResult
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.local.AiProviderProfile
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
@@ -102,16 +102,10 @@ import io.github.zoot.englishreader.util.toUiMessage
 import io.github.zoot.englishreader.viewmodel.AiProfileValidation
 import io.github.zoot.englishreader.viewmodel.ProfileActionResult
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
-import java.util.UUID
 
 private val ProfileCardShape = RoundedCornerShape(16.dp)
 private val ProfileControlShape = RoundedCornerShape(12.dp)
 private val ProfileEditorShape = RoundedCornerShape(24.dp)
-
-private data class PendingConnectionTest(
-    val requestId: String,
-    val profileId: String
-)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -121,8 +115,7 @@ fun AiProfileConfigScreen(
 ) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val activeProfileId by viewModel.activeProfileId.collectAsStateWithLifecycle()
-    val inFlightIds by viewModel.connectionTestInFlightProfileIds.collectAsStateWithLifecycle()
-    val draftTestInFlight by viewModel.draftConnectionTestInFlight.collectAsStateWithLifecycle()
+    val discovery by viewModel.modelDiscovery.collectAsStateWithLifecycle()
     val profileMutationInFlight by viewModel.profileMutationInFlight.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
@@ -141,21 +134,20 @@ fun AiProfileConfigScreen(
     var apiKey by remember { mutableStateOf("") }
     var apiKeyVisible by remember { mutableStateOf(false) }
     var temperature by remember { mutableStateOf("0.2") }
-    var editorConnectionResult by remember { mutableStateOf<AiClientResult?>(null) }
-    var validationAttempted by remember { mutableStateOf(false) }
-    val pendingConnectionTest = remember {
-        mutableStateOf<PendingConnectionTest?>(null)
-    }
+    var discoveryValidationAttempted by remember { mutableStateOf(false) }
+    var saveValidationAttempted by remember { mutableStateOf(false) }
 
-    fun invalidateConnectionTestResult() {
-        pendingConnectionTest.value = null
-        editorConnectionResult = null
+    fun invalidateConnectionTestResult() = viewModel.invalidateModelDiscovery()
+
+    DisposableEffect(viewModel) {
+        onDispose { viewModel.invalidateModelDiscovery() }
     }
 
     fun openEditor(profile: AiProviderProfile?) {
         editingProfile = profile
         displayName = profile?.displayName ?: context.getString(R.string.settings_provider_deepseek)
-        validationAttempted = false
+        discoveryValidationAttempted = false
+        saveValidationAttempted = false
         providerTemplate = profile?.providerTemplate ?: AiProviderTemplate.DEEPSEEK
         baseUrl = profile?.baseUrl
             ?: AiProviderTemplate.DEEPSEEK.defaultBaseUrl.orEmpty()
@@ -164,8 +156,7 @@ fun AiProfileConfigScreen(
         apiKey = ""
         apiKeyVisible = false
         temperature = profile?.temperature?.toString() ?: "0.2"
-        editorConnectionResult = null
-        pendingConnectionTest.value = null
+        invalidateConnectionTestResult()
         editorOpen = true
     }
 
@@ -175,8 +166,7 @@ fun AiProfileConfigScreen(
         editingProfile = null
         apiKey = ""
         apiKeyVisible = false
-        editorConnectionResult = null
-        pendingConnectionTest.value = null
+        invalidateConnectionTestResult()
     }
 
     LaunchedEffect(Unit) {
@@ -195,29 +185,30 @@ fun AiProfileConfigScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
-        viewModel.connectionTestEvents.collect { event ->
-            val pending = pendingConnectionTest.value
-            if (pending?.requestId == event.requestId && pending.profileId == event.profileId) {
-                editorConnectionResult = event.result
-            }
-        }
-    }
-
     val normalizedTemperature = temperature.trim().toDoubleOrNull()
     val identityChanged = editingProfile?.let { profile ->
         profile.providerTemplate != providerTemplate ||
             profile.baseUrl.trim() != baseUrl.trim() ||
             profile.modelId.trim() != modelId.trim()
     } ?: false
-    val canTestSavedProfile = editingProfile != null && !identityChanged && apiKey.isBlank()
-    val validation = AiProfileValidation.validate(
-        displayName, baseUrl, modelId, apiKey, temperature, canTestSavedProfile
+    val connectionChanged = editingProfile?.let { profile ->
+        profile.providerTemplate != providerTemplate || profile.baseUrl.trim() != baseUrl.trim()
+    } ?: false
+    val canDiscoverWithSavedKey = editingProfile != null && !connectionChanged && apiKey.isBlank()
+    val saveValidation = AiProfileValidation.validate(
+        displayName, baseUrl, modelId, apiKey, temperature,
+        canKeepSavedKey = editingProfile != null && !identityChanged
     )
-    val verifiedModels = (editorConnectionResult as? AiClientResult.Success)
-        ?.availableModelIds.orEmpty()
-    val testing = draftTestInFlight || editingProfile?.profileId in inFlightIds
-    val saveEnabled = validation.valid && modelId.trim() in verifiedModels &&
+    val discoveryValidation = AiProfileValidation.validateDiscovery(
+        baseUrl, apiKey, canDiscoverWithSavedKey
+    )
+    val validation = when {
+        saveValidationAttempted -> saveValidation
+        discoveryValidationAttempted -> discoveryValidation
+        else -> AiProfileValidation(false, false, false, false, false)
+    }
+    val testing = discovery.loading
+    val saveEnabled = discovery.result is AiModelDiscoveryResult.Success &&
         !profileMutationInFlight && !testing
 
     Scaffold(
@@ -280,10 +271,7 @@ fun AiProfileConfigScreen(
                             invalidateConnectionTestResult()
                         },
                         modelId = modelId,
-                        onModelIdChange = {
-                            modelId = it
-                            invalidateConnectionTestResult()
-                        },
+                        onModelIdChange = { modelId = it },
                         apiKey = apiKey,
                         onApiKeyChange = {
                             apiKey = it
@@ -292,55 +280,28 @@ fun AiProfileConfigScreen(
                         apiKeyVisible = apiKeyVisible,
                         onToggleApiKeyVisibility = { apiKeyVisible = !apiKeyVisible },
                         temperature = temperature,
-                        onTemperatureChange = {
-                            temperature = it
-                            invalidateConnectionTestResult()
-                        },
+                        onTemperatureChange = { temperature = it },
                         identityChanged = identityChanged,
                         testing = testing,
-                        connectionResult = editorConnectionResult,
+                        connectionResult = discovery.result,
                         validation = validation,
-                        validationAttempted = validationAttempted,
                         onValidate = {
-                            validationAttempted = true
-                            validation.valid
+                            discoveryValidationAttempted = true
+                            discoveryValidation.valid
                         },
                         saveEnabled = saveEnabled,
                         mutationInFlight = profileMutationInFlight,
                         onTest = {
-                            editorConnectionResult = null
-                            val previousPending = pendingConnectionTest.value
-                            val requestId = UUID.randomUUID().toString()
-                            val profileId = if (canTestSavedProfile) {
-                                requireNotNull(editingProfile).profileId
-                            } else AI_DRAFT_CONNECTION_TEST_ID
-                            pendingConnectionTest.value = PendingConnectionTest(
-                                requestId = requestId,
-                                profileId = profileId
+                            viewModel.discoverModels(
+                                savedProfileId = editingProfile?.profileId.takeIf { canDiscoverWithSavedKey },
+                                baseUrl = baseUrl,
+                                apiKey = apiKey
                             )
-                            if (canTestSavedProfile) {
-                                editingProfile?.let {
-                                    viewModel.testConnection(
-                                        it.profileId, requestId, normalizedTemperature
-                                    )
-                                }
-                            } else {
-                                val accepted = viewModel.testConnectionDraft(
-                                    requestId = requestId,
-                                    providerTemplate = providerTemplate,
-                                    baseUrl = baseUrl,
-                                    modelId = modelId,
-                                    apiKey = apiKey,
-                                    temperatureInput = temperature
-                                )
-                                if (!accepted) {
-                                    pendingConnectionTest.value = previousPending
-                                }
-                            }
                         },
                         onSave = {
+                            saveValidationAttempted = true
                             val value = normalizedTemperature
-                            if (value != null) {
+                            if (saveValidation.valid && value != null) {
                                 editingProfile?.let { profile ->
                                     viewModel.updateProfile(
                                         profileId = profile.profileId,
@@ -626,9 +587,8 @@ private fun ProfileEditor(
     onTemperatureChange: (String) -> Unit,
     identityChanged: Boolean,
     testing: Boolean,
-    connectionResult: AiClientResult?,
+    connectionResult: AiModelDiscoveryResult?,
     validation: AiProfileValidation,
-    validationAttempted: Boolean,
     onValidate: () -> Boolean,
     saveEnabled: Boolean,
     mutationInFlight: Boolean,
@@ -636,33 +596,34 @@ private fun ProfileEditor(
     onSave: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val remoteError = (connectionResult as? AiClientResult.Failure)?.error
-    val models = (connectionResult as? AiClientResult.Success)?.availableModelIds.orEmpty()
+    val remoteError = (connectionResult as? AiModelDiscoveryResult.Failure)?.error
+    val models = (connectionResult as? AiModelDiscoveryResult.Success)?.modelIds.orEmpty()
+    val discovered = models.isNotEmpty()
     val verified = modelId.trim() in models
     val successColor = if (MaterialTheme.colorScheme.surface.luminance() > 0.5f) {
         Color(0xFF137D47)
     } else Color(0xFF30D580)
-    val nameError = if (validationAttempted && validation.nameRequired) {
+    val nameError = if (validation.nameRequired) {
         R.string.settings_profile_name_required
     } else null
     val endpointError = when {
-        validationAttempted && validation.endpointInvalid -> R.string.settings_profile_endpoint_invalid
+        validation.endpointInvalid -> R.string.settings_profile_endpoint_invalid
         remoteError == AiError.InvalidEndpoint -> R.string.settings_profile_endpoint_invalid
         remoteError is AiError.HttpNotFound -> R.string.settings_ai_error_not_found
         else -> null
     }
     val modelError = when {
-        validationAttempted && validation.modelRequired -> R.string.settings_profile_model_required
+        validation.modelRequired -> R.string.settings_profile_model_required
         remoteError == AiError.ModelUnavailable -> R.string.ai_error_model_unavailable
         else -> null
     }
     val keyError = when {
-        validationAttempted && validation.keyRequired -> R.string.settings_profile_key_required
+        validation.keyRequired -> R.string.settings_profile_key_required
         remoteError == AiError.CredentialMissing -> R.string.settings_ai_error_credential_missing
         remoteError is AiError.HttpAuth -> R.string.settings_profile_key_rejected
         else -> null
     }
-    val temperatureError = if (validationAttempted && validation.temperatureInvalid) {
+    val temperatureError = if (validation.temperatureInvalid) {
         R.string.settings_profile_temperature_invalid
     } else null
     Column(
@@ -754,18 +715,17 @@ private fun ProfileEditor(
             error = nameError
         )
         ProfileSectionLabel(R.string.settings_profile_connection_section)
-        Surface(shape = ProfileCardShape, color = profileFieldBackground()) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            ProfileInputField(
+                value = baseUrl,
+                onValueChange = onBaseUrlChange,
+                label = R.string.settings_profile_base_url,
+                tag = "profile_base_url",
+                enabled = !mutationInFlight,
+                error = endpointError,
+                keyboardType = KeyboardType.Uri
+            )
             Column {
-                ProfileInputField(
-                    value = baseUrl,
-                    onValueChange = onBaseUrlChange,
-                    label = R.string.settings_profile_base_url,
-                    tag = "profile_base_url",
-                    enabled = !mutationInFlight,
-                    error = endpointError,
-                    keyboardType = KeyboardType.Uri
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
                 ProfileInputField(
                     value = modelId,
                     onValueChange = onModelIdChange,
@@ -773,7 +733,7 @@ private fun ProfileEditor(
                     tag = "profile_model_id",
                     enabled = !mutationInFlight,
                     error = modelError,
-                    trailingIcon = if (verified) {
+                    trailingIcon = if (discovered) {
                         {
                             var expanded by remember { mutableStateOf(false) }
                             Box {
@@ -807,52 +767,61 @@ private fun ProfileEditor(
                         }
                     } else null
                 )
-                if (verified) {
+                if (discovered && modelId.isNotBlank()) {
                     Row(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                             .testTag("profile_model_verified"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(Icons.Outlined.CheckCircle, null, Modifier.size(16.dp), tint = successColor)
+                        if (verified) {
+                            Icon(Icons.Outlined.CheckCircle, null, Modifier.size(16.dp), tint = successColor)
+                        }
                         Text(
-                            stringResource(R.string.settings_profile_models_verified),
+                            stringResource(
+                                if (verified) R.string.settings_profile_models_verified
+                                else R.string.settings_profile_model_unlisted
+                            ),
                             style = MaterialTheme.typography.bodySmall,
-                            color = successColor
+                            color = if (verified) successColor else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
-                ProfileInputField(
-                    value = apiKey,
-                    onValueChange = onApiKeyChange,
-                    label = R.string.settings_api_key,
-                    tag = "profile_api_key",
-                    enabled = !mutationInFlight,
-                    error = keyError,
-                    keyboardType = KeyboardType.Password,
-                    visualTransformation = if (apiKeyVisible) VisualTransformation.None
-                    else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(
-                            onClick = onToggleApiKeyVisibility,
-                            enabled = !mutationInFlight,
-                            modifier = Modifier.testTag(
-                                if (apiKeyVisible) "profile_api_key_visible" else "profile_api_key_hidden"
-                            )
-                        ) {
-                            Icon(
-                                if (apiKeyVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                contentDescription = stringResource(
-                                    if (apiKeyVisible) R.string.settings_api_key_hide
-                                    else R.string.settings_api_key_show
-                                )
-                            )
-                        }
-                    }
-                )
             }
+            ProfileInputField(
+                value = apiKey,
+                onValueChange = onApiKeyChange,
+                label = R.string.settings_api_key,
+                tag = "profile_api_key",
+                enabled = !mutationInFlight,
+                error = keyError,
+                keyboardType = KeyboardType.Password,
+                visualTransformation = if (apiKeyVisible) VisualTransformation.None
+                else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(
+                        onClick = onToggleApiKeyVisibility,
+                        enabled = !mutationInFlight,
+                        modifier = Modifier.testTag(
+                            if (apiKeyVisible) "profile_api_key_visible" else "profile_api_key_hidden"
+                        )
+                    ) {
+                        Icon(
+                            if (apiKeyVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                            contentDescription = stringResource(
+                                if (apiKeyVisible) R.string.settings_api_key_hide
+                                else R.string.settings_api_key_show
+                            )
+                        )
+                    }
+                }
+            )
         }
+        Text(
+            stringResource(R.string.settings_profile_models_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         if (editing) {
             Text(
                 stringResource(
@@ -879,20 +848,31 @@ private fun ProfileEditor(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         AiProfileDisclosure()
-        ProfileConnectionTestControl(
-            enabled = !mutationInFlight,
-            testing = testing,
-            onConfirmed = onTest,
-            onValidate = onValidate,
-            modifier = Modifier.fillMaxWidth().testTag("profile_editor_test_connection")
-        )
+        Button(
+            onClick = { if (onValidate()) onTest() },
+            enabled = !mutationInFlight && !testing,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                .testTag("profile_editor_test_connection"),
+            shape = ProfileControlShape,
+            colors = ButtonDefaults.buttonColors(containerColor = settingsAccentColor())
+        ) {
+            if (testing) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.size(8.dp))
+            }
+            Text(stringResource(
+                if (testing) R.string.settings_profile_models_loading
+                else R.string.settings_ai_connection_test
+            ))
+        }
         connectionResult?.let { result ->
             val message = when (result) {
-                is AiClientResult.Success -> stringResource(
-                    if (verified) R.string.settings_ai_connection_test_success
-                    else R.string.ai_error_model_unavailable
+                is AiModelDiscoveryResult.Success -> stringResource(
+                    R.string.settings_profile_models_loaded, result.modelIds.size
                 )
-                is AiClientResult.Failure -> result.error.toUiMessage().let { mapped ->
+                is AiModelDiscoveryResult.Failure -> if (result.error == AiError.NoContent) {
+                    stringResource(R.string.settings_profile_models_empty)
+                } else result.error.toUiMessage().let { mapped ->
                     stringResource(mapped.resourceId, *mapped.formatArgs.toTypedArray())
                 }
             }
@@ -900,7 +880,7 @@ private fun ProfileEditor(
                 text = message,
                 modifier = Modifier.fillMaxWidth().testTag("profile_editor_test_result")
                     .semantics { liveRegion = LiveRegionMode.Polite },
-                color = if (verified) {
+                color = if (discovered) {
                     successColor
                 } else {
                     MaterialTheme.colorScheme.error

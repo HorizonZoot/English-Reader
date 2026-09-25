@@ -9,6 +9,8 @@ import io.github.zoot.englishreader.data.ai.AiClientResult
 import io.github.zoot.englishreader.data.ai.AiConnectionDraft
 import io.github.zoot.englishreader.data.ai.AiConnectionTestEvent
 import io.github.zoot.englishreader.data.ai.AiError
+import io.github.zoot.englishreader.data.ai.AiModelDiscoveryDraft
+import io.github.zoot.englishreader.data.ai.AiModelDiscoveryResult
 import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
 import io.github.zoot.englishreader.data.audio.PronunciationCacheStats
 import io.github.zoot.englishreader.data.dictionary.DictionaryPackInstaller
@@ -59,6 +61,11 @@ data class ProfileActionEvent(
     val action: ProfileActionResult,
     val profileId: String? = null,
     val failure: ProfileMutationResult? = null
+)
+
+data class ModelDiscoveryState(
+    val loading: Boolean = false,
+    val result: AiModelDiscoveryResult? = null
 )
 
 @HiltViewModel
@@ -157,6 +164,45 @@ class SettingsViewModel @Inject constructor(
     private val _profileMutationInFlight = MutableStateFlow(false)
     val profileMutationInFlight: StateFlow<Boolean> =
         _profileMutationInFlight.asStateFlow()
+
+    private val _modelDiscovery = MutableStateFlow(ModelDiscoveryState())
+    val modelDiscovery = _modelDiscovery.asStateFlow()
+    private var modelDiscoveryGeneration = 0L
+    private var modelDiscoveryJob: Job? = null
+
+    /** 编辑器或连接身份改变后，即使旧请求不响应取消，也不得发布它的结果。 */
+    fun invalidateModelDiscovery() {
+        modelDiscoveryGeneration++
+        modelDiscoveryJob?.cancel()
+        modelDiscoveryJob = null
+        _modelDiscovery.value = ModelDiscoveryState()
+    }
+
+    fun discoverModels(savedProfileId: String?, baseUrl: String, apiKey: String) {
+        if (_modelDiscovery.value.loading) return
+        val generation = ++modelDiscoveryGeneration
+        _modelDiscovery.value = ModelDiscoveryState(loading = true)
+        modelDiscoveryJob = viewModelScope.launch {
+            try {
+                val result = if (savedProfileId != null) {
+                    aiClient.discoverModels(savedProfileId)
+                } else {
+                    aiClient.discoverModels(
+                        AiModelDiscoveryDraft(baseUrl.trim(), AiAuthStrategy.API_KEY, apiKey.trim())
+                    )
+                }
+                if (generation == modelDiscoveryGeneration) {
+                    _modelDiscovery.value = ModelDiscoveryState(result = result)
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } finally {
+                if (generation == modelDiscoveryGeneration) {
+                    _modelDiscovery.value = _modelDiscovery.value.copy(loading = false)
+                }
+            }
+        }
+    }
 
     fun testConnection(profileId: String, requestId: String, temperature: Double? = null) {
         viewModelScope.launch {

@@ -13,6 +13,15 @@ internal data class AiProfileValidation(
         !keyRequired && !temperatureInvalid
 
     companion object {
+        fun validateDiscovery(
+            baseUrl: String,
+            apiKey: String,
+            canUseSavedKey: Boolean
+        ): AiProfileValidation = validate(
+            name = "", baseUrl = baseUrl, modelId = "", apiKey = apiKey,
+            temperature = "", canKeepSavedKey = canUseSavedKey
+        ).copy(nameRequired = false, modelRequired = false, temperatureInvalid = false)
+
         fun validate(
             name: String,
             baseUrl: String,

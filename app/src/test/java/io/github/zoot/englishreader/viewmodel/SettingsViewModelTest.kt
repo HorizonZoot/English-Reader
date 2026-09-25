@@ -5,6 +5,8 @@ import io.github.zoot.englishreader.data.ai.AiClient
 import io.github.zoot.englishreader.data.ai.AiClientResult
 import io.github.zoot.englishreader.data.ai.AiConnectionTestEvent
 import io.github.zoot.englishreader.data.ai.AiError
+import io.github.zoot.englishreader.data.ai.AiModelDiscoveryDraft
+import io.github.zoot.englishreader.data.ai.AiModelDiscoveryResult
 import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
 import io.github.zoot.englishreader.data.audio.PronunciationCacheStats
 import io.github.zoot.englishreader.data.local.AiProviderProfile
@@ -25,6 +27,8 @@ import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
@@ -570,6 +574,96 @@ class SettingsViewModelTest {
             ),
             viewModel.connectionTestEvents.first()
         )
+    }
+
+    @Test
+    fun discoverModels_duplicateWhileLoading_dispatchesOneDirectoryRequest() = runTest {
+        val release = CompletableDeferred<Unit>()
+        val draft = slot<AiModelDiscoveryDraft>()
+        coEvery { defaultAiClient.discoverModels(capture(draft)) } coAnswers {
+            release.await()
+            AiModelDiscoveryResult.Success(listOf("model-a"))
+        }
+        val viewModel = createViewModel()
+
+        viewModel.discoverModels(null, " https://example.com ", " secret ")
+        viewModel.discoverModels(null, "https://example.com", "secret")
+        runCurrent()
+
+        assertTrue(viewModel.modelDiscovery.value.loading)
+        assertEquals("https://example.com", draft.captured.baseUrl)
+        assertEquals("secret", draft.captured.apiKey)
+        coVerify(exactly = 1) { defaultAiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        release.complete(Unit)
+        advanceUntilIdle()
+
+        assertFalse(viewModel.modelDiscovery.value.loading)
+        assertEquals(
+            listOf("model-a"),
+            (viewModel.modelDiscovery.value.result as AiModelDiscoveryResult.Success).modelIds
+        )
+        coVerify(exactly = 0) { defaultAiClient.testConnectionDraft(any()) }
+        coVerify(exactly = 0) { defaultAiClient.testConnection(any(), any()) }
+    }
+
+    @Test
+    fun discoverModels_savedProfile_usesStoredCredentialPathAndPreservesTypedFailure() = runTest {
+        coEvery { defaultAiClient.discoverModels("profile-1") } returns
+            AiModelDiscoveryResult.Failure(AiError.HttpAuth(401))
+        val viewModel = createViewModel()
+
+        viewModel.discoverModels("profile-1", "https://example.com", "")
+        advanceUntilIdle()
+
+        assertFalse(viewModel.modelDiscovery.value.loading)
+        assertEquals(AiModelDiscoveryResult.Failure(AiError.HttpAuth(401)), viewModel.modelDiscovery.value.result)
+        coVerify(exactly = 1) { defaultAiClient.discoverModels("profile-1") }
+        coVerify(exactly = 0) { defaultAiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+    }
+
+    @Test
+    fun discoverModels_invalidatedRequestCompletesLate_preservesNewLoadingAndResult() = runTest {
+        val oldRequest = CompletableDeferred<Unit>()
+        val newRequest = CompletableDeferred<Unit>()
+        coEvery { defaultAiClient.discoverModels("old") } coAnswers {
+            withContext(NonCancellable) { oldRequest.await() }
+            AiModelDiscoveryResult.Success(listOf("old-model"))
+        }
+        coEvery { defaultAiClient.discoverModels("new") } coAnswers {
+            newRequest.await()
+            AiModelDiscoveryResult.Success(listOf("new-model"))
+        }
+        val viewModel = createViewModel()
+
+        viewModel.discoverModels("old", "", "")
+        runCurrent()
+        viewModel.invalidateModelDiscovery()
+        assertEquals(ModelDiscoveryState(), viewModel.modelDiscovery.value)
+        viewModel.discoverModels("new", "", "")
+        runCurrent()
+        assertEquals(ModelDiscoveryState(loading = true), viewModel.modelDiscovery.value)
+        oldRequest.complete(Unit)
+        runCurrent()
+        assertEquals(ModelDiscoveryState(loading = true), viewModel.modelDiscovery.value)
+
+        newRequest.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(viewModel.modelDiscovery.value.loading)
+        assertEquals(
+            listOf("new-model"),
+            (viewModel.modelDiscovery.value.result as AiModelDiscoveryResult.Success).modelIds
+        )
+    }
+
+    @Test
+    fun discoverModels_cancelled_resetsLoadingWithoutFailureResult() = runTest {
+        coEvery { defaultAiClient.discoverModels("profile-1") } throws CancellationException("cancelled")
+        val viewModel = createViewModel()
+
+        viewModel.discoverModels("profile-1", "", "")
+        advanceUntilIdle()
+
+        assertEquals(ModelDiscoveryState(), viewModel.modelDiscovery.value)
     }
 
     private fun createViewModel(

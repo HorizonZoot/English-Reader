@@ -39,6 +39,12 @@ interface AiClient {
     /** 测试编辑器中的草稿，不持久化元数据，也不持久化凭据明文。 */
     suspend fun testConnectionDraft(draft: AiConnectionDraft): AiClientResult
 
+    /** 仅获取已保存连接的模型目录，不发送生成请求，不依赖模型或 Temperature。 */
+    suspend fun discoverModels(profileId: String): AiModelDiscoveryResult
+
+    /** 仅获取草稿连接的模型目录；不保存配置或凭据。 */
+    suspend fun discoverModels(draft: AiModelDiscoveryDraft): AiModelDiscoveryResult
+
     /** 当前有由 application 持有的连接测试正在运行的 profile 集合。 */
     val inFlightProfileIds: StateFlow<Set<String>>
 }

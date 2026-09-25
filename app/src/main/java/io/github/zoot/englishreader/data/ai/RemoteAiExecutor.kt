@@ -6,6 +6,7 @@ import io.github.zoot.englishreader.data.remote.ai.AiChatRequestConfig
 import io.github.zoot.englishreader.data.remote.ai.AiChatTransport
 import io.github.zoot.englishreader.data.remote.ai.AiChatTransportResult
 import io.github.zoot.englishreader.data.remote.ai.AiThinkingMode
+import io.github.zoot.englishreader.data.remote.ai.AiModelCatalogConfig
 import io.github.zoot.englishreader.data.repository.ResolvedAiProfile
 import kotlinx.coroutines.CancellationException
 
@@ -51,6 +52,17 @@ internal class RemoteAiExecutor(
         }
     }
 
+    suspend fun discoverModels(config: AiModelCatalogConfig): AiModelDiscoveryResult = try {
+        val models = transport.listModels(config).map(String::trim).filter(String::isNotEmpty)
+            .distinct().sorted()
+        if (models.isEmpty()) AiModelDiscoveryResult.Failure(AiError.NoContent)
+        else AiModelDiscoveryResult.Success(models)
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (error: Exception) {
+        AiModelDiscoveryResult.Failure(errorMapper.map(error))
+    }
+
     suspend fun testConnection(profile: ResolvedAiProfile): AiClientResult = try {
         val isDeepSeek = profile.providerTemplate == AiProviderTemplate.DEEPSEEK
         val probeMessage = if (isDeepSeek) {
@@ -76,7 +88,9 @@ internal class RemoteAiExecutor(
                 null
             }
         )
-        val models = transport.listModels(config)
+        val models = transport.listModels(
+            AiModelCatalogConfig(config.baseUrl, config.authStrategy, config.apiKey)
+        )
         if (config.modelId !in models) {
             AiClientResult.Failure(AiError.ModelUnavailable)
         } else {

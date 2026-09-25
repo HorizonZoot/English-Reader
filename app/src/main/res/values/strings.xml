@@ -321,12 +321,17 @@
     <string name="settings_profile_parameters_section">参数</string>
     <string name="settings_profile_name_required">请输入显示名称</string>
     <string name="settings_profile_endpoint_invalid">请输入有效的 HTTPS Base URL，不可包含账号、查询参数或片段</string>
-    <string name="settings_profile_model_required">模型 ID 不能为空</string>
+    <string name="settings_profile_model_required">请选择或输入模型 ID</string>
     <string name="settings_profile_key_required">API Key 不能为空</string>
     <string name="settings_profile_key_rejected">认证失败，请检查 API Key 及其访问权限</string>
     <string name="settings_profile_temperature_invalid">请输入 0 到 2 之间的 Temperature</string>
     <string name="settings_profile_models_show">选择服务端返回的模型 ID</string>
-    <string name="settings_profile_models_verified">已找到服务端可用的模型 ID</string>
+    <string name="settings_profile_models_verified">此模型 ID 在服务端返回列表中</string>
+    <string name="settings_profile_model_unlisted">未在返回列表中找到，尚未验证其可调用性；仍可手动保存。</string>
+    <string name="settings_profile_models_loading">正在获取模型列表…</string>
+    <string name="settings_profile_models_loaded">连接成功，已获取 %1$d 个模型</string>
+    <string name="settings_profile_models_empty">服务端未返回可用的模型 ID，请检查接口与权限。</string>
+    <string name="settings_profile_models_hint">可手动填写模型 ID，或先测试连接再下拉选择。测试仅查询模型列表，不发送生成请求，也不验证模型生成能力或账户余额。</string>
     <string name="ai_error_model_unavailable">未找到此模型 ID，请核对服务商提供的模型名称及访问权限</string>
     <string name="settings_profile_identity">服务商：%1$s\nBase URL：%2$s\n模型：%3$s\n认证：%4$s</string>
     <string name="settings_profile_card_summary">%1$s · %2$s</string>
@@ -394,7 +399,6 @@
     <string name="settings_ai_connection_test_message">将先查询当前服务商的模型列表，确认模型 ID 后发送一次最小 AI 请求。DeepSeek 输出上限为 4 token，其他服务商为 1 token。服务商仍可能按输入 token、最低计费单位或其自身计费规则收费。不支持模型列表接口时无法完成验证。</string>
     <string name="settings_ai_connection_test_confirm">确认发送</string>
     <string name="settings_ai_connection_test_cancel">取消</string>
-    <string name="settings_ai_connection_test_success">连接测试成功</string>
     <string name="settings_ai_error_no_active_profile">尚未选择 AI profile</string>
     <string name="settings_ai_error_profile_not_found">AI profile 不存在</string>
     <string name="settings_ai_error_credential_missing">缺少 API Key</string>

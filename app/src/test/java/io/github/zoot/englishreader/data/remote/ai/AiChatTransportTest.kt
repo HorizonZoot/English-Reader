@@ -310,12 +310,12 @@ class AiChatTransportTest {
             AiProviderTemplate.ZHIPU to "/api/paas/v4/",
             AiProviderTemplate.OPENAI_COMPATIBLE to "/proxy/openai/v1"
         )
-        for ((provider, prefix) in cases) {
+        for ((_, prefix) in cases) {
             server.enqueue(MockResponse().setBody(
                 """{"data":[{"id":" model-a "},{"id":"model-a"},{"id":""},{"id":"model-b"}]}"""
             ))
 
-            val catalog = transport.listModels(config(provider, serverUrl(prefix), apiKey = "sk-models"))
+            val catalog = transport.listModels(AiModelCatalogConfig(serverUrl(prefix), AiAuthStrategy.API_KEY, "sk-models"))
             val request = server.awaitRequest()
 
             assertEquals(listOf("model-a", "model-b"), catalog)
@@ -332,7 +332,7 @@ class AiChatTransportTest {
             server.enqueue(MockResponse().setBody(body))
 
             val thrown = runCatching {
-                transport.listModels(config(AiProviderTemplate.DEEPSEEK, serverUrl("")))
+                transport.listModels(AiModelCatalogConfig(serverUrl(""), AiAuthStrategy.API_KEY, "test-key"))
             }.exceptionOrNull()
 
             assertTrue(thrown is Exception)
@@ -351,7 +351,7 @@ class AiChatTransportTest {
                 .setBody("""{"data":[],"detail":"secret-response"}"""))
 
             val thrown = runCatching {
-                transport.listModels(config(AiProviderTemplate.DEEPSEEK, serverUrl("")))
+                transport.listModels(AiModelCatalogConfig(serverUrl(""), AiAuthStrategy.API_KEY, "test-key"))
             }.exceptionOrNull()
 
             assertTrue(thrown is Exception)
@@ -372,7 +372,7 @@ class AiChatTransportTest {
             }).build()
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
         val job = launch {
-            transportFor(client).listModels(config(AiProviderTemplate.DEEPSEEK, serverUrl("")))
+            transportFor(client).listModels(AiModelCatalogConfig(serverUrl(""), AiAuthStrategy.API_KEY, "test-key"))
         }
         try {
             runCurrent()

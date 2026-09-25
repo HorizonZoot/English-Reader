@@ -12,7 +12,7 @@ import javax.inject.Inject
  */
 interface AiChatTransport {
 
-    suspend fun listModels(config: AiChatRequestConfig): List<String>
+    suspend fun listModels(config: AiModelCatalogConfig): List<String>
 
     suspend fun complete(
         config: AiChatRequestConfig,
@@ -30,10 +30,10 @@ class RetrofitAiChatTransport @Inject constructor(
     private val api: AiChatCompletionApi
 ) : AiChatTransport {
 
-    override suspend fun listModels(config: AiChatRequestConfig): List<String> {
+    override suspend fun listModels(config: AiModelCatalogConfig): List<String> {
         val response = api.listModels(
             url = AiEndpointResolver.modelsUrl(config.baseUrl),
-            authorization = authorizationHeader(config)
+            authorization = authorizationHeader(config.authStrategy, config.apiKey)
         )
         if (response.code() != HTTP_OK) throw HttpException(response)
         val models = response.body()?.data
@@ -47,7 +47,7 @@ class RetrofitAiChatTransport @Inject constructor(
     ): AiChatTransportResult {
         val response = api.createChatCompletion(
             url = composeChatCompletionsUrl(config.baseUrl),
-            authorization = authorizationHeader(config),
+            authorization = authorizationHeader(config.authStrategy, config.apiKey),
             request = AiChatCompletionRequest(
                 model = config.modelId,
                 messages = messages.map { AiChatRequestMessageDto(it.role, it.content) },
@@ -79,9 +79,9 @@ class RetrofitAiChatTransport @Inject constructor(
      * 用 exhaustive when，无 else 分支：将来出现非 Bearer 方案时应扩展现有枚举，
      * 而非新增平行的认证枚举。当前三家（DeepSeek / Kimi / 智谱）都用 Bearer。
      */
-    private fun authorizationHeader(config: AiChatRequestConfig): String =
-        when (config.authStrategy) {
-            AiAuthStrategy.API_KEY -> "Bearer ${config.apiKey}"
+    private fun authorizationHeader(authStrategy: AiAuthStrategy, apiKey: String): String =
+        when (authStrategy) {
+            AiAuthStrategy.API_KEY -> "Bearer $apiKey"
         }
 
     private companion object {

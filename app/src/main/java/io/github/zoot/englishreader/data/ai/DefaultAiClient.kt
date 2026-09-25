@@ -3,6 +3,7 @@ package io.github.zoot.englishreader.data.ai
 import io.github.zoot.englishreader.data.repository.AiProfileRepository
 import io.github.zoot.englishreader.data.repository.ProfileResolutionResult
 import io.github.zoot.englishreader.data.remote.ai.AiEndpointResolver
+import io.github.zoot.englishreader.data.remote.ai.AiModelCatalogConfig
 import io.github.zoot.englishreader.data.repository.ResolvedAiProfile
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.CancellationException
@@ -133,6 +134,46 @@ internal class DefaultAiClient(
             } catch (error: Exception) {
                 AiClientResult.Failure(errorMapper.map(error))
             }
+        }
+    }
+
+    override suspend fun discoverModels(profileId: String): AiModelDiscoveryResult {
+        if (profileId.isBlank()) return AiModelDiscoveryResult.Failure(AiError.ProfileNotFound)
+        return try {
+            when (val resolved = profileRepository.resolveValidatedProfile(
+                profileId, AiEndpointResolver::modelsUrl
+            )) {
+                is ProfileResolutionResult.Available -> connectionExecutor.discoverModels(
+                    AiModelCatalogConfig(
+                        resolved.profile.baseUrl,
+                        resolved.profile.authStrategy,
+                        resolved.profile.apiKey
+                    )
+                )
+                else -> AiModelDiscoveryResult.Failure(errorMapper.mapProfileResolution(resolved)!!)
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            AiModelDiscoveryResult.Failure(errorMapper.map(error))
+        }
+    }
+
+    override suspend fun discoverModels(draft: AiModelDiscoveryDraft): AiModelDiscoveryResult {
+        val baseUrl = draft.baseUrl.trim()
+        val apiKey = draft.apiKey.trim()
+        try {
+            AiEndpointResolver.modelsUrl(baseUrl)
+        } catch (_: IllegalArgumentException) {
+            return AiModelDiscoveryResult.Failure(AiError.InvalidEndpoint)
+        }
+        if (apiKey.isBlank()) return AiModelDiscoveryResult.Failure(AiError.CredentialMissing)
+        return try {
+            connectionExecutor.discoverModels(AiModelCatalogConfig(baseUrl, draft.authStrategy, apiKey))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            AiModelDiscoveryResult.Failure(errorMapper.map(error))
         }
     }
 

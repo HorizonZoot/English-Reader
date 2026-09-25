@@ -3,6 +3,7 @@ package io.github.zoot.englishreader.ui.component
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
@@ -16,6 +17,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.unit.dp
 import io.github.zoot.englishreader.core.SentenceRange
 import io.github.zoot.englishreader.data.ai.AiError
@@ -25,6 +27,7 @@ import io.github.zoot.englishreader.model.AiOperationRef
 import io.github.zoot.englishreader.model.AiSheetAttachment
 import io.github.zoot.englishreader.model.AiSheetRequestToken
 import io.github.zoot.englishreader.model.AiSheetState
+import io.github.zoot.englishreader.model.SelectedSentence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -178,6 +181,7 @@ class SentenceActionPopupTest {
     fun popupDismiss_waitsForFadeOutAndDispatchesExactlyOnce() {
         composeRule.mainClock.autoAdvance = false
         var dismissCount = 0
+        var playCount = 0
         val translationTarget = AiExplanationTarget.Article(1)
         composeRule.setContent {
             MaterialTheme {
@@ -189,7 +193,7 @@ class SentenceActionPopupTest {
                         outcome = AiOperationOutcome.Success("稳定译文"),
                         target = translationTarget
                     ),
-                    onPlay = {},
+                    onPlay = { playCount++ },
                     onTranslate = {},
                     onCancelTranslation = {},
                     onRetryTranslation = {},
@@ -200,7 +204,12 @@ class SentenceActionPopupTest {
 
         composeRule.mainClock.advanceTimeBy(SENTENCE_POPUP_FADE_IN_DURATION_MS.toLong())
         composeRule.onNodeWithContentDescription("关闭").performClick()
-        composeRule.runOnIdle { assertEquals(0, dismissCount) }
+        // 语义点击不推进指针事件时钟，保留下面的淡出时序断言。
+        composeRule.onNodeWithText("朗读").performSemanticsAction(SemanticsActions.OnClick) { it() }
+        composeRule.runOnIdle {
+            assertEquals(0, dismissCount)
+            assertEquals(0, playCount)
+        }
 
         composeRule.mainClock.advanceTimeBy((SENTENCE_POPUP_FADE_OUT_DURATION_MS - 1).toLong())
         composeRule.runOnIdle { assertEquals(0, dismissCount) }
@@ -367,39 +376,61 @@ class SentenceActionPopupTest {
     }
 
     @Test
-    fun translation_samePopupRendersLoadingSuccessAndTypedError() {
-        val target = AiExplanationTarget.Article(1)
-        val state = mutableStateOf<AiSheetState>(
-            AiSheetState.Loading(AiSheetRequestToken(1), target)
+    fun resultModes_onlySuccessOffersPlaybackAndKeepsPopupOpen() {
+        val target = AiExplanationTarget.Sentence(
+            SelectedSentence(1, 0, "First.", "First.", 0, 6)
         )
+        val mode = mutableStateOf(SentencePopupMode.ACTIONS)
+        val state = mutableStateOf<AiSheetState>(AiSheetState.Hidden)
+        var plays = 0
+        var dismisses = 0
         composeRule.setContent {
             MaterialTheme {
                 SentenceActionPopup(
                     target = target(word = null),
-                    mode = SentencePopupMode.TRANSLATION,
+                    mode = mode.value,
                     translationState = state.value,
-                    onPlay = {},
+                    explanationState = state.value,
+                    onPlay = { plays++ },
                     onTranslate = {},
                     onCancelTranslation = {},
                     onRetryTranslation = {},
-                    onDismiss = {}
+                    onDismiss = { dismisses++ }
                 )
             }
         }
 
-        composeRule.onNodeWithText("正在翻译").assertIsDisplayed()
-        composeRule.runOnIdle {
-            state.value = AiSheetState.Visible(
-                attachment = AiSheetAttachment(1, AiOperationRef("key", "operation")),
-                outcome = AiOperationOutcome.Success("稳定译文"),
-                target = target
-            )
+        composeRule.onNodeWithText("朗读").performClick()
+        composeRule.runOnIdle { assertEquals(1, plays) }
+
+        listOf(SentencePopupMode.TRANSLATION, SentencePopupMode.EXPLANATION).forEachIndexed { index, resultMode ->
+            composeRule.runOnIdle {
+                mode.value = resultMode
+                state.value = AiSheetState.Loading(AiSheetRequestToken(1), target)
+            }
+            val loadingText = if (resultMode == SentencePopupMode.TRANSLATION) "正在翻译" else "正在生成解释"
+            composeRule.onNodeWithText(loadingText).performScrollTo().assertIsDisplayed()
+            composeRule.onAllNodesWithText("朗读").assertCountEquals(0)
+            composeRule.runOnIdle {
+                state.value = AiSheetState.Visible(
+                    attachment = AiSheetAttachment(1, AiOperationRef("key", "operation")),
+                    outcome = AiOperationOutcome.Success("稳定结果"),
+                    target = target
+                )
+            }
+            composeRule.onNodeWithContentDescription("播放当前句子语音")
+                .performScrollTo().assertIsDisplayed().performClick()
+            composeRule.runOnIdle {
+                assertEquals(index + 2, plays)
+                assertEquals(0, dismisses)
+            }
+            composeRule.onNodeWithText("稳定结果").performScrollTo().assertIsDisplayed()
+            composeRule.runOnIdle {
+                state.value = AiSheetState.Rejected(AiError.NoActiveProfile, target)
+            }
+            composeRule.onNodeWithText("尚未选择 AI profile").performScrollTo().assertIsDisplayed()
+            composeRule.onAllNodesWithText("朗读").assertCountEquals(0)
         }
-        composeRule.onNodeWithText("稳定译文").assertIsDisplayed()
-        composeRule.runOnIdle {
-            state.value = AiSheetState.Rejected(AiError.NoActiveProfile, target)
-        }
-        composeRule.onNodeWithText("尚未选择 AI profile").assertIsDisplayed()
     }
 
     private fun setPopup(

@@ -363,6 +363,7 @@ private fun SentenceActionPopupForTarget(
                                     } else {
                                         explanationState
                                     },
+                                    onPlay = { if (!dismissGate.isAcquired) currentOnPlay() },
                                     onCancel = {
                                         requestFadeOut(
                                             onFadeStarted = if (visibleMode == SentencePopupMode.TRANSLATION) {
@@ -462,7 +463,7 @@ private fun ActionContent(
 }
 
 @Composable
-private fun PopupAction(
+internal fun PopupAction(
     icon: ImageVector,
     label: String,
     contentDescription: String,

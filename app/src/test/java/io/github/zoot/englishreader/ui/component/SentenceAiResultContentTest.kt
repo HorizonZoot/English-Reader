@@ -48,6 +48,7 @@ class SentenceAiResultContentTest {
         setContent(AiSheetState.Hidden, onDismiss = { dismisses.incrementAndGet() })
 
         composeRule.onNodeWithText("暂时没有可用解释").assertIsDisplayed()
+        composeRule.onAllNodesWithText("朗读").assertCountEquals(0)
         composeRule.onNodeWithContentDescription("关闭").performClick()
         composeRule.runOnIdle { assertEquals(1, dismisses.get()) }
     }
@@ -77,6 +78,7 @@ class SentenceAiResultContentTest {
         setContent(visible(null), onCancel = { cancels.incrementAndGet() })
 
         composeRule.onNodeWithText("正在生成解释").assertIsDisplayed()
+        composeRule.onAllNodesWithText("朗读").assertCountEquals(0)
         composeRule.onNodeWithText("取消").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(1, cancels.get()) }
     }
@@ -136,6 +138,7 @@ class SentenceAiResultContentTest {
 
         composeRule.onNodeWithText("当前设备没有网络连接").assertIsDisplayed()
         composeRule.onAllNodesWithText("重试").assertCountEquals(0)
+        composeRule.onAllNodesWithText("朗读").assertCountEquals(0)
     }
 
     @Test
@@ -178,7 +181,8 @@ class SentenceAiResultContentTest {
                         mode = SentencePopupMode.EXPLANATION,
                         state = state.value,
                         onDismiss = {},
-                        onCancel = {}
+                        onCancel = {},
+                        onPlay = {}
                     )
                 }
             }
@@ -236,18 +240,26 @@ class SentenceAiResultContentTest {
     }
 
     @Test
-    fun sentenceResult_longSourceAndExplanationKeepCloseReachable() {
+    fun sentenceResult_longSourceAndExplanationKeepActionsReachable() {
         val rawText = "The quoted sentence keeps its original wording.\n".repeat(80)
         var dismisses = 0
+        var plays = 0
         setContent(
             state = visible(AiOperationOutcome.Success("Long explanation.\n".repeat(80)))
                 .copy(target = sentenceTarget(rawText)),
             onDismiss = { dismisses++ },
+            onPlay = { plays++ },
             height = 220.dp
         )
 
         composeRule.onNodeWithTag("sentence-result-source").performScrollTo().assertTextEquals(rawText)
         composeRule.onNodeWithContentDescription("关闭").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("播放当前句子语音")
+            .performScrollTo().assertIsDisplayed().performClick()
+        composeRule.runOnIdle {
+            assertEquals(1, plays)
+            assertEquals(0, dismisses)
+        }
         composeRule.onNodeWithText("关闭").performScrollTo().assertIsDisplayed().performClick()
         composeRule.onNodeWithContentDescription("关闭").assertIsDisplayed()
         composeRule.runOnIdle { assertEquals(1, dismisses) }
@@ -269,6 +281,7 @@ class SentenceAiResultContentTest {
         onDismiss: () -> Unit = {},
         onCancel: () -> Unit = {},
         onRetry: () -> Unit = {},
+        onPlay: () -> Unit = {},
         mode: SentencePopupMode = SentencePopupMode.EXPLANATION,
         height: Dp = 360.dp
     ) {
@@ -280,7 +293,8 @@ class SentenceAiResultContentTest {
                         state = state,
                         onDismiss = onDismiss,
                         onCancel = onCancel,
-                        onRetry = onRetry
+                        onRetry = onRetry,
+                        onPlay = onPlay
                     )
                 }
             }

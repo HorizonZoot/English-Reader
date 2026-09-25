@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -36,12 +37,14 @@ import io.github.zoot.englishreader.model.AiSheetState
 import io.github.zoot.englishreader.util.toUiMessage
 
 /** 标题关闭入口固定可达，所有结果、披露和操作在父 Popup 提供的高度内滚动。 */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SentenceAiResultContent(
     mode: SentencePopupMode,
     state: AiSheetState,
     onDismiss: () -> Unit,
     onCancel: () -> Unit,
+    onPlay: () -> Unit,
     modifier: Modifier = Modifier,
     onRetry: () -> Unit = {}
 ) {
@@ -119,7 +122,15 @@ fun SentenceAiResultContent(
                             style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.testTag("sentence-result-explanation")
                         )
-                        ResultCloseButton(onDismiss)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ResultCloseButton(onDismiss)
+                            PopupAction(
+                                icon = Icons.Default.PlayArrow,
+                                label = stringResource(R.string.reading_sentence_play),
+                                contentDescription = stringResource(R.string.reading_sentence_play_content_description),
+                                onClick = onPlay
+                            )
+                        }
                     }
                     is AiOperationOutcome.Failure -> ResultError(
                         error = outcome.error,

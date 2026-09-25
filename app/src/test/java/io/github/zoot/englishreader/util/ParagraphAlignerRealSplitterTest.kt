@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.util
 
+import android.app.Application
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -17,7 +18,7 @@ import org.robolectric.annotation.Config
  * 需要 ICU（`android.icu.text.BreakIterator`），故走 Robolectric 而非纯 JVM。
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], application = Application::class)
 class ParagraphAlignerRealSplitterTest {
 
     private val trickyContents = listOf(

@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.util
 
+import android.app.Application
 import io.github.zoot.englishreader.model.TranslationBlockCoverage
 import io.github.zoot.englishreader.model.TranslationSegmentationMode
 import org.junit.Assert.assertEquals
@@ -21,7 +22,7 @@ import org.robolectric.annotation.Config
  * 同时弄红两个测试。
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], application = Application::class)
 class TranslationBlockPlannerRealSplitterTest {
 
     private fun plan(content: String, mode: TranslationSegmentationMode) =

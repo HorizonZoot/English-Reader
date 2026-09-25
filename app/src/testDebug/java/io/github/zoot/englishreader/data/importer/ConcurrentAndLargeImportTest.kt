@@ -4,18 +4,22 @@ import android.content.Context
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import io.github.zoot.englishreader.data.repository.BookImporter
+import io.mockk.every
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.measureTimeMillis
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asContextElement
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -246,55 +250,70 @@ class ConcurrentAndLargeImportTest {
         }
 
         var cancelled = false
-        val victimStarted = CompletableDeferred<Unit>()
-        coroutineScope {
-            val victimJob = launch(Dispatchers.IO) {
-                try {
-                    // 循环解析而不是解析一次：单次解析可能在 cancel() 之前就返回，那时 cancel()
-                    // 成为空操作而测试照绿 —— 取消路径完全没被执行。循环保证 cancel() 到达时
-                    // 总有解析在飞行中。`EpubBookParser` 在每个 reading-order item 上调
-                    // `coroutineContext.ensureActive()`（`:88`），战争与和平 393 章即 393 个
-                    // 检查点，所以取消必然被观测到。
-                    repeat(VICTIM_PARSE_ROUNDS) { round ->
-                        if (round == 0) victimStarted.complete(Unit)
+        val reachedExtraction = ThreadLocal<AtomicBoolean?>()
+        val allImportsReading = CountDownLatch(survivors.size + 1)
+        val releaseImports = CountDownLatch(1)
+        mockkObject(XhtmlTextExtractor)
+        try {
+            every { XhtmlTextExtractor.extract(any()) } answers {
+                val text = callOriginal()
+                // 每个导入完成首次真实正文提取后停住，取消时三路解析都仍在进行。
+                if (text.isNotBlank() &&
+                    reachedExtraction.get()?.compareAndSet(false, true) == true
+                ) {
+                    allImportsReading.countDown()
+                    assertTrue(
+                        "the parsing gate must be released",
+                        releaseImports.await(IMPORT_GATE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    )
+                }
+                text
+            }
+            coroutineScope {
+                val victimJob = launch(Dispatchers.IO + reachedExtraction.asContextElement(AtomicBoolean())) {
+                    try {
                         parser.parse(victim)
+                    } catch (e: CancellationException) {
+                        cancelled = true
+                        throw e
                     }
-                } catch (e: CancellationException) {
-                    cancelled = true
-                    throw e
+                }
+                val others = survivors.map { file ->
+                    async(Dispatchers.IO + reachedExtraction.asContextElement(AtomicBoolean())) {
+                        file.name to parser.parse(file).metadata.contentFingerprint
+                    }
+                }
+
+                try {
+                    assertTrue(
+                        "all imports must reach a readable chapter before cancellation",
+                        allImportsReading.await(IMPORT_GATE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+                    )
+                    assertTrue("the victim must still be parsing", victimJob.isActive)
+                    assertTrue("the survivors must still be parsing", others.all { it.isActive })
+                    victimJob.cancel()
+                } finally {
+                    // 必须在 coroutineScope 等待子任务退出之前放行，失败路径同样需要。
+                    releaseImports.countDown()
+                }
+                victimJob.join()
+
+                val results = others.awaitAll().toMap()
+                baseline.forEach { (name, expected) ->
+                    assertEquals(
+                        "$name: fingerprint changed after a concurrent import was cancelled; " +
+                            "cancellation must not touch state shared with other imports",
+                        expected,
+                        results.getValue(name)
+                    )
                 }
             }
-            val others = survivors.map { file ->
-                async(Dispatchers.IO) { file.name to parser.parse(file).metadata.contentFingerprint }
-            }
-
-            // 等 victim 确认进入解析循环，再等一小会儿让它走进 spine 遍历，然后取消。
-            // 只靠 delay 是不够的：调度抖动下 victim 可能还没开始。
-            victimStarted.await()
-            withContext(Dispatchers.Default) { delay(CANCEL_DELAY_MS) }
-            victimJob.cancel()
-            victimJob.join()
-
-            val results = others.awaitAll().toMap()
-            baseline.forEach { (name, expected) ->
-                assertEquals(
-                    "$name: fingerprint changed after a concurrent import was cancelled; " +
-                        "cancellation must not touch state shared with other imports",
-                    expected,
-                    results.getValue(name)
-                )
-            }
+        } finally {
+            unmockkObject(XhtmlTextExtractor)
         }
 
-        // **必须**断言取消真的发生过。上一版写的是「不断言 cancelled 一定为 true：取消可能落在
-        // parse 返回之后，那不是缺陷」—— 那句话把测试的假阳性路径合理化了：若 victim 先跑完，
-        // cancel() 是空操作，「取消不污染其余导入」这个命题一次都没被检验，而测试仍然绿。
-        // 审查指出后改成循环解析 + 启动屏障，取消窗口从「一次解析的尾部」变成 393 个检查点，
-        // 于是可以硬断言。
         assertTrue(
-            "the victim finished all $VICTIM_PARSE_ROUNDS rounds before cancel() landed, so the " +
-                "cancellation path never executed and this test proved nothing. Raise " +
-                "VICTIM_PARSE_ROUNDS or lower CANCEL_DELAY_MS.",
+            "the victim must propagate cancellation after reaching the real parsing boundary",
             cancelled
         )
         println("CANCEL-CONCURRENT victimCancelledMidParse=$cancelled survivors=${survivors.size}")
@@ -418,25 +437,13 @@ class ConcurrentAndLargeImportTest {
             "se-war-and-peace"           // EPUB3, 393 章，最大
         )
 
-        /** 取消用最大的那本，确保取消落在解析中途。 */
+        /** 沿用最大书籍作为取消样本，解析位置由屏障确定。 */
         const val CANCEL_VICTIM = "se-war-and-peace"
 
         val SURVIVOR_BOOKS = listOf("gutenberg-11", "se-a-tale-of-two-cities")
 
-        /**
-         * 取消前等待：victim 已确认进入解析循环之后再等这么久，让它走进 spine 遍历。
-         * 战争与和平在 JVM 上约 290-420ms，40ms 落在解析早期。
-         */
-        const val CANCEL_DELAY_MS = 40L
-
-        /**
-         * victim 循环解析的轮数。
-         *
-         * 单轮不够：解析可能在 cancel() 到达前就返回，那时取消路径完全没执行而测试照绿 ——
-         * 这正是审查指出的假阳性路径。多轮保证 cancel() 到达时总有解析在飞行中。
-         * 每轮 393 个 `ensureActive()` 检查点，所以 3 轮已经远超需要。
-         */
-        const val VICTIM_PARSE_ROUNDS = 3
+        /** 有限等待使缺失解析屏障的回归报告失败。 */
+        const val IMPORT_GATE_TIMEOUT_SECONDS = 10L
 
         /** 24 MiB 插图密集包。 */
         const val LARGE_ARCHIVE = "gutenberg3-1342"

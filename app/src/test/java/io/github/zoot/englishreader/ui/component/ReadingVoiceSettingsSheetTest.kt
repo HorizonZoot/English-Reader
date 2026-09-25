@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.ui.component
 
+import android.app.Application
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -39,7 +40,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], application = Application::class)
 class ReadingVoiceSettingsSheetTest {
     @get:Rule val composeRule = createComposeRule()
 
@@ -51,38 +52,27 @@ class ReadingVoiceSettingsSheetTest {
         var previewCount = 0
         var stopCount = 0
 
-        composeRule.setContent {
-            MaterialTheme {
-                Box(Modifier.height(640.dp).fillMaxWidth()) {
-                    ReadingVoiceSettingsContent(
-                        state = state.value,
-                    onDismiss = {},
-                    onVoiceChange = { voiceId ->
-                        selectedVoices += voiceId
-                        state.value = state.value.copy(
-                            settings = state.value.settings.copy(voiceId = voiceId)
-                        )
-                    },
-                    onRateChange = { null },
-                    onNetworkAllowedChange = { allowed ->
-                        networkChanges += allowed
-                        state.value = state.value.copy(allowNetwork = allowed)
-                    },
-                    onPreview = {
-                        previewCount++
-                        state.value = state.value.copy(previewing = true)
-                    },
-                    onStopPreview = {
-                        stopCount++
-                        state.value = state.value.copy(previewing = false)
-                    },
-                    onReset = {},
-                    onRecheck = {},
-                    onSystemAction = {}
-                    )
-                }
+        renderContent(
+            state = { state.value },
+            onVoiceChange = { voiceId ->
+                selectedVoices += voiceId
+                state.value = state.value.copy(
+                    settings = state.value.settings.copy(voiceId = voiceId)
+                )
+            },
+            onNetworkAllowedChange = { allowed ->
+                networkChanges += allowed
+                state.value = state.value.copy(allowNetwork = allowed)
+            },
+            onPreview = {
+                previewCount++
+                state.value = state.value.copy(previewing = true)
+            },
+            onStopPreview = {
+                stopCount++
+                state.value = state.value.copy(previewing = false)
             }
-        }
+        )
 
         composeRule.onNodeWithTag("reading-voice-auto").assertIsSelected()
         composeRule.onNodeWithTag("reading-voice-sheet")
@@ -121,32 +111,21 @@ class ReadingVoiceSettingsSheetTest {
         var resets = 0
         var rechecks = 0
 
-        composeRule.setContent {
-            MaterialTheme {
-                Box(Modifier.height(640.dp).fillMaxWidth()) {
-                    ReadingVoiceSettingsContent(
-                        state = state.value,
-                    onDismiss = {},
-                    onVoiceChange = {},
-                    onRateChange = { rate ->
-                        rates += rate
-                        val requestId = state.value.rateChangeId + 1
-                        state.value = state.value.copy(
-                            settings = state.value.settings.copy(speechRate = rate),
-                            rateChangeId = requestId
-                        )
-                        requestId
-                    },
-                    onNetworkAllowedChange = {},
-                    onPreview = {},
-                    onStopPreview = {},
-                    onReset = { resets++ },
-                    onRecheck = { rechecks++ },
-                    onSystemAction = systemActions::add
-                    )
-                }
-            }
-        }
+        renderContent(
+            state = { state.value },
+            onRateChange = { rate ->
+                rates += rate
+                val requestId = state.value.rateChangeId + 1
+                state.value = state.value.copy(
+                    settings = state.value.settings.copy(speechRate = rate),
+                    rateChangeId = requestId
+                )
+                requestId
+            },
+            onReset = { resets++ },
+            onRecheck = { rechecks++ },
+            onSystemAction = systemActions::add
+        )
 
         val rateNode = composeRule.onNodeWithTag("reading-voice-rate")
         rateNode.performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->
@@ -188,24 +167,7 @@ class ReadingVoiceSettingsSheetTest {
             previewFailure = TtsFailureReason.LANGUAGE_DATA_MISSING
         )
 
-        composeRule.setContent {
-            MaterialTheme {
-                Box(Modifier.height(640.dp).fillMaxWidth()) {
-                    ReadingVoiceSettingsContent(
-                        state = state,
-                    onDismiss = {},
-                    onVoiceChange = {},
-                    onRateChange = { null },
-                    onNetworkAllowedChange = {},
-                    onPreview = {},
-                    onStopPreview = {},
-                    onReset = {},
-                    onRecheck = {},
-                    onSystemAction = {}
-                    )
-                }
-            }
-        }
+        renderContent(state = { state })
 
         composeRule.onNodeWithTag("reading-voice-preview").assertIsNotEnabled()
         composeRule.onNodeWithTag("reading-voice-sheet")
@@ -217,7 +179,7 @@ class ReadingVoiceSettingsSheetTest {
     fun content_rateCommitKeepsDraftUntilAcknowledgedAndIgnoresOlderPreferenceEmission() {
         val state = mutableStateOf(readyState())
         val rates = mutableListOf<Float>()
-        renderRateContent(
+        renderContent(
             state = { state.value },
             onRateChange = { rate ->
                 rates += rate
@@ -267,7 +229,7 @@ class ReadingVoiceSettingsSheetTest {
         val state = mutableStateOf(readyState())
         val visible = mutableStateOf(true)
         var commits = 0
-        renderRateContent(
+        renderContent(
             state = { state.value },
             visible = { visible.value },
             onRateChange = { rate ->
@@ -299,9 +261,16 @@ class ReadingVoiceSettingsSheetTest {
         assertEquals(expected, range.current, 0.001f)
     }
 
-    private fun renderRateContent(
+    private fun renderContent(
         state: () -> ReadingVoiceSettingsState,
-        onRateChange: (Float) -> Long?,
+        onVoiceChange: (String?) -> Unit = {},
+        onRateChange: (Float) -> Long? = { null },
+        onNetworkAllowedChange: (Boolean) -> Unit = {},
+        onPreview: () -> Unit = {},
+        onStopPreview: () -> Unit = {},
+        onReset: () -> Unit = {},
+        onRecheck: () -> Unit = {},
+        onSystemAction: (TtsSystemAction) -> Unit = {},
         visible: () -> Boolean = { true }
     ) {
         composeRule.setContent {
@@ -311,14 +280,14 @@ class ReadingVoiceSettingsSheetTest {
                         ReadingVoiceSettingsContent(
                             state = state(),
                             onDismiss = {},
-                            onVoiceChange = {},
+                            onVoiceChange = onVoiceChange,
                             onRateChange = onRateChange,
-                            onNetworkAllowedChange = {},
-                            onPreview = {},
-                            onStopPreview = {},
-                            onReset = {},
-                            onRecheck = {},
-                            onSystemAction = {}
+                            onNetworkAllowedChange = onNetworkAllowedChange,
+                            onPreview = onPreview,
+                            onStopPreview = onStopPreview,
+                            onReset = onReset,
+                            onRecheck = onRecheck,
+                            onSystemAction = onSystemAction
                         )
                     }
                 }

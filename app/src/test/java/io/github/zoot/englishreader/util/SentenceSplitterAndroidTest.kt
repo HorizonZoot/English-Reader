@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.util
 
+import android.app.Application
 import org.junit.Test
 import org.junit.Assert.*
 import org.junit.runner.RunWith
@@ -17,7 +18,7 @@ import org.robolectric.annotation.Config
  * （省略号、括号、引号、中英混排、多段），证明 Robolectric ICU 与真机行为一致。
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [34], application = Application::class)
 class SentenceSplitterAndroidTest {
 
     @Test

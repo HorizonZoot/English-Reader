@@ -1,3 +1,4 @@
+import com.android.build.gradle.api.ApkVariantOutput
 import java.util.Properties
 
 plugins {
@@ -26,8 +27,8 @@ android {
         applicationId = "io.github.zoot.englishreader"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.1.2-beta"
+        versionCode = 4
+        versionName = "0.1.3-beta"
         testInstrumentationRunner = "io.github.zoot.englishreader.HiltTestRunner"
 
         ksp {
@@ -115,6 +116,14 @@ android {
         getByName("androidTest") {
             assets.srcDirs(files("$projectDir/schemas"))
         }
+    }
+}
+
+android.applicationVariants.all {
+    val variantSuffix = if (buildType.name == "release") "" else "-$name"
+    val apkFileName = "${rootProject.name}-$versionName$variantSuffix.apk"
+    outputs.withType<ApkVariantOutput>().configureEach {
+        outputFileName = apkFileName
     }
 }
 

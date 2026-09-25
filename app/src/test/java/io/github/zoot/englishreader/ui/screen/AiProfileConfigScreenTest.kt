@@ -93,6 +93,7 @@ class AiProfileConfigScreenTest {
         setScreen(harness)
         composeTestRule.onNodeWithTag("profile_add_empty").performClick()
 
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("DeepSeek")
         composeTestRule.onNodeWithTag("profile_base_url")
             .assertEditableTextEquals("https://api.deepseek.com")
         composeTestRule.onNodeWithTag("profile_model_id")
@@ -111,17 +112,28 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_base_url")
             .assertEditableTextEquals("https://api.moonshot.ai/v1")
         composeTestRule.onNodeWithTag("profile_model_id").assertEditableTextEquals("kimi-k3")
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("Kimi")
+        composeTestRule.onNodeWithTag("profile_display_name").performTextClearance()
+        composeTestRule.onNodeWithTag("profile_display_name").performTextInput("阅读助手")
+        composeTestRule.onNodeWithTag("profile_model_id").performTextInput("-custom")
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("阅读助手")
 
-        composeTestRule.onNodeWithTag("profile_provider_selector").performClick()
+        composeTestRule.onNodeWithTag("profile_provider_selector").performScrollTo().performClick()
         composeTestRule.onNodeWithTag("profile_provider_option_ZHIPU").performClick()
         composeTestRule.onNodeWithTag("profile_base_url")
             .assertEditableTextEquals("https://open.bigmodel.cn/api/paas/v4/")
         composeTestRule.onNodeWithTag("profile_model_id").assertEditableTextEquals("glm-5.2")
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("智谱")
 
         composeTestRule.onNodeWithTag("profile_provider_selector").performClick()
         composeTestRule.onNodeWithTag("profile_provider_option_OPENAI_COMPATIBLE").performClick()
         composeTestRule.onNodeWithTag("profile_base_url").assertEditableTextEquals("")
         composeTestRule.onNodeWithTag("profile_model_id").assertEditableTextEquals("")
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("OpenAI 兼容")
+
+        composeTestRule.onNodeWithTag("profile_provider_selector").performClick()
+        composeTestRule.onNodeWithTag("profile_provider_option_DEEPSEEK").performClick()
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("DeepSeek")
     }
 
     @Test
@@ -140,6 +152,7 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_manage_${first.profileId}").performClick()
         composeTestRule.onNodeWithText("编辑配置").performClick()
         composeTestRule.onNodeWithText("编辑 AI 配置").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("DeepSeek primary")
         // 唯一的真实判据：编辑器打开时 key 输入框必须是空的。
         //
         // 这里曾经还有一行 `onAllNodesWithText("stored-secret").assertCountEquals(0)`，
@@ -150,6 +163,7 @@ class AiProfileConfigScreenTest {
 
         composeTestRule.onNodeWithTag("profile_provider_selector").performClick()
         composeTestRule.onNodeWithTag("profile_provider_option_KIMI").performClick()
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("Kimi")
         composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
         composeTestRule.onNodeWithTag("profile_api_key").performTextInput("replacement-key")
         composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()

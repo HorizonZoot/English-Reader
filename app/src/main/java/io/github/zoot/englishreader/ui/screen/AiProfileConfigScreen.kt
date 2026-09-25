@@ -261,6 +261,7 @@ fun AiProfileConfigScreen(
                         providerTemplate = providerTemplate,
                         onProviderChange = { template ->
                             providerTemplate = template
+                            displayName = context.getString(profileTemplateLabelRes(template))
                             baseUrl = template.defaultBaseUrl.orEmpty()
                             modelId = template.defaultModelId.orEmpty()
                             invalidateConnectionTestResult()
@@ -1100,14 +1101,15 @@ private fun DestructiveConfirmation(
 }
 
 @Composable
-private fun profileTemplateLabel(template: AiProviderTemplate): String = stringResource(
-    when (template) {
-        AiProviderTemplate.DEEPSEEK -> R.string.settings_provider_deepseek
-        AiProviderTemplate.KIMI -> R.string.settings_provider_kimi
-        AiProviderTemplate.ZHIPU -> R.string.settings_provider_zhipu
-        AiProviderTemplate.OPENAI_COMPATIBLE -> R.string.settings_provider_openai_compatible
-    }
-)
+private fun profileTemplateLabel(template: AiProviderTemplate): String =
+    stringResource(profileTemplateLabelRes(template))
+
+private fun profileTemplateLabelRes(template: AiProviderTemplate): Int = when (template) {
+    AiProviderTemplate.DEEPSEEK -> R.string.settings_provider_deepseek
+    AiProviderTemplate.KIMI -> R.string.settings_provider_kimi
+    AiProviderTemplate.ZHIPU -> R.string.settings_provider_zhipu
+    AiProviderTemplate.OPENAI_COMPATIBLE -> R.string.settings_provider_openai_compatible
+}
 
 private fun providerColor(template: AiProviderTemplate): Color = when (template) {
     AiProviderTemplate.DEEPSEEK -> Color(0xFF5B8FF9)

@@ -31,6 +31,7 @@ import org.robolectric.annotation.Config
 class SettingsUpdateTest {
     @get:Rule val compose = createComposeRule()
     private val checking = mutableStateOf(false)
+    private val hasDownload = mutableStateOf(false)
     private val outcomes = Channel<ManualCheckOutcome>(Channel.BUFFERED)
     private var clicks = 0
     private val voiceModels = mockk<TtsModelsViewModel>(relaxed = true).also {
@@ -57,6 +58,7 @@ class SettingsUpdateTest {
                 SettingsScreen(
                     onCheckForUpdate = { clicks++; checking.value = true },
                     checkingForUpdate = checking.value,
+                    hasUpdateDownload = hasDownload.value,
                     manualUpdateOutcomes = events,
                     viewModel = model,
                     modelsViewModel = voiceModels
@@ -87,6 +89,21 @@ class SettingsUpdateTest {
     fun manualResult_failure_showsExistingSnackbar() {
         render()
         compose.runOnIdle { outcomes.trySend(ManualCheckOutcome.FAILED) }
-        compose.onNodeWithText("检查更新失败，请稍后再试").assertIsDisplayed()
+        compose.onNodeWithText("无法访问更新服务，请稍后重试").assertIsDisplayed()
+    }
+
+    @Test
+    fun manualResult_rateLimit_hasSpecificFeedback() {
+        render()
+        compose.runOnIdle { outcomes.trySend(ManualCheckOutcome.RATE_LIMITED) }
+        compose.onNodeWithText("更新服务暂时限流，请稍后再试").assertIsDisplayed()
+    }
+
+    @Test
+    fun about_existingDownload_hasReachableProgressEntry() {
+        hasDownload.value = true
+        render()
+        compose.onNodeWithText("查看更新下载").performScrollTo().assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(1, clicks) }
     }
 }

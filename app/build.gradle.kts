@@ -138,6 +138,8 @@ android.applicationVariants.all {
 // invalidates the task. Previously this was "mitigated" by telling people to pass
 // --rerun-tasks in CI, and there is no CI workflow in this repo.
 tasks.withType<Test>().configureEach {
+    // Robolectric's ParcelFileDescriptor shadow needs reflective access on JDK 17.
+    jvmArgs("--add-opens=java.base/java.io=ALL-UNNAMED")
     inputs.file("src/main/java/io/github/zoot/englishreader/data/importer/ImportBudget.kt")
         .withPropertyName("importBudgetSource")
         .withPathSensitivity(PathSensitivity.RELATIVE)

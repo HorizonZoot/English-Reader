@@ -21,17 +21,17 @@ import io.github.zoot.englishreader.data.update.ReleaseNotesFormatter
 /**
  * 发现新版本时的确认弹窗。
  *
- * 只做三件事：显示版本号、显示更新概要、给出两个选择。**不下载、不安装**——
- * 「立即更新」只是打开 Release 页面，后续由用户在浏览器里决定。
+ * 显示版本与更新概要，下载必须由用户确认；浏览器是独立的备用入口。
  *
- * @param onUpdate 打开 Release 页面。调用方负责真正的跳转与失败反馈。
+ * @param onUpdate 用户确认下载，由调用方持有下载生命周期。
  */
 @Composable
 fun UpdateDialog(
     versionName: String,
     releaseNotes: String?,
     onUpdate: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onOpenRelease: (() -> Unit)? = null
 ) {
     // 清理只依赖入参，重组时不必重做。
     val notes = remember(releaseNotes) { ReleaseNotesFormatter.format(releaseNotes) }
@@ -58,6 +58,15 @@ fun UpdateDialog(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Text(
+                    stringResource(R.string.update_download_disclosure),
+                    style = MaterialTheme.typography.bodySmall
+                )
+                if (onOpenRelease != null) {
+                    TextButton(onClick = onOpenRelease) {
+                        Text(stringResource(R.string.update_download_browser))
+                    }
+                }
             }
         },
         confirmButton = {

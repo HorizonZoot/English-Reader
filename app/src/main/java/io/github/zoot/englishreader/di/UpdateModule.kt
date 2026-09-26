@@ -7,6 +7,13 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import io.github.zoot.englishreader.data.remote.update.GitHubReleaseApiService
+import io.github.zoot.englishreader.data.remote.update.GitHubReleaseFeedApiService
+import io.github.zoot.englishreader.data.update.GitHubUpdateReleaseSource
+import io.github.zoot.englishreader.data.update.AndroidUpdateDownloads
+import io.github.zoot.englishreader.data.update.UpdateDownloadBackend
+import io.github.zoot.englishreader.data.update.UpdateReleaseSource
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
@@ -18,10 +25,35 @@ import javax.inject.Singleton
 @Retention(AnnotationRetention.BINARY)
 annotation class GitHubRetrofit
 
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class UpdateIo
+
 @Module
 @InstallIn(SingletonComponent::class)
 object UpdateModule {
     private const val GITHUB_API_BASE_URL = "https://api.github.com/"
+
+    @Provides
+    @UpdateIo
+    fun provideUpdateDispatcher(): CoroutineDispatcher = Dispatchers.IO
+
+    @Provides
+    @Singleton
+    fun provideUpdateDownloads(backend: AndroidUpdateDownloads): UpdateDownloadBackend = backend
+
+    @Provides
+    @Singleton
+    fun provideReleaseSource(source: GitHubUpdateReleaseSource): UpdateReleaseSource = source
+
+    @Provides
+    @Singleton
+    fun provideReleaseFeedService(@GitHubRetrofit client: OkHttpClient): GitHubReleaseFeedApiService =
+        Retrofit.Builder()
+            .baseUrl("https://github.com/")
+            .client(client)
+            .build()
+            .create(GitHubReleaseFeedApiService::class.java)
 
     @Provides
     @Singleton

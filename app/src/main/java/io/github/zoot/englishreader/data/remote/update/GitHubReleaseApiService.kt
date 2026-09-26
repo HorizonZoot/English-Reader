@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.data.remote.update
 
+import io.github.zoot.englishreader.data.update.UpdateReleasePolicy
 import retrofit2.http.GET
 import retrofit2.http.Headers
 
@@ -24,6 +25,6 @@ interface GitHubReleaseApiService {
      * `Accept` 头是 GitHub 官方推荐的版本协商方式，省略时行为取决于服务端默认值。
      */
     @Headers("Accept: application/vnd.github+json")
-    @GET("repos/HorizonZoot/English-Reader/releases?per_page=1")
+    @GET(UpdateReleasePolicy.API_PATH)
     suspend fun getPublishedReleases(): List<GitHubRelease>
 }

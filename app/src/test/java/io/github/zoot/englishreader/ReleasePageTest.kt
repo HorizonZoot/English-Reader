@@ -33,6 +33,14 @@ class ReleasePageTest {
     }
 
     @Test
+    fun openReleasePage_officialLatestFallback_isAllowedButNotAnotherRepository() {
+        val context = mockk<Context>(relaxed = true)
+        assertTrue(openReleasePage(context, "https://github.com/HorizonZoot/English-Reader/releases/latest"))
+        assertFalse(openReleasePage(context, "https://github.com/another/repository/releases/latest"))
+        verify(exactly = 1) { context.startActivity(any()) }
+    }
+
+    @Test
     fun openReleasePage_nonReleaseOrUnsafeUrl_neverStartsActivity() {
         val context = mockk<Context>(relaxed = true)
         for (invalid in listOf(

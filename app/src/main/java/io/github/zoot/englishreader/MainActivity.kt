@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -29,6 +30,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -54,6 +59,10 @@ import io.github.zoot.englishreader.ui.screen.ReadingScreen
 import io.github.zoot.englishreader.ui.screen.SettingsScreen
 import io.github.zoot.englishreader.ui.screen.SettingsCacheManagementScreen
 import io.github.zoot.englishreader.ui.dialog.UpdateDialog
+import io.github.zoot.englishreader.ui.dialog.UpdateDownloadDialog
+import io.github.zoot.englishreader.data.update.UpdateReleasePolicy
+import io.github.zoot.englishreader.util.UpdateInstallLaunchResult
+import io.github.zoot.englishreader.util.openUpdateInstaller
 import io.github.zoot.englishreader.ui.screen.VocabularyScreen
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
@@ -182,7 +191,31 @@ fun EnglishReaderNavigation() {
     // 放进某个目的地里取则会随返回栈条目重建，等于每次进那个页面都检查一次。
     val updateViewModel: UpdateViewModel = hiltViewModel()
     val pendingUpdate by updateViewModel.pendingUpdate.collectAsStateWithLifecycle()
+    val updateDownload by updateViewModel.downloadState.collectAsStateWithLifecycle()
+    val downloadDialogVisible by updateViewModel.downloadDialogVisible.collectAsStateWithLifecycle()
+    val downloadActionBusy by updateViewModel.downloadActionBusy.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, updateViewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) updateViewModel.onForeground()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    LaunchedEffect(updateDownload, downloadActionBusy) { updateViewModel.onDownloadStateVisible(updateDownload) }
+    LaunchedEffect(updateViewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            updateViewModel.installRequests.collect { file ->
+                val message = when (openUpdateInstaller(context, file)) {
+                    UpdateInstallLaunchResult.STARTED -> null
+                    UpdateInstallLaunchResult.PERMISSION_REQUIRED -> R.string.update_install_permission
+                    UpdateInstallLaunchResult.UNAVAILABLE -> R.string.update_install_failed
+                }
+                if (message != null) Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
     Scaffold(
         // 各目的地页面自行负责顶部应用栏和系统栏 insets。外层外壳只预留导航栏的位置；
@@ -312,19 +345,28 @@ fun EnglishReaderNavigation() {
             UpdateDialog(
                 versionName = update.versionName,
                 releaseNotes = update.releaseNotes,
-                onUpdate = {
-                    // 只打开 Release 页面，不下载、不安装。跳转失败要说出来，否则点了
-                    // 没反应像是按钮坏了。
+                onUpdate = updateViewModel::downloadUpdate,
+                onOpenRelease = {
                     if (!openReleasePage(context, update.releaseUrl)) {
-                        Toast.makeText(
-                            context,
-                            context.getString(R.string.update_open_release_failed),
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        Toast.makeText(context, R.string.update_open_release_failed, Toast.LENGTH_SHORT).show()
                     }
-                    updateViewModel.dismissUpdate()
                 },
                 onDismiss = updateViewModel::dismissUpdate
+            )
+        }
+        if (downloadDialogVisible) {
+            UpdateDownloadDialog(
+                state = updateDownload,
+                busy = downloadActionBusy,
+                onInstall = updateViewModel::installUpdate,
+                onRetry = updateViewModel::downloadUpdate,
+                onCancel = updateViewModel::cancelDownload,
+                onDismiss = updateViewModel::dismissDownload,
+                onOpenRelease = {
+                    if (!openReleasePage(context, UpdateReleasePolicy.LATEST_RELEASE_URL)) {
+                        Toast.makeText(context, R.string.update_open_release_failed, Toast.LENGTH_SHORT).show()
+                    }
+                }
             )
         }
 
@@ -418,6 +460,7 @@ fun EnglishReaderNavigation() {
                 onOpenCacheManagement = { navController.navigate("settings/cache") },
                 onCheckForUpdate = updateViewModel::checkManually,
                 checkingForUpdate = checkingUpdate,
+                hasUpdateDownload = updateDownload.hasDownloadTarget || downloadActionBusy,
                 manualUpdateOutcomes = updateViewModel.manualOutcomes,
                 viewModel = viewModel
             )
@@ -474,12 +517,13 @@ internal fun openTtsSystemAction(context: Context, action: TtsSystemAction): Boo
  * 企业管控设备）会抛 [ActivityNotFoundException]，被策略拦截会抛 [SecurityException]，
  * 两者都不能让 app 崩掉——这只是一个更新入口，失败了告知用户即可。
  *
- * 这是本 app 唯一的对外跳转；**不做**任何下载或安装，后续动作全部交给浏览器。
+ * 此入口只打开发布页；下载和安装由独立的更新流程持有。
  */
 internal fun openReleasePage(context: Context, url: String): Boolean {
     val uri = Uri.parse(url)
     if (uri.scheme != "https" || uri.host != "github.com" || uri.userInfo != null ||
-        (uri.port != -1 && uri.port != 443) || uri.path?.contains("/releases/tag/") != true
+        (uri.port != -1 && uri.port != 443) ||
+        (uri.path?.contains("/releases/tag/") != true && url != UpdateReleasePolicy.LATEST_RELEASE_URL)
     ) return false
     val intent = Intent(Intent.ACTION_VIEW, uri)
     return try {

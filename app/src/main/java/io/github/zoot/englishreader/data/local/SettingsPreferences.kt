@@ -11,6 +11,8 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import io.github.zoot.englishreader.model.TtsReadingSettings
+import io.github.zoot.englishreader.data.update.PendingUpdateDownload
+import io.github.zoot.englishreader.data.update.UpdateReleasePolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -84,6 +86,8 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
         private val TTS_VOICE_KEY = stringPreferencesKey("reading_tts_voice")
         private val TTS_RATE_KEY = floatPreferencesKey("reading_tts_rate")
         private val LAST_UPDATE_CHECK_KEY = longPreferencesKey("last_update_check_at")
+        private val UPDATE_DOWNLOAD_ID_KEY = longPreferencesKey("update_download_id")
+        private val UPDATE_DOWNLOAD_TAG_KEY = stringPreferencesKey("update_download_tag")
     }
 
     // DataStore 读盘失败会抛 IOException（官方约定），.catch 回退默认值而非让异常
@@ -156,6 +160,27 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
 
     suspend fun setLastUpdateCheckAt(epochMillis: Long) {
         dataStore.edit { preferences -> preferences[LAST_UPDATE_CHECK_KEY] = epochMillis }
+    }
+
+    val pendingUpdateDownload: Flow<PendingUpdateDownload?> = dataStore.data.map { preferences ->
+        val id = preferences[UPDATE_DOWNLOAD_ID_KEY]
+        val tag = preferences[UPDATE_DOWNLOAD_TAG_KEY]
+        if (id != null && id > 0 && tag != null && UpdateReleasePolicy.isValidTag(tag)) {
+            PendingUpdateDownload(id, tag)
+        } else null
+    }
+
+    suspend fun setPendingUpdateDownload(record: PendingUpdateDownload?) {
+        require(record == null || record.id > 0 && UpdateReleasePolicy.isValidTag(record.tag))
+        dataStore.edit { preferences ->
+            if (record == null) {
+                preferences.remove(UPDATE_DOWNLOAD_ID_KEY)
+                preferences.remove(UPDATE_DOWNLOAD_TAG_KEY)
+            } else {
+                preferences[UPDATE_DOWNLOAD_ID_KEY] = record.id
+                preferences[UPDATE_DOWNLOAD_TAG_KEY] = record.tag
+            }
+        }
     }
 
     suspend fun setReadingMode(mode: ReadingMode) {

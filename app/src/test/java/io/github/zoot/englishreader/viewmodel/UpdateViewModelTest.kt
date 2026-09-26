@@ -5,10 +5,19 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import io.github.zoot.englishreader.data.repository.UpdateCheckResult
 import io.github.zoot.englishreader.data.repository.UpdateRepository
+import io.github.zoot.englishreader.data.repository.UpdateDownloadRepository
+import io.github.zoot.englishreader.data.update.UpdateDownloadState
+import io.github.zoot.englishreader.data.update.UpdateDownloadException
+import io.github.zoot.englishreader.data.update.UpdateDownloadFailure
 import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
+import io.mockk.every
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
@@ -23,6 +32,10 @@ import org.junit.Test
 class UpdateViewModelTest {
     @get:Rule val dispatcher = MainDispatcherRule()
     private val repository = mockk<UpdateRepository>()
+    private val downloadUpdates = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
+    private val downloads = mockk<UpdateDownloadRepository>(relaxed = true) {
+        every { observe() } returns downloadUpdates
+    }
     private val available = UpdateCheckResult.UpdateAvailable(
         "v0.2.0", "Release", "Notes", "https://github.com/HorizonZoot/English-Reader/releases/tag/v0.2.0"
     )
@@ -31,7 +44,7 @@ class UpdateViewModelTest {
     fun automaticCheck_nonUpdateResults_neverEmitManualFeedback() = runTest {
         for (result in listOf(UpdateCheckResult.UpToDate, UpdateCheckResult.Skipped, UpdateCheckResult.Failed)) {
             coEvery { repository.checkOnLaunch() } returns result
-            val vm = UpdateViewModel(repository)
+            val vm = UpdateViewModel(repository, downloads)
             runCurrent()
             assertNull(vm.pendingUpdate.value)
             assertFalse(vm.checkingManually.value)
@@ -45,7 +58,7 @@ class UpdateViewModelTest {
         val store = ViewModelStore()
         val factory = object : ViewModelProvider.Factory {
             override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T =
-                modelClass.cast(UpdateViewModel(repository))!!
+                modelClass.cast(UpdateViewModel(repository, downloads))!!
         }
         try {
             val first = ViewModelProvider(store, factory)[UpdateViewModel::class.java]
@@ -66,7 +79,7 @@ class UpdateViewModelTest {
         coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
         val gate = CompletableDeferred<UpdateCheckResult>()
         coEvery { repository.check(manual = true) } coAnswers { gate.await() }
-        val vm = UpdateViewModel(repository)
+        val vm = UpdateViewModel(repository, downloads)
         vm.manualOutcomes.test {
             vm.checkManually()
             runCurrent()
@@ -92,7 +105,7 @@ class UpdateViewModelTest {
             withContext(NonCancellable) { oldResult.await() }
         }
         coEvery { repository.check(true) } returns available
-        val vm = UpdateViewModel(repository)
+        val vm = UpdateViewModel(repository, downloads)
         runCurrent()
         vm.checkManually()
         runCurrent()
@@ -112,7 +125,7 @@ class UpdateViewModelTest {
         coEvery { repository.check(true) } coAnswers {
             try { gate.await() } finally { cancelled = true }
         }
-        val vm = UpdateViewModel(repository)
+        val vm = UpdateViewModel(repository, downloads)
         val store = ViewModelStore().apply { put("update", vm) }
         vm.manualOutcomes.test {
             vm.checkManually()
@@ -125,5 +138,160 @@ class UpdateViewModelTest {
             assertNull(vm.pendingUpdate.value)
             expectNoEvents()
         }
+    }
+
+    @Test
+    fun manualCheck_preservesActionableFailureReasons() = runTest {
+        coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
+        val vm = UpdateViewModel(repository, downloads)
+        for ((result, outcome) in listOf(
+            UpdateCheckResult.Offline to ManualCheckOutcome.OFFLINE,
+            UpdateCheckResult.TimedOut to ManualCheckOutcome.TIMED_OUT,
+            UpdateCheckResult.RateLimited to ManualCheckOutcome.RATE_LIMITED
+        )) {
+            coEvery { repository.check(true) } returns result
+            vm.manualOutcomes.test {
+                vm.checkManually()
+                runCurrent()
+                assertEquals(outcome, awaitItem())
+                assertFalse(vm.checkingManually.value)
+            }
+        }
+    }
+
+    @Test
+    fun foregroundCheck_retriesAfterLaunchFailureWithoutManualFeedback() = runTest {
+        coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Failed
+        coEvery { repository.check(false) } returns available
+        val vm = UpdateViewModel(repository, downloads)
+        runCurrent()
+        vm.onForeground()
+        runCurrent()
+        assertEquals(available, vm.pendingUpdate.value)
+        vm.onForeground()
+        coVerify(exactly = 1) { repository.check(false) }
+        vm.manualOutcomes.test { expectNoEvents() }
+    }
+
+    @Test
+    fun confirmedDownload_isDeduplicatedAndClosingDialogDoesNotCancelIt() = runTest {
+        coEvery { repository.checkOnLaunch() } returns available
+        val gate = CompletableDeferred<Unit>()
+        coEvery { downloads.start(available.versionName, false) } coAnswers { gate.await() }
+        val vm = UpdateViewModel(repository, downloads)
+        runCurrent()
+        coVerify(exactly = 0) { downloads.start(any(), any()) }
+        vm.downloadUpdate()
+        runCurrent()
+        assertTrue(vm.downloadActionBusy.value)
+        assertNull(vm.pendingUpdate.value)
+        vm.downloadUpdate()
+        vm.dismissDownload()
+        assertFalse(vm.downloadDialogVisible.value)
+        coVerify(exactly = 1) { downloads.start(available.versionName, false) }
+        coVerify(exactly = 0) { downloads.cancel() }
+        gate.complete(Unit)
+        runCurrent()
+        assertFalse(vm.downloadActionBusy.value)
+    }
+
+    @Test
+    fun pendingDownload_manualCheckReopensProgressWithoutAnotherNetworkCheck() = runTest {
+        coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
+        val vm = UpdateViewModel(repository, downloads)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.downloadState.collect {} }
+        downloadUpdates.value = UpdateDownloadState.Downloading("v0.2.0", 10, 100, false)
+        runCurrent()
+        vm.checkManually()
+        assertTrue(vm.downloadDialogVisible.value)
+        coVerify(exactly = 0) { repository.check(true) }
+        assertFalse(vm.checkingManually.value)
+    }
+
+    @Test
+    fun unavailableDownloadMetadata_doesNotBlockManualUpdateCheck() = runTest {
+        coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
+        coEvery { repository.check(true) } returns available
+        val vm = UpdateViewModel(repository, downloads)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.downloadState.collect {} }
+        downloadUpdates.value = UpdateDownloadState.Failed("", UpdateDownloadFailure.STORAGE)
+        runCurrent()
+        vm.checkManually()
+        runCurrent()
+        assertEquals(available, vm.pendingUpdate.value)
+        coVerify(exactly = 1) { repository.check(true) }
+    }
+
+    @Test
+    fun readyDownload_notifiesOncePerFileAndInstallsOnlyAfterExplicitValidation() = runTest {
+        coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
+        val file = File("verified-update.apk")
+        val ready = UpdateDownloadState.Ready("v0.2.0", file)
+        coEvery { downloads.readyForInstall("v0.2.0") } returns file
+        val vm = UpdateViewModel(repository, downloads)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.downloadState.collect {} }
+        downloadUpdates.value = ready
+        runCurrent()
+        vm.onDownloadStateVisible(ready)
+        assertTrue(vm.downloadDialogVisible.value)
+        vm.dismissDownload()
+        vm.onDownloadStateVisible(ready)
+        assertFalse(vm.downloadDialogVisible.value)
+        vm.installRequests.test {
+            expectNoEvents()
+            vm.installUpdate()
+            runCurrent()
+            assertEquals(file, awaitItem())
+        }
+        coVerify(exactly = 1) { downloads.readyForInstall("v0.2.0") }
+    }
+
+    @Test
+    fun unknownDownloadFailure_doesNotForceRestartWhenConfirmingAnUpdate() = runTest {
+        coEvery { repository.checkOnLaunch() } returns available
+        val vm = UpdateViewModel(repository, downloads)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.downloadState.collect {} }
+        downloadUpdates.value = UpdateDownloadState.Failed("", UpdateDownloadFailure.STORAGE)
+        runCurrent()
+        assertEquals(available, vm.pendingUpdate.value)
+        vm.downloadUpdate()
+        runCurrent()
+        coVerify(exactly = 1) { downloads.start(available.versionName, false) }
+        coVerify(exactly = 0) { downloads.start(any(), true) }
+    }
+
+    @Test
+    fun cancelledDownload_staleReadyCallbackCannotReopenTheDialog() = runTest {
+        coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
+        coEvery { downloads.cancel() } coAnswers { downloadUpdates.value = UpdateDownloadState.Idle }
+        val vm = UpdateViewModel(repository, downloads)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.downloadState.collect {} }
+        val ready = UpdateDownloadState.Ready("v0.2.0", File("cancelled-update.apk"))
+        downloadUpdates.value = ready
+        runCurrent()
+        vm.cancelDownload()
+        runCurrent()
+        assertEquals(UpdateDownloadState.Idle, vm.downloadState.value)
+        vm.onDownloadStateVisible(ready)
+        assertFalse(vm.downloadDialogVisible.value)
+    }
+
+    @Test
+    fun failedRevalidation_neverEmitsInstallerRequestAndAllowsFreshDownload() = runTest {
+        coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
+        coEvery { downloads.readyForInstall("v0.2.0") } throws UpdateDownloadException(UpdateDownloadFailure.WRONG_SIGNATURE)
+        val vm = UpdateViewModel(repository, downloads)
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.downloadState.collect {} }
+        downloadUpdates.value = UpdateDownloadState.Ready("v0.2.0", File("untrusted.apk"))
+        runCurrent()
+        vm.installRequests.test {
+            vm.installUpdate()
+            runCurrent()
+            expectNoEvents()
+            assertEquals(UpdateDownloadState.Failed("v0.2.0", UpdateDownloadFailure.WRONG_SIGNATURE), vm.downloadState.value)
+        }
+        vm.downloadUpdate()
+        runCurrent()
+        coVerify(exactly = 1) { downloads.start("v0.2.0", true) }
     }
 }

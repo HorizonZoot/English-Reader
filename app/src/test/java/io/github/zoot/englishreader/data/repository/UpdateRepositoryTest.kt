@@ -230,7 +230,7 @@ class UpdateRepositoryTest {
     fun readTimeout_convergesToFailed() = runTest {
         fixture.enqueueTimeout()
 
-        assertEquals(UpdateCheckResult.Failed, fixture.repository().check(manual = true))
+        assertEquals(UpdateCheckResult.TimedOut, fixture.repository().check(manual = true))
     }
 
     @Test
@@ -250,7 +250,7 @@ class UpdateRepositoryTest {
 
         val result = fixture.repository().check(manual = true)
 
-        assertEquals(UpdateCheckResult.Failed, result)
+        assertEquals(UpdateCheckResult.Offline, result)
         assertEquals(0, fixture.server.requestCount)
     }
 

@@ -103,6 +103,7 @@ fun SettingsScreen(
     onOpenCacheManagement: () -> Unit = {},
     onCheckForUpdate: () -> Unit = {},
     checkingForUpdate: Boolean = false,
+    hasUpdateDownload: Boolean = false,
     manualUpdateOutcomes: Flow<ManualCheckOutcome> = emptyFlow(),
     viewModel: SettingsViewModel = hiltViewModel(),
     modelsViewModel: TtsModelsViewModel = hiltViewModel()
@@ -168,6 +169,9 @@ fun SettingsScreen(
             val message = when (outcome) {
                 ManualCheckOutcome.UP_TO_DATE -> R.string.update_check_up_to_date
                 ManualCheckOutcome.FAILED -> R.string.update_check_failed
+                ManualCheckOutcome.OFFLINE -> R.string.update_check_offline
+                ManualCheckOutcome.TIMED_OUT -> R.string.update_check_timeout
+                ManualCheckOutcome.RATE_LIMITED -> R.string.update_check_rate_limited
             }
             snackbarHostState.showSnackbar(context.getString(message))
         }
@@ -204,7 +208,8 @@ fun SettingsScreen(
             )
             AboutSection(
                 onCheckForUpdate = onCheckForUpdate,
-                checking = checkingForUpdate
+                checking = checkingForUpdate,
+                hasDownload = hasUpdateDownload
             )
         }
     }
@@ -223,7 +228,8 @@ fun SettingsScreen(
 @Composable
 internal fun AboutSection(
     onCheckForUpdate: () -> Unit,
-    checking: Boolean
+    checking: Boolean,
+    hasDownload: Boolean = false
 ) {
     SettingsGroup(title = stringResource(R.string.settings_about)) {
         SettingsActionRow(
@@ -254,7 +260,11 @@ internal fun AboutSection(
                 }
             },
             title = stringResource(
-                if (checking) R.string.settings_check_update_checking else R.string.settings_check_update
+                when {
+                    checking -> R.string.settings_check_update_checking
+                    hasDownload -> R.string.settings_update_download
+                    else -> R.string.settings_check_update
+                }
             ),
             onClick = if (checking) null else onCheckForUpdate,
             testTag = CHECK_UPDATE_TEST_TAG

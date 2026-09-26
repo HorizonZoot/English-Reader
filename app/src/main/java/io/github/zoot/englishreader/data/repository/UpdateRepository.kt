@@ -3,13 +3,17 @@ package io.github.zoot.englishreader.data.repository
 import android.util.Log
 import io.github.zoot.englishreader.BuildConfig
 import io.github.zoot.englishreader.data.local.SettingsPreferences
-import io.github.zoot.englishreader.data.remote.update.GitHubReleaseApiService
+import io.github.zoot.englishreader.data.update.UpdateRateLimitedException
+import io.github.zoot.englishreader.data.update.UpdateReleaseSource
 import io.github.zoot.englishreader.data.update.AppVersion
 import io.github.zoot.englishreader.util.NetworkChecker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.io.InterruptedIOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -26,11 +30,14 @@ sealed interface UpdateCheckResult {
     data object UpToDate : UpdateCheckResult
     data object Skipped : UpdateCheckResult
     data object Failed : UpdateCheckResult
+    data object Offline : UpdateCheckResult
+    data object TimedOut : UpdateCheckResult
+    data object RateLimited : UpdateCheckResult
 }
 
 @Singleton
 class UpdateRepository internal constructor(
-    private val apiService: GitHubReleaseApiService,
+    private val releaseSource: UpdateReleaseSource,
     private val settingsPreferences: SettingsPreferences,
     private val networkChecker: NetworkChecker,
     private val localVersionName: String,
@@ -38,10 +45,10 @@ class UpdateRepository internal constructor(
 ) {
     @Inject
     constructor(
-        apiService: GitHubReleaseApiService,
+        releaseSource: UpdateReleaseSource,
         settingsPreferences: SettingsPreferences,
         networkChecker: NetworkChecker
-    ) : this(apiService, settingsPreferences, networkChecker, BuildConfig.VERSION_NAME, System::currentTimeMillis)
+    ) : this(releaseSource, settingsPreferences, networkChecker, BuildConfig.VERSION_NAME, System::currentTimeMillis)
 
     private val launchCheckStarted = AtomicBoolean(false)
     private val checkMutex = Mutex()
@@ -54,9 +61,9 @@ class UpdateRepository internal constructor(
         try {
             if (!manual && isThrottled()) return@withLock UpdateCheckResult.Skipped
             if (!networkChecker.isOnline()) {
-                return@withLock if (manual) UpdateCheckResult.Failed else UpdateCheckResult.Skipped
+                return@withLock if (manual) UpdateCheckResult.Offline else UpdateCheckResult.Skipped
             }
-            val releases = apiService.getPublishedReleases()
+            val releases = releaseSource.getPublishedReleases()
             // Moshi accepts a JSON null element despite the non-null declaration; it is not "no releases".
             val release = releases.firstOrNull()
             check(releases.isEmpty() || release != null) { "Null release element" }
@@ -71,7 +78,12 @@ class UpdateRepository internal constructor(
             throw cancellation
         } catch (e: Exception) {
             Log.w(TAG, "Update check failed: ${e.javaClass.simpleName}")
-            UpdateCheckResult.Failed
+            when (e) {
+                is UpdateRateLimitedException -> UpdateCheckResult.RateLimited
+                is SocketTimeoutException, is InterruptedIOException -> UpdateCheckResult.TimedOut
+                is UnknownHostException -> UpdateCheckResult.Offline
+                else -> UpdateCheckResult.Failed
+            }
         }
     }
 

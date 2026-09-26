@@ -4,6 +4,7 @@ import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.remote.update.GitHubReleaseApiService
+import io.github.zoot.englishreader.data.update.UpdateReleaseSource
 import io.github.zoot.englishreader.util.NetworkChecker
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -63,7 +64,7 @@ internal class UpdateRepositoryFixture {
             .create(GitHubReleaseApiService::class.java)
 
         return UpdateRepository(
-            apiService = service,
+            releaseSource = UpdateReleaseSource { service.getPublishedReleases() },
             settingsPreferences = preferences,
             networkChecker = networkChecker,
             localVersionName = localVersion,

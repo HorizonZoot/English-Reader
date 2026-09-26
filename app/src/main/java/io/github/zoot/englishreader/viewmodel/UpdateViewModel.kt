@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -35,6 +36,10 @@ class UpdateViewModel @Inject constructor(
     val manualOutcomes = _manualOutcomes.receiveAsFlow()
     private val _downloadFailure = MutableStateFlow<UpdateDownloadState.Failed?>(null)
     val downloadState = combine(downloads.observe(), _downloadFailure) { state, failure -> failure ?: state }
+        .onEach { state ->
+            // A check can finish before a persisted download has been restored.
+            if (state.hasDownloadTarget) _pendingUpdate.value = null
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), UpdateDownloadState.Idle)
     private val _downloadDialogVisible = MutableStateFlow(false)
     val downloadDialogVisible = _downloadDialogVisible.asStateFlow()

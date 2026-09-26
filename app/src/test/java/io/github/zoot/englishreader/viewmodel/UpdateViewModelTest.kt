@@ -3,9 +3,13 @@ package io.github.zoot.englishreader.viewmodel
 import app.cash.turbine.test
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
+import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.repository.UpdateCheckResult
 import io.github.zoot.englishreader.data.repository.UpdateRepository
 import io.github.zoot.englishreader.data.repository.UpdateDownloadRepository
+import io.github.zoot.englishreader.data.update.PendingUpdateDownload
+import io.github.zoot.englishreader.data.update.PlatformUpdateDownload
+import io.github.zoot.englishreader.data.update.UpdateDownloadBackend
 import io.github.zoot.englishreader.data.update.UpdateDownloadState
 import io.github.zoot.englishreader.data.update.UpdateDownloadException
 import io.github.zoot.englishreader.data.update.UpdateDownloadFailure
@@ -209,6 +213,14 @@ class UpdateViewModelTest {
     }
 
     @Test
+    fun downloadRestoration_readyAfterCheck_retiresUpdatePromptBeforeInstallDialog() =
+        assertRestoredDownloadRetiresPrompt(ready = true)
+
+    @Test
+    fun downloadRestoration_transferAfterCheck_doesNotPromptToDownloadAgain() =
+        assertRestoredDownloadRetiresPrompt(ready = false)
+
+    @Test
     fun unavailableDownloadMetadata_doesNotBlockManualUpdateCheck() = runTest {
         coEvery { repository.checkOnLaunch() } returns UpdateCheckResult.Skipped
         coEvery { repository.check(true) } returns available
@@ -293,5 +305,51 @@ class UpdateViewModelTest {
         vm.downloadUpdate()
         runCurrent()
         coVerify(exactly = 1) { downloads.start("v0.2.0", true) }
+    }
+
+    private fun assertRestoredDownloadRetiresPrompt(ready: Boolean) = runTest {
+        val tag = available.versionName
+        val record = PendingUpdateDownload(42, tag)
+        val file = File("restored-update.apk")
+        val records = MutableStateFlow<PendingUpdateDownload?>(record)
+        val preferences = mockk<SettingsPreferences> {
+            every { pendingUpdateDownload } returns records
+        }
+        val restoreEntered = CompletableDeferred<Unit>()
+        val allowRestore = CompletableDeferred<Unit>()
+        val backend = mockk<UpdateDownloadBackend> {
+            coEvery { preparedFile(record) } coAnswers {
+                restoreEntered.complete(Unit)
+                allowRestore.await()
+                if (ready) file else null
+            }
+            coEvery { status(record.id) } returns PlatformUpdateDownload.Progress(10, 100, false)
+        }
+        val restoredDownloads = UpdateDownloadRepository(backend, preferences, "0.1.3-beta")
+        val checkResult = CompletableDeferred<UpdateCheckResult>()
+        coEvery { repository.checkOnLaunch() } coAnswers { checkResult.await() }
+        val vm = UpdateViewModel(repository, restoredDownloads)
+        val store = ViewModelStore().apply { put("update", vm) }
+        try {
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.downloadState.collect {} }
+            restoreEntered.await()
+            assertEquals(UpdateDownloadState.Idle, vm.downloadState.value)
+            checkResult.complete(available)
+            runCurrent()
+            assertEquals(available, vm.pendingUpdate.value)
+
+            allowRestore.complete(Unit)
+            runCurrent()
+            val expected = if (ready) UpdateDownloadState.Ready(tag, file)
+                else UpdateDownloadState.Downloading(tag, 10, 100, false)
+            assertEquals(expected, vm.downloadState.value)
+            assertNull(vm.pendingUpdate.value)
+            vm.onDownloadStateVisible(expected)
+            assertEquals(ready, vm.downloadDialogVisible.value)
+            vm.dismissDownload()
+            assertNull(vm.pendingUpdate.value)
+        } finally {
+            store.clear()
+        }
     }
 }

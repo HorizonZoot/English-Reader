@@ -20,6 +20,10 @@ import io.github.zoot.englishreader.model.TranslationPlannerVersion
 import io.github.zoot.englishreader.model.TranslationSegmentStatus
 import io.github.zoot.englishreader.model.TranslationSegmentationMode
 import io.github.zoot.englishreader.util.ParagraphAligner
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -330,6 +334,32 @@ class WholeTranslationDaoAndroidTest {
         translateAll(taskId, articleId, ONE_PARAGRAPH)
 
         assertNull(dao.claimSegment(taskId, includeFailed = true, leaseDurationMs = LEASE, now = NOW))
+    }
+
+    @Test
+    fun claimSegment_largeExcludedPrefix_keepsPagesBounded() = runBlocking {
+        val articleId = insertArticle((0 until 1_100).joinToString("\n\n") { "Paragraph $it." })
+        val taskId = createTask(articleId)
+        val page = dao.getClaimCandidates(taskId, 0, NOW, null, 0)
+        assertEquals((0 until 64).toList(), page.map { it.paragraphIndex })
+        val exclude = (0 until 1_099).map { articleId to it }.toSet()
+        assertEquals(1_099, dao.claimSegment(taskId, false, LEASE, NOW, exclude)?.paragraphIndex)
+        assertNull(dao.claimSegment(taskId, false, LEASE, NOW, exclude + (articleId to 1_099)))
+    }
+
+    @Test
+    fun claimSegment_concurrentPagedClaims_assignDistinctSegmentsOnce() = runBlocking {
+        val articleId = insertArticle((0 until 130).joinToString("\n\n") { "Paragraph $it." })
+        val taskId = createTask(articleId)
+        val exclude = (0 until 128).map { articleId to it }.toSet()
+        val results = coroutineScope {
+            List(2) {
+                async(Dispatchers.IO) { dao.claimSegment(taskId, false, LEASE, NOW, exclude) }
+            }.awaitAll()
+        }
+        assertTrue(results.all { it != null })
+        assertEquals(setOf(128, 129), results.map { it!!.paragraphIndex }.toSet())
+        assertEquals(2, dao.getSegments(taskId).sumOf { it.attemptCount })
     }
 
     @Test

@@ -4,11 +4,34 @@ import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import io.mockk.every
+import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.verify
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import okhttp3.Call
+import okhttp3.MediaType
+import okhttp3.Protocol
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
+import okio.Buffer
+import okio.Source
+import okio.Timeout
+import okio.buffer
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -48,6 +71,157 @@ class PronunciationAudioCacheTest {
         cacheDir.deleteRecursively()
         cache = PronunciationAudioCache(context)
     }
+
+    @Test
+    fun download_sequentialSameHostRequests_reusesConnection() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val audio = ByteArray(2_000) { it.toByte() }
+            repeat(2) { index ->
+                server.enqueue(MockResponse().setBody(Buffer().write(audio)))
+                cache.download("word-$index", server.url("/audio-$index").toString())
+                assertArrayEquals(audio, requireNotNull(cache.get("word-$index")).readBytes())
+            }
+            val first = requireNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+            val second = requireNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+            println("AUDIO-CONNECTION first=${first.sequenceNumber} second=${second.sequenceNumber}")
+            assertEquals(0, first.sequenceNumber)
+            assertEquals("second request should reuse the first connection", 1, second.sequenceNumber)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun download_defaultClient_preservesNetworkPolicy() {
+        val client = PronunciationAudioCache.createHttpClient()
+        assertEquals(10_000, client.connectTimeoutMillis)
+        assertEquals(15_000, client.readTimeoutMillis)
+        assertTrue(client.followRedirects)
+        assertTrue(client.followSslRedirects)
+        assertTrue(client.retryOnConnectionFailure)
+    }
+
+    @Test
+    fun download_rejectedResponses_doNotPopulateCache() = runBlocking {
+        val server = MockWebServer()
+        server.start()
+        try {
+            val responses = listOf(
+                MockResponse().setResponseCode(503).setBody(Buffer().write(ByteArray(2_000))),
+                MockResponse().setBody(Buffer().write(ByteArray(PronunciationAudioCache.MIN_AUDIO_BYTES - 1))),
+                MockResponse().setBody(Buffer().write(ByteArray(PronunciationAudioCache.MAX_AUDIO_BYTES + 1))),
+                MockResponse().setBody(Buffer().write(ByteArray(10_000)))
+                    .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+            )
+            responses.forEachIndexed { index, response ->
+                server.enqueue(response)
+                cache.download("invalid-$index", server.url("/invalid-$index").toString())
+                assertNull(cache.get("invalid-$index"))
+            }
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun download_cacheDirectoryUnavailable_keepsFailureBestEffort() = runBlocking {
+        assertTrue(cacheDir.createNewFile())
+        val call = mockk<Call>(relaxed = true)
+        every { call.execute() } returns audioResponse(ByteArray(2_000).toResponseBody())
+        val factory = mockk<Call.Factory>()
+        every { factory.newCall(any()) } returns call
+        val target = PronunciationAudioCache(context, factory)
+        target.download("word", "https://audio.example.test/word")
+        assertNull(target.get("word"))
+        verify(exactly = 1) { call.execute() }
+    }
+
+    @Test
+    fun download_cancelDuringHeadersOrBody_closesOnlyThatCallAndPropagatesCancellation() = runBlocking {
+        for (duringBody in listOf(false, true)) {
+            val blockedStarted = CountDownLatch(1)
+            val blockedRelease = CountDownLatch(1)
+            val healthyStarted = CountDownLatch(1)
+            val healthyRelease = CountDownLatch(1)
+            val bodyClosed = AtomicBoolean(false)
+            val cancellationObserved = AtomicBoolean(false)
+            val audio = ByteArray(2_000) { it.toByte() }
+            val source = object : Source {
+                override fun read(sink: Buffer, byteCount: Long): Long {
+                    blockedStarted.countDown()
+                    check(blockedRelease.await(5, TimeUnit.SECONDS))
+                    throw IOException("cancelled read")
+                }
+                override fun timeout(): Timeout = Timeout.NONE
+                override fun close() { bodyClosed.set(true) }
+            }.buffer()
+            val blockedBody = object : ResponseBody() {
+                override fun contentType(): MediaType? = null
+                override fun contentLength(): Long = audio.size.toLong()
+                override fun source() = source
+            }
+            val blocked = mockk<Call>(relaxed = true)
+            every { blocked.execute() } answers {
+                if (!duringBody) {
+                    blockedStarted.countDown()
+                    check(blockedRelease.await(5, TimeUnit.SECONDS))
+                    throw IOException("cancelled request")
+                }
+                audioResponse(blockedBody)
+            }
+            every { blocked.cancel() } answers { blockedRelease.countDown() }
+            val healthy = mockk<Call>(relaxed = true)
+            every { healthy.execute() } answers {
+                healthyStarted.countDown()
+                check(healthyRelease.await(5, TimeUnit.SECONDS))
+                audioResponse(audio.toResponseBody())
+            }
+            val factory = object : Call.Factory {
+                override fun newCall(request: Request): Call =
+                    if (request.url.encodedPath == "/blocked") blocked else healthy
+            }
+            val target = PronunciationAudioCache(context, factory)
+            val blockedWord = "blocked-$duringBody"
+            val healthyWord = "healthy-$duringBody"
+            val blockedJob = launch(Dispatchers.IO) {
+                try {
+                    target.download(blockedWord, "https://audio.example.test/blocked")
+                } catch (cancelled: CancellationException) {
+                    cancellationObserved.set(true)
+                    throw cancelled
+                }
+            }
+            val healthyJob = launch(Dispatchers.IO) {
+                target.download(healthyWord, "https://audio.example.test/healthy")
+            }
+            try {
+                assertTrue(blockedStarted.await(5, TimeUnit.SECONDS))
+                assertTrue(healthyStarted.await(5, TimeUnit.SECONDS))
+                withTimeout(2_000) { blockedJob.cancelAndJoin() }
+                assertTrue(cancellationObserved.get())
+                verify(exactly = 1) { blocked.cancel() }
+                verify(exactly = 0) { healthy.cancel() }
+                assertTrue(healthyJob.isActive)
+                assertNull(target.get(blockedWord))
+                if (duringBody) assertTrue(bodyClosed.get())
+                healthyRelease.countDown()
+                withTimeout(2_000) { healthyJob.join() }
+                assertArrayEquals(audio, requireNotNull(target.get(healthyWord)).readBytes())
+            } finally {
+                blockedRelease.countDown()
+                healthyRelease.countDown()
+                blockedJob.cancelAndJoin()
+                healthyJob.cancelAndJoin()
+                blockedBody.close()
+            }
+        }
+    }
+
+    private fun audioResponse(body: ResponseBody): Response = Response.Builder()
+        .request(Request.Builder().url("https://audio.example.test/fixture").build())
+        .protocol(Protocol.HTTP_1_1).code(200).message("OK").body(body).build()
 
     /**
      * AC2：缓存必须返回内容完整的真实文件，供 MediaPlayer.setDataSource 使用。

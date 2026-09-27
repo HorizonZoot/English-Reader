@@ -9,24 +9,38 @@ import io.github.zoot.englishreader.data.entity.VocabularyEntity
  * - A-Z：按首字母分组
  * - #：特殊字符和数字
  */
-class AlphabetGrouper {
+class AlphabetGrouper(
+    private val sortKey: (String) -> String = { it.lowercase() }
+) {
+    private data class Snapshot(val words: List<VocabularyEntity>, val groups: List<VocabularyGroup>)
+
+    @Volatile private var snapshot: Snapshot? = null
 
     fun group(
         words: List<VocabularyEntity>,
         expandedGroups: Set<VocabularyGroupId>
     ): List<VocabularyGroup> {
-        if (words.isEmpty()) return emptyList()
-
-        return words.groupBy { getFirstLetter(it.word) }
-            .toSortedMap()
-            .map { (letter, letterWords) ->
-                val groupId = VocabularyGroupId.Alphabet(letter)
-                VocabularyGroup(
-                    id = groupId,
-                    words = letterWords.sortedBy { it.word.lowercase() },
-                    isExpanded = groupId in expandedGroups
-                )
-            }
+        if (words.isEmpty()) {
+            snapshot = null
+            return emptyList()
+        }
+        val cached = snapshot
+        val groups = if (cached != null && (cached.words === words || cached.words == words)) {
+            cached.groups
+        } else {
+            words.groupBy { getFirstLetter(it.word) }
+                .toSortedMap()
+                .map { (letter, letterWords) ->
+                    VocabularyGroup(
+                        id = VocabularyGroupId.Alphabet(letter),
+                        words = letterWords.map { it to sortKey(it.word) }
+                            .sortedBy { it.second }.map { it.first }
+                    )
+                }.also { snapshot = Snapshot(words, it) }
+        }
+        return groups.map { group ->
+            if (group.id in expandedGroups) group.copy(isExpanded = true) else group
+        }
     }
 
     private fun getFirstLetter(word: String): String {

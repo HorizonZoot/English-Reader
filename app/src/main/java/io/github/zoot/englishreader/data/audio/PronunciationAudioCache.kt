@@ -14,10 +14,16 @@ import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -59,9 +65,11 @@ data class PronunciationCacheStats(val wordCount: Int, val totalBytes: Long)
  * `runCatching`，[get] 在任何异常下返回 null，[put] 静默放弃。
  */
 @Singleton
-class PronunciationAudioCache @Inject constructor(
-    @ApplicationContext private val context: Context
+class PronunciationAudioCache internal constructor(
+    private val context: Context,
+    private val callFactory: Call.Factory
 ) {
+    @Inject constructor(@ApplicationContext context: Context) : this(context, createHttpClient())
 
     /** 索引读写与清理的串行化。并发查词会同时读写索引，不加锁会丢更新。 */
     private val mutex = Mutex()
@@ -113,37 +121,40 @@ class PronunciationAudioCache @Inject constructor(
      */
     suspend fun download(word: String, url: String) = withContext(Dispatchers.IO) {
         runCatching {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(CONNECT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(READ_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
-            client.newCall(Request.Builder().url(url).build()).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-                val body = response.body ?: throw IOException("empty body")
-                // 有界读取，不用 InputStream.readNBytes —— 那是 API 33，而 minSdk 是 24
-                // （lint NewApi 抓到的）。手写循环同样有界，且不依赖平台版本。
-                val bytes = body.byteStream().use { source ->
-                    val buffer = ByteArray(READ_BUFFER_BYTES)
-                    val sink = java.io.ByteArrayOutputStream()
-                    while (sink.size() <= MAX_AUDIO_BYTES) {
-                        val read = source.read(buffer)
-                        if (read < 0) break
-                        sink.write(buffer, 0, read)
+            coroutineScope {
+                val call = callFactory.newCall(Request.Builder().url(url).build())
+                // execute() 会阻塞 IO 线程，单独的取消监护负责及时关闭这一个请求。
+                val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+                    try { awaitCancellation() } finally { call.cancel() }
+                }
+                try {
+                    coroutineContext.ensureActive()
+                    call.execute().use { response ->
+                        if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                        val body = response.body ?: throw IOException("empty body")
+                        // 有界读取，不用 API 33 的 InputStream.readNBytes（minSdk 为 24）。
+                        val bytes = body.byteStream().use { source ->
+                            val buffer = ByteArray(READ_BUFFER_BYTES)
+                            val sink = java.io.ByteArrayOutputStream()
+                            while (sink.size() <= MAX_AUDIO_BYTES) {
+                                coroutineContext.ensureActive()
+                                val read = source.read(buffer)
+                                if (read < 0) break
+                                sink.write(buffer, 0, read)
+                            }
+                            sink.toByteArray()
+                        }
+                        if (bytes.size > MAX_AUDIO_BYTES) throw IOException("audio too large: ${bytes.size}")
+                        if (bytes.size < MIN_AUDIO_BYTES) throw IOException("audio too small: ${bytes.size}")
+                        coroutineContext.ensureActive()
+                        put(word, bytes)
                     }
-                    sink.toByteArray()
+                } finally {
+                    cancellation.cancel()
                 }
-                if (bytes.size > MAX_AUDIO_BYTES) {
-                    // 实测最长的词（antidisestablishmentarianism）是 62,867 字节，
-                    // 上限留了 3 倍余量。超限说明拿到的不是单词音频。
-                    throw IOException("audio too large: ${bytes.size}")
-                }
-                if (bytes.size < MIN_AUDIO_BYTES) {
-                    // 实测最短的词（a）是 7,725 字节。太小几乎肯定是错误页面。
-                    throw IOException("audio too small: ${bytes.size}")
-                }
-                put(word, bytes)
             }
         }.onFailure {
+            coroutineContext.ensureActive()
             if (it is CancellationException) throw it
             // 只记类名：有道 URL 把单词作为查询参数，异常信息可能回显它。
             Log.w(TAG, "Audio cache download failed: ${it.javaClass.simpleName}")
@@ -379,6 +390,11 @@ class PronunciationAudioCache @Inject constructor(
     }
 
     companion object {
+        internal fun createHttpClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(CONNECT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+
         private const val TAG = "PronunciationCache"
 
         private const val DIR_NAME = "pronunciation"

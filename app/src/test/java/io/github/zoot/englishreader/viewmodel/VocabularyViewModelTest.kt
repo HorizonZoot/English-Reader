@@ -37,11 +37,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -199,6 +201,55 @@ class VocabularyViewModelTest {
 
         viewModel.toggleGroup(groupId)
         assertTrue(groupId !in viewModel.expandedGroups.value)
+    }
+
+    @Test
+    fun toggleGroup_reusesWordBucketsAcrossGroupingModes() = runTest {
+        withWords(listOf(vocab("avocado", 1), vocab("apple", 2), vocab("banana", 3)))
+        for (type in listOf(GroupType.ByTime, GroupType.ByAlphabet, GroupType.ByTime)) {
+            viewModel.switchGroupType(type)
+            viewModel.groups.test {
+                var before = awaitItem()
+                while (before.isEmpty() ||
+                    (before.first().id is VocabularyGroupId.Alphabet) != (type == GroupType.ByAlphabet)
+                ) {
+                    before = awaitItem()
+                }
+                val id = before.first().id
+                viewModel.toggleGroup(id)
+                val after = awaitItem()
+                assertEquals(before.map { it.id }, after.map { it.id })
+                before.zip(after).forEach { (old, new) ->
+                    assertSame(old.words, new.words)
+                    assertEquals(if (old.id == id) !old.isExpanded else old.isExpanded, new.isExpanded)
+                }
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun groups_resubscribedAfterStop_observesUpdatedWordsAndReusesNewBuckets() = runTest {
+        withWords(listOf(vocab("apple", 1), vocab("banana", 2)))
+        viewModel.switchGroupType(GroupType.ByAlphabet)
+        assertEquals(2, viewModel.groups.first { it.isNotEmpty() }.sumOf { it.words.size })
+        // 三层 WhileSubscribed 依次停止，确保不是沿用仍活跃的上游订阅。
+        advanceTimeBy(16_000)
+        runCurrent()
+        withWords(listOf(vocab("apricot", 1), vocab("banana", 2), vocab("avocado", 3)))
+
+        viewModel.groups.test {
+            var groups = awaitItem()
+            while (groups.sumOf { it.words.size } != 3) groups = awaitItem()
+            val a = groups.first { it.id == VocabularyGroupId.Alphabet("A") }
+            assertEquals(listOf("apricot", "avocado"), a.words.map { it.word })
+            viewModel.toggleGroup(a.id)
+            val expanded = awaitItem().first { it.id == a.id }
+            assertSame(a.words, expanded.words)
+            assertTrue(expanded.isExpanded)
+            cancelAndIgnoreRemainingEvents()
+        }
     }
 
     @Test

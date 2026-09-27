@@ -18,11 +18,26 @@ class TimeGrouper(
     private val timeZoneProvider: () -> TimeZone = TimeZone::getDefault
 ) {
 
+    private data class Snapshot(
+        val words: List<VocabularyEntity>,
+        val todayStart: Long,
+        val yesterdayStart: Long,
+        val thisWeekStart: Long,
+        val timeZone: TimeZone,
+        val groups: List<VocabularyGroup>
+    )
+
+    // 一次发布完整快照；展开状态不参与分桶，日期与时区变化仍会使缓存失效。
+    @Volatile private var snapshot: Snapshot? = null
+
     fun group(
         words: List<VocabularyEntity>,
         expandedGroups: Set<VocabularyGroupId>
     ): List<VocabularyGroup> {
-        if (words.isEmpty()) return emptyList()
+        if (words.isEmpty()) {
+            snapshot = null
+            return emptyList()
+        }
 
         val now = nowProvider()
         val timeZone = timeZoneProvider()
@@ -31,6 +46,17 @@ class TimeGrouper(
             add(Calendar.DAY_OF_MONTH, -1)
         }
         val thisWeekStart = startOfWeek(now, timeZone)
+        val cached = snapshot
+        if (cached != null && (cached.words === words || cached.words == words) &&
+            cached.todayStart == todayStart.timeInMillis &&
+            cached.yesterdayStart == yesterdayStart.timeInMillis &&
+            cached.thisWeekStart == thisWeekStart.timeInMillis && cached.timeZone == timeZone
+        ) {
+            return withExpansion(cached.groups, expandedGroups)
+        }
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).apply {
+            this.timeZone = timeZone
+        }
         val buckets = linkedMapOf<VocabularyGroupId, MutableList<VocabularyEntity>>()
 
         words.forEach { word ->
@@ -38,7 +64,7 @@ class TimeGrouper(
                 word.createdAt >= todayStart.timeInMillis -> VocabularyGroupId.Today
                 word.createdAt >= yesterdayStart.timeInMillis -> VocabularyGroupId.Yesterday
                 word.createdAt >= thisWeekStart.timeInMillis -> VocabularyGroupId.ThisWeek
-                else -> VocabularyGroupId.OlderDate(formatDate(word.createdAt, timeZone))
+                else -> VocabularyGroupId.OlderDate(dateFormat.format(Date(word.createdAt)))
             }
             buckets.getOrPut(groupId) { mutableListOf() } += word
         }
@@ -55,14 +81,18 @@ class TimeGrouper(
                 .forEach(::add)
         }
 
-        return orderedIds.map { id ->
-            VocabularyGroup(
-                id = id,
-                words = buckets.getValue(id),
-                isExpanded = id in expandedGroups
-            )
+        val groups = orderedIds.map { id ->
+            VocabularyGroup(id = id, words = buckets.getValue(id))
         }
+        snapshot = Snapshot(
+            words, todayStart.timeInMillis, yesterdayStart.timeInMillis, thisWeekStart.timeInMillis,
+            timeZone.clone() as TimeZone, groups
+        )
+        return withExpansion(groups, expandedGroups)
     }
+
+    private fun withExpansion(groups: List<VocabularyGroup>, expanded: Set<VocabularyGroupId>) =
+        groups.map { group -> if (group.id in expanded) group.copy(isExpanded = true) else group }
 
     private fun startOfDay(timestamp: Long, timeZone: TimeZone): Calendar {
         val calendar = Calendar.getInstance(timeZone)
@@ -95,11 +125,5 @@ class TimeGrouper(
         calendar.set(Calendar.SECOND, 0)
         calendar.set(Calendar.MILLISECOND, 0)
         return calendar
-    }
-
-    private fun formatDate(timestamp: Long, timeZone: TimeZone): String {
-        return SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).apply {
-            this.timeZone = timeZone
-        }.format(Date(timestamp))
     }
 }

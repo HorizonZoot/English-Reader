@@ -3,6 +3,8 @@ package io.github.zoot.englishreader.ui.screen.vocabulary
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Calendar
@@ -88,6 +90,65 @@ class TimeGrouperTest {
         )
 
         assertTrue(groups.single().isExpanded)
+    }
+
+    @Test
+    fun group_repeatedExpansion_reusesBucketsAtEveryVocabularySize() {
+        val rebuiltCounts = listOf(100, 1_000, 10_000).map { size ->
+            val grouper = grouper(localMillis(2024, Calendar.JULY, 18, 12))
+            val words = List(size) { vocab(it.toLong(), localMillis(2024, Calendar.JULY, 10)) }
+            val first = grouper.group(words, emptySet()).single()
+            var rebuilt = 0
+            repeat(20) { iteration ->
+                val expanded = iteration % 2 == 0
+                val next = grouper.group(words, if (expanded) setOf(first.id) else emptySet()).single()
+                if (next.words !== first.words) rebuilt++
+                assertEquals(expanded, next.isExpanded)
+                assertEquals(words, next.words)
+            }
+            println("TIME-GROUP size=$size toggles=20 rebuiltBuckets=$rebuilt")
+            rebuilt
+        }
+        assertEquals(listOf(0, 0, 0), rebuiltCounts)
+    }
+
+    @Test
+    fun group_wordSnapshotChanges_invalidatesBucketsAndAcceptsEqualCopies() {
+        val grouper = grouper(localMillis(2024, Calendar.JULY, 18, 12))
+        val words = listOf(vocab(1, localMillis(2024, Calendar.JULY, 18, 9)))
+        val first = grouper.group(words, emptySet()).single()
+        assertSame(first.words, grouper.group(words.map { it.copy() }, emptySet()).single().words)
+
+        val added = words + vocab(2, localMillis(2024, Calendar.JULY, 18, 10))
+        val afterAdd = grouper.group(added, emptySet()).single()
+        assertNotSame(first.words, afterAdd.words)
+        assertEquals(listOf(1L, 2L), afterAdd.words.map { it.id })
+        assertEquals(listOf(2L), grouper.group(added.drop(1), emptySet()).single().words.map { it.id })
+        assertTrue(grouper.group(emptyList(), emptySet()).isEmpty())
+    }
+
+    @Test
+    fun group_midnightAndDstChanges_reclassifiesTheSameWordSnapshot() {
+        for ((month, day) in listOf(Calendar.MARCH to 10, Calendar.NOVEMBER to 3, Calendar.JULY to 18)) {
+            var now = localMillis(2024, month, day, 12)
+            val grouper = TimeGrouper(nowProvider = { now }, timeZoneProvider = { zone })
+            val words = listOf(vocab(1, localMillis(2024, month, day, 9)))
+            assertEquals(VocabularyGroupId.Today, grouper.group(words, emptySet()).single().id)
+            now = localMillis(2024, month, day + 1, 12)
+            assertEquals(VocabularyGroupId.Yesterday, grouper.group(words, emptySet()).single().id)
+        }
+    }
+
+    @Test
+    fun group_timeZoneChanges_reclassifiesTheSameWordSnapshot() {
+        val utc = TimeZone.getTimeZone("UTC")
+        var currentZone = utc
+        val now = Calendar.getInstance(utc).apply { clear(); set(2024, Calendar.JULY, 18, 1, 0) }.timeInMillis
+        val words = listOf(vocab(1, now - 2 * 60 * 60 * 1000L))
+        val grouper = TimeGrouper(nowProvider = { now }, timeZoneProvider = { currentZone })
+        assertEquals(VocabularyGroupId.Yesterday, grouper.group(words, emptySet()).single().id)
+        currentZone = zone
+        assertEquals(VocabularyGroupId.Today, grouper.group(words, emptySet()).single().id)
     }
 
     private fun assertPreviousDayBounds(now: Long, yesterdayStart: Long, todayStart: Long) {

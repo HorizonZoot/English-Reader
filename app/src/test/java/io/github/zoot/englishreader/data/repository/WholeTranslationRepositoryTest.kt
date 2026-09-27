@@ -45,6 +45,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -92,6 +93,7 @@ class WholeTranslationRepositoryTest {
 
     /** executor 收到的规范化段落文本，按调用顺序。 */
     private val requestedInputs = mutableListOf<String>()
+    private val claimUpdates = AtomicInteger()
 
     @Before
     fun setUp() {
@@ -100,6 +102,11 @@ class WholeTranslationRepositoryTest {
             .allowMainThreadQueries()
             .setQueryExecutor(Runnable::run)
             .setTransactionExecutor(Runnable::run)
+            .setQueryCallback({ sql, _ ->
+                if (sql.startsWith("UPDATE translation_segments SET status = 'translating'")) {
+                    claimUpdates.incrementAndGet()
+                }
+            }, Runnable::run)
             .build()
         executor = mockk()
         resolver = mockk()
@@ -1061,7 +1068,117 @@ class WholeTranslationRepositoryTest {
         assertNull(db.articleDao().getArticleById(articleId)?.translation)
     }
 
-    // ---- helpers ----
+    @Test
+    fun claimSegment_completedRows_doNotIssueUselessUpdates() = runTest {
+        val (taskId, _) = claimFixture(size = 100, pendingLast = false)
+        claimUpdates.set(0)
+        assertNull(db.wholeTranslationDao().claimSegment(taskId, true, 60_000, NOW))
+        println("TRANSLATION-CLAIM rows=100 eligible=0 updates=${claimUpdates.get()}")
+        assertEquals(0, claimUpdates.get())
+    }
+
+    @Test
+    fun claimSegment_completedPrefix_issuesOnlyTheWinningUpdate() = runTest {
+        val (taskId, articleId) = claimFixture(size = 100, pendingLast = true)
+        claimUpdates.set(0)
+        val claimed = requireNotNull(db.wholeTranslationDao().claimSegment(taskId, false, 60_000, NOW))
+        assertEquals(articleId, claimed.articleId)
+        assertEquals(99, claimed.paragraphIndex)
+        println("TRANSLATION-CLAIM rows=100 eligible=1 updates=${claimUpdates.get()}")
+        assertEquals(1, claimUpdates.get())
+    }
+
+    @Test
+    fun claimSegment_largeExcludedPrefix_pagesAcrossArticlesWithoutBindingTheSet() = runTest {
+        val (taskId, firstArticle) = claimFixture(size = 1_100, pendingLast = false)
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE translation_segments SET status = 'untranslated', translatedText = NULL WHERE taskId = ?",
+            arrayOf(taskId)
+        )
+        val secondArticle = insertArticle("Next article.")
+        val dao = db.wholeTranslationDao()
+        dao.insertSegments(listOf(TranslationSegmentEntity(
+            taskId = taskId, articleId = secondArticle, paragraphIndex = 0,
+            sourceFingerprint = "next", status = "untranslated", updatedAt = NOW
+        )))
+        val firstPage = dao.getClaimCandidates(taskId, 0, NOW, null, 0)
+        assertEquals((0 until 64).toList(), firstPage.map { it.paragraphIndex })
+        val secondPage = dao.getClaimCandidates(taskId, 0, NOW, firstArticle, 63)
+        assertEquals((64 until 128).toList(), secondPage.map { it.paragraphIndex })
+        val exclude = (0 until 1_100).map { firstArticle to it }.toSet()
+        claimUpdates.set(0)
+
+        val claimed = requireNotNull(dao.claimSegment(taskId, false, 60_000, NOW, exclude))
+
+        assertEquals(secondArticle, claimed.articleId)
+        assertEquals(0, claimed.paragraphIndex)
+        assertEquals(1, claimUpdates.get())
+        assertNull(dao.claimSegment(taskId, false, 60_000, NOW, exclude + (secondArticle to 0)))
+    }
+
+    @Test
+    fun claimSegment_nonRetryablePages_areSkippedAndExcludedFailureIsNotRepeated() = runTest {
+        val (taskId, articleId) = claimFixture(size = 72, pendingLast = false)
+        for (index in 0 until 70) {
+            setClaimState(taskId, index, "failed", listOf("configuration", "paragraph_too_long", "future", null)[index % 4])
+        }
+        setClaimState(taskId, 70, "failed", "transient_network")
+        setClaimState(taskId, 71, "future")
+        val dao = db.wholeTranslationDao()
+        claimUpdates.set(0)
+        assertNull(dao.claimSegment(taskId, false, 60_000, NOW))
+        assertEquals(0, claimUpdates.get())
+        assertEquals(70, dao.claimSegment(taskId, true, 60_000, NOW)?.paragraphIndex)
+        assertEquals(1, claimUpdates.get())
+        setClaimState(taskId, 70, "failed", "transient_network")
+        assertNull(dao.claimSegment(taskId, true, 60_000, NOW, setOf(articleId to 70)))
+        assertEquals(1, claimUpdates.get())
+    }
+
+    @Test
+    fun claimSegment_earlierLeaseExpiresBetweenCalls_restartsAtTheEarlierKey() = runTest {
+        val (taskId, articleId) = claimFixture(size = 2, pendingLast = true)
+        setClaimState(taskId, 0, "untranslated")
+        val dao = db.wholeTranslationDao()
+        assertEquals(1, dao.tryClaimSegment(taskId, articleId, 0, NOW + 5, NOW, 0))
+        assertEquals(1, dao.claimSegment(taskId, false, 60_000, NOW)?.paragraphIndex)
+        val reclaimed = requireNotNull(dao.claimSegment(taskId, false, 60_000, NOW + 6))
+        assertEquals(0, reclaimed.paragraphIndex)
+        assertEquals(2, reclaimed.attemptCount)
+    }
+
+    @Test
+    fun claimSegment_statusAndLeaseMatrix_preservesEligibility() = runTest {
+        data class Case(
+            val status: String,
+            val reason: String? = null,
+            val lease: Long? = null,
+            val resume: Boolean,
+            val retry: Boolean = resume
+        )
+        val cases = listOf(
+            Case("untranslated", resume = true),
+            Case("translated", resume = false),
+            Case("future", resume = false),
+            Case("translating", lease = NOW + 1, resume = false),
+            Case("translating", lease = NOW, resume = true),
+            Case("translating", lease = null, resume = true),
+            Case("failed", "transient_network", resume = false, retry = true),
+            Case("failed", "provider_response", resume = false, retry = true),
+            Case("failed", "configuration", resume = false),
+            Case("failed", "paragraph_too_long", resume = false),
+            Case("failed", "future", resume = false),
+            Case("failed", null, resume = false)
+        )
+        for (case in cases) {
+            for (includeFailed in listOf(false, true)) {
+                val (taskId, _) = claimFixture(size = 1, pendingLast = false)
+                setClaimState(taskId, 0, case.status, case.reason, case.lease)
+                val result = db.wholeTranslationDao().claimSegment(taskId, includeFailed, 60_000, NOW)
+                assertEquals("$case retry=$includeFailed", if (includeFailed) case.retry else case.resume, result != null)
+            }
+        }
+    }
 
     private fun setClaimState(taskId: Long, index: Int, status: String, reason: String? = null, lease: Long? = null) {
         db.openHelper.writableDatabase.execSQL(
@@ -1070,6 +1187,25 @@ class WholeTranslationRepositoryTest {
             arrayOf(status, reason, lease, taskId, index)
         )
     }
+
+    private suspend fun claimFixture(size: Int, pendingLast: Boolean): Pair<Long, Long> {
+        val articleId = insertArticle((0 until size).joinToString("\n\n") { "Paragraph $it." })
+        val dao = db.wholeTranslationDao()
+        val taskId = dao.insertTaskRow(WholeTranslationTaskEntity(
+            scopeKey = "article:$articleId", status = "running", createdAt = NOW, updatedAt = NOW
+        ))
+        dao.insertSegments(List(size) { index ->
+            val pending = pendingLast && index == size - 1
+            TranslationSegmentEntity(
+                taskId = taskId, articleId = articleId, paragraphIndex = index,
+                sourceFingerprint = "synthetic-$index", status = if (pending) "untranslated" else "translated",
+                translatedText = if (pending) null else "translated ".repeat(100), updatedAt = NOW
+            )
+        })
+        return taskId to articleId
+    }
+
+    // ---- helpers ----
 
     private suspend fun createPausedTask(articleId: Long): Long {
         val content = requireNotNull(db.articleDao().getArticleById(articleId)).content

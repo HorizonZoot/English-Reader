@@ -83,6 +83,26 @@ interface WholeTranslationDao {
     )
     suspend fun getSegments(taskId: Long): List<TranslationSegmentEntity>
 
+    /** 只物化可尝试领取的有限窗口；失败类别仍由 claimSegment 的域规则判定。 */
+    @Query(
+        "SELECT * FROM translation_segments WHERE taskId = :taskId " +
+            "AND EXISTS (SELECT 1 FROM whole_translation_tasks WHERE taskId = :taskId " +
+            "AND status NOT IN ('completed', 'cancelled')) " +
+            "AND (:afterArticleId IS NULL OR articleId > :afterArticleId " +
+            "OR (articleId = :afterArticleId AND paragraphIndex > :afterParagraphIndex)) " +
+            "AND (status = 'untranslated' " +
+            "OR (status = 'translating' AND (leaseExpiresAt IS NULL OR leaseExpiresAt <= :now)) " +
+            "OR (status = 'failed' AND :includeFailed = 1)) " +
+            "ORDER BY articleId ASC, paragraphIndex ASC LIMIT 64"
+    )
+    suspend fun getClaimCandidates(
+        taskId: Long,
+        includeFailed: Int,
+        now: Long,
+        afterArticleId: Long?,
+        afterParagraphIndex: Int
+    ): List<TranslationSegmentEntity>
+
     /** 保留坏行校验所需元数据；worker 与发布仍读取完整 checkpoint。 */
     @Query(TRANSLATION_PROGRESS_QUERY)
     fun observeProgressRows(
@@ -496,34 +516,42 @@ interface WholeTranslationDao {
     ): TranslationSegmentEntity? {
         reclaimExpiredLeases(taskId, now)
 
-        val candidates = getSegments(taskId)
-        for (segment in candidates) {
-            if (segment.articleId to segment.paragraphIndex in exclude) continue
-            // SQL 只看得到 status 字面量，看不到失败类别。PERMANENT（段落超长）与 FATAL（配置）
-            // 的失败在重试模式下也不得领取：重试前者只会原样再撞一次上限，后者要用户先修
-            // 配置。资格判定与域模型 isEligibleFor 保持同一来源。
-            if (segment.status == "failed") {
-                val reason = TranslationFailureReason.fromStableToken(segment.failureReason)
-                if (!includeFailed || reason?.category?.isRetryable != true) continue
-            }
-            val claimed = tryClaimSegment(
-                taskId = taskId,
-                articleId = segment.articleId,
-                paragraphIndex = segment.paragraphIndex,
-                leaseExpiresAt = now + leaseDurationMs,
-                now = now,
-                includeFailed = if (includeFailed) 1 else 0
+        // 游标只属于这一次领取；下一次必须重新看更早位置刚过期的 lease。
+        var afterArticleId: Long? = null
+        var afterParagraphIndex = 0
+        while (true) {
+            val candidates = getClaimCandidates(
+                taskId, if (includeFailed) 1 else 0, now, afterArticleId, afterParagraphIndex
             )
-            if (claimed > 0) {
-                return segment.copy(
-                    status = "translating",
+            if (candidates.isEmpty()) return null
+            for (segment in candidates) {
+                // 即使整页都被 exclude/失败规则排除，也必须继续向后推进。
+                afterArticleId = segment.articleId
+                afterParagraphIndex = segment.paragraphIndex
+                if (segment.articleId to segment.paragraphIndex in exclude) continue
+                // SQL 仅筛状态，失败类别沿用域模型，不能重试永久或配置失败。
+                if (segment.status == "failed") {
+                    val reason = TranslationFailureReason.fromStableToken(segment.failureReason)
+                    if (!includeFailed || reason?.category?.isRetryable != true) continue
+                }
+                val claimed = tryClaimSegment(
+                    taskId = taskId,
+                    articleId = segment.articleId,
+                    paragraphIndex = segment.paragraphIndex,
                     leaseExpiresAt = now + leaseDurationMs,
-                    attemptCount = segment.attemptCount + 1,
-                    updatedAt = now
+                    now = now,
+                    includeFailed = if (includeFailed) 1 else 0
                 )
+                if (claimed > 0) {
+                    return segment.copy(
+                        status = "translating",
+                        leaseExpiresAt = now + leaseDurationMs,
+                        attemptCount = segment.attemptCount + 1,
+                        updatedAt = now
+                    )
+                }
             }
         }
-        return null
     }
 
     /**

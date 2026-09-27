@@ -43,6 +43,53 @@ object EpubFixtures {
         return zip(entries)
     }
 
+    fun svgCoverBook(
+        coverContent: String = """<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><image width="1" height="1" xlink:href="artwork.svg"/></svg>""",
+        chapters: List<String> = listOf("First chapter body.", "Second chapter body."),
+        coverPath: String = "front.svg",
+        coverHref: String = coverPath,
+        omitCover: Boolean = false,
+        encryptedCover: Boolean = false
+    ): ByteArray {
+        val manifest = chapters.indices.map { index ->
+            """<item id="ch$index" href="ch$index.xhtml" media-type="application/xhtml+xml"/>"""
+        }
+        val spine = chapters.indices.map { index -> """<itemref idref="ch$index"/>""" }
+        val entries = mutableMapOf(
+            "META-INF/container.xml" to containerXml("OEBPS/content.opf"),
+            "OEBPS/content.opf" to lines(
+                """<?xml version="1.0" encoding="UTF-8"?>""",
+                """<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id">""",
+                """<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">""",
+                """<dc:identifier id="book-id">urn:uuid:svg-cover-fixture</dc:identifier>""",
+                """<dc:title>SVG Cover Book</dc:title><dc:language>en</dc:language>""",
+                """<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>""",
+                """</metadata><manifest>""",
+                """<item id="cover" href="$coverHref" media-type="image/svg+xml"/>""",
+                """<item id="artwork" href="artwork.svg" media-type="image/svg+xml"/>""",
+                """<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>""",
+                *manifest.toTypedArray(),
+                """</manifest><spine><itemref idref="cover"/>""",
+                *spine.toTypedArray(),
+                """</spine></package>"""
+            ),
+            "OEBPS/$coverPath" to coverContent,
+            "OEBPS/artwork.svg" to """<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1"/></svg>""",
+            "OEBPS/nav.xhtml" to xhtmlRawBody(
+                """<nav xmlns:epub="http://www.idpf.org/2007/ops" epub:type="toc"><ol>""" +
+                    chapters.indices.joinToString("") { index ->
+                        """<li><a href="ch$index.xhtml">Chapter ${index + 1}</a></li>"""
+                    } + "</ol></nav>"
+            )
+        )
+        chapters.forEachIndexed { index, body -> entries["OEBPS/ch$index.xhtml"] = xhtml(body) }
+        if (omitCover) entries.remove("OEBPS/$coverPath")
+        if (encryptedCover) {
+            entries["META-INF/encryption.xml"] = encryptionXml("OEBPS/$coverHref")
+        }
+        return zip(entries)
+    }
+
     fun containerXml(fullPath: String): String = lines(
         """<?xml version="1.0" encoding="UTF-8"?>""",
         """<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">""",

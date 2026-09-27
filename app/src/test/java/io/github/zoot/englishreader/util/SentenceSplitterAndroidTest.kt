@@ -15,7 +15,7 @@ import org.robolectric.annotation.Config
  * 称谓合并修正（Mr./Dr./Ms./Prof./U.S./e.g./i.e. 不应触发断句）。
  *
  * 同仓库 `ParagraphAlignerRealSplitterTest` 已在 Robolectric 下跑过更棘手的文本
- * （省略号、括号、引号、中英混排、多段），证明 Robolectric ICU 与真机行为一致。
+ * （省略号、括号、引号、中英混排、多段）；这些 JVM 结果不证明各 Android 设备的 ICU 行为一致。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)

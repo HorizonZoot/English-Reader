@@ -1,5 +1,8 @@
 package io.github.zoot.englishreader.data.dictionary
 
+/** Inventory tier only; it does not prove that a particular installation succeeded. */
+internal fun hasExtendedDictionary(entryCount: Int): Boolean = entryCount >= 50_000
+
 /**
  * 扩展词库的安装状态。
  *
@@ -49,9 +52,8 @@ sealed interface DictionaryPackState {
     /**
      * 失败。
      *
-     * 失败后**内置词库仍然可用** —— 安装走 `replaceAll` 事务，回滚后版本号未落盘，
-     * 下次启动会重新从 assets 初始化。所以这个状态对用户的含义是「扩展词库没装上」，
-     * 不是「查词坏了」。
+     * 安装失败保留事务前的词库；取消后的库存收尾可能另行发布 [Installed]，
+     * 仅表示完整扩展库存仍在，不表示本次安装成功。
      */
     data class Failed(val reason: DictionaryPackFailure) : DictionaryPackState
 }

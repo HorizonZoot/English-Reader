@@ -7,6 +7,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 import io.github.zoot.englishreader.data.entity.ArticleTranslationStateEntity
 import io.github.zoot.englishreader.data.entity.ReadingPositionEntity
+import io.github.zoot.englishreader.data.entity.TranslationProgressRow
 import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.TranslationTaskArticleEntity
 import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
@@ -22,6 +23,12 @@ import io.github.zoot.englishreader.model.TranslationMaterializationPolicy
 import io.github.zoot.englishreader.model.TranslationPlannerVersion
 import io.github.zoot.englishreader.model.TranslatedBlock
 import kotlinx.coroutines.flow.Flow
+
+private const val TRANSLATION_PROGRESS_QUERY =
+    "SELECT articleId, paragraphIndex, attemptCount, status, failureReason, leaseExpiresAt, " +
+        "(translatedText IS NOT NULL AND trim(translatedText, :whitespaceChars) != '') " +
+        "AS hasNonBlankTranslation FROM translation_segments WHERE taskId = :taskId " +
+        "ORDER BY articleId ASC, paragraphIndex ASC"
 
 /**
  * 全文翻译任务的持久化边界。
@@ -44,7 +51,7 @@ interface WholeTranslationDao {
     /**
      * 观察任务行。
      *
-     * 与 [observeSegments] 分开是必要的：materialize 只改 `whole_translation_tasks` 与
+     * 与 [observeProgressRows] 分开是必要的：materialize 只改 `whole_translation_tasks` 与
      * `articles`，不碰任何段落行。若 UI 只订阅段落表，任务完成这个最重要的状态变化就永远
      * 到不了它——进度停在 N/N，文案还写着「正在翻译」。
      */
@@ -76,18 +83,18 @@ interface WholeTranslationDao {
     )
     suspend fun getSegments(taskId: Long): List<TranslationSegmentEntity>
 
-    /**
-     * 观察进度。
-     *
-     * 返回整行而非计数聚合：UI 需要区分「已翻译/失败/未翻译」的分项数量，且
-     * `WholeTranslationProgress.from` 已经是这份映射的唯一实现，让它继续持有分类逻辑，
-     * 比在 SQL 里再写一遍 status token 比较更不容易与域模型分叉。
-     */
-    @Query(
-        "SELECT * FROM translation_segments WHERE taskId = :taskId " +
-            "ORDER BY articleId ASC, paragraphIndex ASC"
-    )
-    fun observeSegments(taskId: Long): Flow<List<TranslationSegmentEntity>>
+    /** 保留坏行校验所需元数据；worker 与发布仍读取完整 checkpoint。 */
+    @Query(TRANSLATION_PROGRESS_QUERY)
+    fun observeProgressRows(
+        taskId: Long,
+        whitespaceChars: String = TranslationProgressRow.WHITESPACE_CHARS
+    ): Flow<List<TranslationProgressRow>>
+
+    @Query(TRANSLATION_PROGRESS_QUERY)
+    suspend fun getProgressRows(
+        taskId: Long,
+        whitespaceChars: String = TranslationProgressRow.WHITESPACE_CHARS
+    ): List<TranslationProgressRow>
 
     @Query("SELECT articleId FROM book_chapters WHERE bookId = :bookId ORDER BY chapterIndex ASC")
     suspend fun getBookArticleIds(bookId: Long): List<Long>

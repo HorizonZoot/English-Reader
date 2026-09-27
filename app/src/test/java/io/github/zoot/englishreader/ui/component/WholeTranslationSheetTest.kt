@@ -190,9 +190,32 @@ class WholeTranslationSheetTest {
         assertEquals(listOf("retry"), clicks)
     }
 
-    // 「暂停且无失败 → 继续翻译」不单独测：primaryAction 的四路推导由
-    // WholeTranslationDomainTest.primaryAction_derivesFromStatusAndFailures 直接覆盖，
-    // 本类只需一条用例证明主按钮把推导结果派发出去（上一条）。
+    @Test
+    fun tracking_onlyBlockedFailures_explainsAndClosesWithoutRetry() {
+        val initial = tracking(WholeTranslationTaskStatus.FAILED, translated = 1, total = 3, failed = 2,
+            failureReason = TranslationFailureReason.CONFIGURATION)
+        setContent(initial.copy(progress = initial.progress.copy(
+            retryableFailures = 0, configurationFailures = 0, permanentFailures = 1, unclassifiedFailures = 1
+        )))
+
+        composeRule.onNodeWithTag("whole-translation-status")
+            .assertTextContains("AI 配置或凭据不可用", substring = true)
+        composeRule.onNodeWithTag("whole-translation-blocked")
+            .performScrollTo().assertIsDisplayed().assertTextContains("无法直接重试", substring = true)
+        composeRule.onNodeWithTag("whole-translation-primary")
+            .performScrollTo().assertIsDisplayed().assertTextEquals("关闭").performClick()
+        assertEquals(listOf("dismiss"), clicks)
+    }
+
+    @Test
+    fun tracking_interruptedTaskWithRemainingWork_resumesWithoutDismissOrCancel() {
+        setContent(tracking(WholeTranslationTaskStatus.PAUSED, translated = 1, total = 3))
+
+        composeRule.onNodeWithTag("whole-translation-primary")
+            .performScrollTo().assertIsDisplayed().assertTextEquals("继续翻译").performClick()
+
+        assertEquals(listOf("resume"), clicks)
+    }
 
     @Test
     fun tracking_cancelTask_isSeparateFromDismiss() {
@@ -309,7 +332,9 @@ class WholeTranslationSheetTest {
             translated = translated,
             translating = 0,
             failed = failed,
-            untranslated = total - translated - failed
+            untranslated = total - translated - failed,
+            retryableFailures = if (failureReason == TranslationFailureReason.CONFIGURATION) 0 else failed,
+            configurationFailures = if (failureReason == TranslationFailureReason.CONFIGURATION) failed else 0
         ),
         failureReason = failureReason
     )

@@ -38,6 +38,69 @@ class EpubBookParserTest {
     }
 
     @Test
+    fun parse_linearSvgImageCover_skipsCoverAndPreservesBody() = runTest {
+        val book = parser.parse(write(EpubFixtures.svgCoverBook()))
+
+        assertEquals(listOf("First chapter body.", "Second chapter body."), book.chapters.map { it.content })
+        assertEquals(listOf(0, 1), book.chapters.map { it.chapterIndex })
+        assertTrue(book.chapters.none { it.sourceHref.endsWith("front.svg") })
+    }
+
+    @Test
+    fun parse_svgTitleAndWhitespace_skipWithoutChangingExtractionRules() = runTest {
+        for (body in listOf("<title>Cover title</title>", "<desc> \t </desc><metadata> </metadata>")) {
+            val cover = """<svg xmlns="http://www.w3.org/2000/svg">$body</svg>"""
+            val book = parser.parse(write(EpubFixtures.svgCoverBook(cover)))
+            assertEquals(listOf("First chapter body.", "Second chapter body."), book.chapters.map { it.content })
+        }
+    }
+
+    @Test
+    fun parse_svgRetainedText_rejectsInsteadOfDroppingIt() = runTest {
+        for (tag in listOf("text", "desc", "metadata")) {
+            val cover = """<svg xmlns="http://www.w3.org/2000/svg"><$tag>Retained text.</$tag></svg>"""
+            val failure = runCatching { parser.parse(write(EpubFixtures.svgCoverBook(cover))) }.exceptionOrNull()
+            assertEquals(tag, ImportFailure.InvalidEpub, (failure as? ImportException)?.failure)
+        }
+    }
+
+    @Test
+    fun parse_svgOnlyBook_reportsNoReadableChapters() = runTest {
+        val failure = runCatching {
+            parser.parse(write(EpubFixtures.svgCoverBook(chapters = emptyList())))
+        }.exceptionOrNull()
+        assertEquals(ImportFailure.NoReadableChapters, (failure as? ImportException)?.failure)
+    }
+
+    @Test
+    fun parse_svgInvalidMissingOrEncrypted_preservesFailureKinds() = runTest {
+        val cases = listOf(
+            EpubFixtures.svgCoverBook(coverContent = "<svg><image></svg>") to ImportFailure.InvalidEpub,
+            EpubFixtures.svgCoverBook(omitCover = true) to ImportFailure.InvalidEpub,
+            EpubFixtures.svgCoverBook(encryptedCover = true) to ImportFailure.EncryptedEpub
+        )
+        for ((bytes, expected) in cases) {
+            val failure = runCatching { parser.parse(write(bytes)) }.exceptionOrNull()
+            assertEquals(expected, (failure as? ImportException)?.failure)
+        }
+    }
+
+    @Test
+    fun parse_svgEncodedMisleadingHref_classifiesByOpf() = runTest {
+        val bytes = EpubFixtures.svgCoverBook(
+            coverPath = "images/front matter.xhtml", coverHref = "images/./front%20matter.xhtml"
+        )
+        val book = parser.parse(write(bytes))
+        assertEquals(listOf("First chapter body.", "Second chapter body."), book.chapters.map { it.content })
+        val nonBlank = EpubFixtures.svgCoverBook(
+            coverContent = """<svg xmlns="http://www.w3.org/2000/svg"><desc>Retained text.</desc></svg>""",
+            coverPath = "front.xhtml"
+        )
+        val failure = runCatching { parser.parse(write(nonBlank)) }.exceptionOrNull()
+        assertEquals(ImportFailure.InvalidEpub, (failure as? ImportException)?.failure)
+    }
+
+    @Test
     fun parse_packageVersion_recordsFormatIndependentlyOfToc() = runTest {
         // EPUB 2 和 EPUB 3 都有非空目录，版本只能由 OPF package/@version 决定。
         listOf("2.0" to BookFormat.EPUB2, "3.0" to BookFormat.EPUB3).forEach { (version, expected) ->

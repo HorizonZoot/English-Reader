@@ -6,6 +6,7 @@ import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.Color
 import io.github.zoot.englishreader.core.SentenceRange
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -221,6 +222,49 @@ class InteractiveTextPrecomputedSentencesTest {
         assertEquals("beta two", node.config[SemanticsProperties.Text].single().text)
         performCustomAction("Highlight sentence 1")
         composeRule.runOnIdle { assertSame(sentence, selected) }
+    }
+
+    @Test
+    fun selectedWord_withoutPointerAnchor_highlightsOnlyCompleteTrimmedWords() {
+        val text = "'word' -word- words word's"
+        composeRule.setContent {
+            InteractiveText(
+                text = text,
+                fontSize = 16.sp,
+                selectedWord = "word",
+                onSentenceClick = { _, _ -> },
+                onWordLongPress = {}
+            )
+        }
+        val displayed = composeRule.onNodeWithContentDescription("Interactive reading text")
+            .fetchSemanticsNode().config[SemanticsProperties.Text].single()
+        assertEquals(listOf(1 to 5, 8 to 12), displayed.spanStyles
+            .filter { it.item.background != Color.Unspecified }.map { it.start to it.end })
+    }
+
+    @Test
+    fun selectedWord_sourceFragment_translatesExactRangeWithoutJoiningSentenceText() {
+        val original = "Prefix. 'can't' and can't."
+        val sourceStart = original.indexOf("'can't'")
+        val fragment = original.substring(sourceStart)
+        composeRule.setContent {
+            InteractiveText(
+                text = fragment,
+                fontSize = 16.sp,
+                precomputedSentences = listOf(SentenceRange(0, original, 0, original.length)),
+                sourceStartOffset = sourceStart,
+                selectedWord = "can't",
+                selectedWordStartOffset = sourceStart + 1,
+                selectedWordEndOffset = sourceStart + 6,
+                onSentenceClick = { _, _ -> },
+                onWordLongPress = {}
+            )
+        }
+        val displayed = composeRule.onNodeWithContentDescription("Interactive reading text")
+            .fetchSemanticsNode().config[SemanticsProperties.Text].single()
+        assertEquals(fragment, displayed.text)
+        assertEquals(listOf(1 to 6), displayed.spanStyles
+            .filter { it.item.background != Color.Unspecified }.map { it.start to it.end })
     }
 
     private fun performCustomAction(label: String) {

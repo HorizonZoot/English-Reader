@@ -1,6 +1,8 @@
 package io.github.zoot.englishreader.data.repository
 
 import io.github.zoot.englishreader.data.local.AiAuthStrategy
+import io.github.zoot.englishreader.data.local.AiCredentialAddress
+import io.github.zoot.englishreader.data.local.AiCredentialSlot
 import io.github.zoot.englishreader.data.local.AiCredentialStorage
 import io.github.zoot.englishreader.data.local.AiProfileMetadataReadResult
 import io.github.zoot.englishreader.data.local.AiProfileMetadataSnapshot
@@ -9,11 +11,15 @@ import io.github.zoot.englishreader.data.local.AiProviderProfile
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
 import io.github.zoot.englishreader.data.local.CredentialReadResult
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
+import java.io.IOException
 
 data class ResolvedAiProfile(
     val profileId: String,
@@ -73,190 +79,131 @@ sealed interface ProfileMutationResult {
 class AiProfileRepository(
     private val metadataStore: AiProfileMetadataStore,
     private val credentialStorage: AiCredentialStorage,
+    private val applicationScope: CoroutineScope,
     private val operationMutex: Mutex = Mutex()
 ) {
-
     val profiles: Flow<List<AiProviderProfile>> = metadataStore.profiles
     val activeProfileId: Flow<String?> = metadataStore.activeProfileId
 
-    suspend fun createProfile(
-        profile: AiProviderProfile,
-        apiKey: String
-    ): ProfileMutationResult = operationMutex.withLock {
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileMutationResult.MetadataUnavailable
-        val currentProfiles = metadata.profiles
-        if (currentProfiles.any { it.profileId == profile.profileId }) {
-            return@withLock ProfileMutationResult.DuplicateProfile
-        }
-        if (!credentialStorage.write(profile.profileId, apiKey)) {
-            return@withLock ProfileMutationResult.CredentialWriteFailed
-        }
+    // Guarded by operationMutex. An unacknowledged metadata write must not reuse either slot.
+    private var metadataWriteUncertain = false
 
-        val nextActiveProfileId = if (currentProfiles.isEmpty()) {
-            profile.profileId
-        } else {
-            metadata.activeProfileId
+    suspend fun createProfile(profile: AiProviderProfile, apiKey: String): ProfileMutationResult = mutate {
+        val normalized = profile.normalized()
+        if (!normalized.isValid()) return@mutate ProfileMutationResult.InvalidProfile
+        val metadata = readMetadataLocked() ?: return@mutate ProfileMutationResult.MetadataUnavailable
+        if (metadata.profiles.any { it.profileId == normalized.profileId }) {
+            return@mutate ProfileMutationResult.DuplicateProfile
         }
-        try {
-            metadataStore.saveMetadata(currentProfiles + profile, nextActiveProfileId)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            credentialStorage.delete(profile.profileId)
-            return@withLock ProfileMutationResult.MetadataUnavailable
-        }
-        ProfileMutationResult.Success
-    }
-
-    suspend fun selectActiveProfile(profileId: String): ProfileMutationResult =
-        operationMutex.withLock {
-            val metadata = readMetadataLocked()
-                ?: return@withLock ProfileMutationResult.MetadataUnavailable
-            if (metadata.profiles.none { it.profileId == profileId }) {
-                return@withLock ProfileMutationResult.ProfileNotFound
-            }
+        val address = AiCredentialAddress(normalized.profileId, AiCredentialSlot.A)
+        if (!credentialStorage.write(address, apiKey)) return@mutate ProfileMutationResult.CredentialWriteFailed
+        val result = saveMetadataLocked(metadata.copy(
+            profiles = metadata.profiles + normalized,
+            activeProfileId = if (metadata.profiles.isEmpty()) normalized.profileId else metadata.activeProfileId,
+            credentialSlots = metadata.credentialSlots + (normalized.profileId to AiCredentialSlot.A)
+        ))
+        if (result != ProfileMutationResult.Success && !metadataWriteUncertain) {
             try {
-                metadataStore.setActiveProfileId(profileId)
+                credentialStorage.delete(address)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
-                return@withLock ProfileMutationResult.MetadataUnavailable
+                // An unreferenced encrypted slot is also covered by explicit clear-all.
             }
-            ProfileMutationResult.Success
         }
+        result
+    }
 
-    suspend fun rotateApiKey(
-        profileId: String,
-        apiKey: String
-    ): ProfileMutationResult = operationMutex.withLock {
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileMutationResult.MetadataUnavailable
-        if (metadata.profiles.none { it.profileId == profileId }) {
-            return@withLock ProfileMutationResult.ProfileNotFound
-        }
-        if (!credentialStorage.write(profileId, apiKey)) {
-            ProfileMutationResult.CredentialWriteFailed
-        } else {
-            ProfileMutationResult.Success
-        }
+    suspend fun selectActiveProfile(profileId: String): ProfileMutationResult = mutate {
+        val metadata = readMetadataLocked() ?: return@mutate ProfileMutationResult.MetadataUnavailable
+        if (metadata.profiles.none { it.profileId == profileId }) return@mutate ProfileMutationResult.ProfileNotFound
+        saveMetadataLocked(metadata.copy(activeProfileId = profileId))
+    }
+
+    suspend fun rotateApiKey(profileId: String, apiKey: String): ProfileMutationResult = mutate {
+        val metadata = readMetadataLocked() ?: return@mutate ProfileMutationResult.MetadataUnavailable
+        val index = metadata.profiles.indexOfFirst { it.profileId == profileId }
+        if (index < 0) return@mutate ProfileMutationResult.ProfileNotFound
+        if (apiKey.isBlank()) return@mutate ProfileMutationResult.CredentialWriteFailed
+        replaceCredentialLocked(metadata, index, metadata.profiles[index], apiKey.trim())
     }
 
     suspend fun updateProfileSettings(
         profileId: String,
         displayName: String,
         temperature: Double
-    ): ProfileMutationResult = operationMutex.withLock {
-        val normalizedDisplayName = displayName.trim()
-        if (normalizedDisplayName.isBlank() || !temperature.isFinite()) {
-            return@withLock ProfileMutationResult.InvalidProfile
-        }
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileMutationResult.MetadataUnavailable
-        val profileIndex = metadata.profiles.indexOfFirst { it.profileId == profileId }
-        if (profileIndex < 0) return@withLock ProfileMutationResult.ProfileNotFound
-
-        val updatedProfiles = metadata.profiles.toMutableList().apply {
-            this[profileIndex] = this[profileIndex].copy(
-                displayName = normalizedDisplayName,
-                temperature = temperature
-            )
-        }
-        try {
-            metadataStore.saveMetadata(updatedProfiles, metadata.activeProfileId)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            return@withLock ProfileMutationResult.MetadataUnavailable
-        }
-        ProfileMutationResult.Success
+    ): ProfileMutationResult = mutate {
+        if (displayName.isBlank() || !temperature.isFinite()) return@mutate ProfileMutationResult.InvalidProfile
+        val metadata = readMetadataLocked() ?: return@mutate ProfileMutationResult.MetadataUnavailable
+        val index = metadata.profiles.indexOfFirst { it.profileId == profileId }
+        if (index < 0) return@mutate ProfileMutationResult.ProfileNotFound
+        saveProfileLocked(metadata, index, metadata.profiles[index].copy(
+            displayName = displayName.trim(),
+            temperature = temperature
+        ))
     }
 
-    /**
-     * 整体替换一份完整的 profile 快照，同时保持其稳定的 [AiProviderProfile.profileId] 不变。
-     *
-     * connection identity 一旦改变，就必须随带一份替换用的凭据。凭据先于元数据持久化被替换时，
-     * 若元数据写入失败则回滚为此前的凭据。已存储的凭据明文绝不越出本 repository 边界。
-     */
+    /** The metadata reference publishes a complete binding only after the inactive slot is durable. */
     suspend fun updateProfile(
         proposedProfile: AiProviderProfile,
         replacementApiKey: String?
-    ): ProfileMutationResult = operationMutex.withLock {
-        val normalizedProfile = proposedProfile.copy(
-            displayName = proposedProfile.displayName.trim(),
-            baseUrl = proposedProfile.baseUrl.trim(),
-            modelId = proposedProfile.modelId.trim()
-        )
-        if (normalizedProfile.profileId.isBlank() || normalizedProfile.displayName.isBlank() ||
-            normalizedProfile.baseUrl.isBlank() || normalizedProfile.modelId.isBlank() ||
-            !normalizedProfile.temperature.isFinite()
-        ) {
-            return@withLock ProfileMutationResult.InvalidProfile
+    ): ProfileMutationResult = mutate {
+        val proposed = proposedProfile.normalized()
+        if (!proposed.isValid()) return@mutate ProfileMutationResult.InvalidProfile
+        val metadata = readMetadataLocked() ?: return@mutate ProfileMutationResult.MetadataUnavailable
+        val index = metadata.profiles.indexOfFirst { it.profileId == proposed.profileId }
+        if (index < 0) return@mutate ProfileMutationResult.ProfileNotFound
+        val replacement = replacementApiKey?.trim().orEmpty()
+        if (metadata.profiles[index].connectionIdentity() != proposed.connectionIdentity() && replacement.isEmpty()) {
+            return@mutate ProfileMutationResult.ReplacementCredentialRequired
         }
-
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileMutationResult.MetadataUnavailable
-        val profileIndex = metadata.profiles.indexOfFirst {
-            it.profileId == normalizedProfile.profileId
-        }
-        if (profileIndex < 0) return@withLock ProfileMutationResult.ProfileNotFound
-
-        val existingProfile = metadata.profiles[profileIndex]
-        val identityChanged = existingProfile.connectionIdentity() !=
-            normalizedProfile.connectionIdentity()
-        val normalizedReplacementKey = replacementApiKey?.trim().orEmpty()
-        if (identityChanged && normalizedReplacementKey.isBlank()) {
-            return@withLock ProfileMutationResult.ReplacementCredentialRequired
-        }
-
-        val previousCredential = if (normalizedReplacementKey.isNotBlank()) {
-            when (val credential = credentialStorage.read(normalizedProfile.profileId)) {
-                is CredentialReadResult.Available -> credential
-                CredentialReadResult.Missing -> CredentialReadResult.Missing
-                CredentialReadResult.StorageUnavailable ->
-                    return@withLock ProfileMutationResult.CredentialStorageUnavailable
-            }
-        } else {
-            null
-        }
-        if (previousCredential is CredentialReadResult.Available &&
-            previousCredential.apiKey == normalizedReplacementKey
-        ) {
-            return@withLock saveUpdatedProfileMetadata(
-                metadata = metadata,
-                profileIndex = profileIndex,
-                normalizedProfile = normalizedProfile
-            )
-        }
-
-        if (normalizedReplacementKey.isNotBlank() &&
-            !credentialStorage.write(normalizedProfile.profileId, normalizedReplacementKey)
-        ) {
-            return@withLock ProfileMutationResult.CredentialWriteFailed
-        }
-
-        val updatedProfiles = metadata.profiles.toMutableList().apply {
-            this[profileIndex] = normalizedProfile
-        }
-        try {
-            metadataStore.saveMetadata(updatedProfiles, metadata.activeProfileId)
-        } catch (cancellation: CancellationException) {
-            if (previousCredential != null) {
-                withContext(NonCancellable) {
-                    restoreCredential(normalizedProfile.profileId, previousCredential)
-                }
-            }
-            throw cancellation
-        } catch (_: Exception) {
-            if (previousCredential != null) {
-                restoreCredential(normalizedProfile.profileId, previousCredential)
-            }
-            return@withLock ProfileMutationResult.MetadataUnavailable
-        }
-        ProfileMutationResult.Success
+        if (replacement.isEmpty()) saveProfileLocked(metadata, index, proposed)
+        else replaceCredentialLocked(metadata, index, proposed, replacement)
     }
 
-    suspend fun reinitializeCredentialStorage(): ProfileMutationResult = operationMutex.withLock {
+    private suspend fun replaceCredentialLocked(
+        metadata: AiProfileMetadataSnapshot,
+        profileIndex: Int,
+        proposed: AiProviderProfile,
+        replacement: String
+    ): ProfileMutationResult {
+        val profileId = proposed.profileId
+        var current = metadata
+        if (current.credentialSlots.getValue(profileId) == AiCredentialSlot.LEGACY) {
+            when (val old = credentialStorage.read(AiCredentialAddress(profileId, AiCredentialSlot.LEGACY))) {
+                CredentialReadResult.StorageUnavailable -> return ProfileMutationResult.CredentialStorageUnavailable
+                CredentialReadResult.Missing -> Unit
+                is CredentialReadResult.Available -> {
+                    if (!credentialStorage.write(AiCredentialAddress(profileId, AiCredentialSlot.A), old.apiKey)) {
+                        return ProfileMutationResult.CredentialWriteFailed
+                    }
+                    val migrated = current.copy(
+                        credentialSlots = current.credentialSlots + (profileId to AiCredentialSlot.A)
+                    )
+                    val result = saveMetadataLocked(migrated)
+                    if (result != ProfileMutationResult.Success) return result
+                    current = migrated
+                }
+            }
+        }
+
+        // Retry even after an in-memory Missing: the previous removal may not have reached disk.
+        if (!credentialStorage.delete(AiCredentialAddress(profileId, AiCredentialSlot.LEGACY))) {
+            return ProfileMutationResult.CredentialDeleteFailed
+        }
+        val nextSlot = when (current.credentialSlots.getValue(profileId)) {
+            AiCredentialSlot.A -> AiCredentialSlot.B
+            AiCredentialSlot.B, AiCredentialSlot.LEGACY -> AiCredentialSlot.A
+        }
+        if (!credentialStorage.write(AiCredentialAddress(profileId, nextSlot), replacement)) {
+            return ProfileMutationResult.CredentialWriteFailed
+        }
+        return saveProfileLocked(current.copy(
+            credentialSlots = current.credentialSlots + (profileId to nextSlot)
+        ), profileIndex, proposed)
+    }
+
+    suspend fun reinitializeCredentialStorage(): ProfileMutationResult = mutate {
         try {
             credentialStorage.reinitializeStorage()
             ProfileMutationResult.Success
@@ -267,120 +214,53 @@ class AiProfileRepository(
         }
     }
 
-    suspend fun clearAllCredentials(): ProfileMutationResult = operationMutex.withLock {
-        try {
-            if (credentialStorage.clearAllCredentials()) {
-                ProfileMutationResult.Success
-            } else {
-                ProfileMutationResult.CredentialDeleteFailed
-            }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            ProfileMutationResult.CredentialStorageUnavailable
-        }
+    suspend fun clearAllCredentials(): ProfileMutationResult = mutate {
+        clearCredentialsLocked()
     }
 
-    suspend fun deleteAllProfiles(): ProfileMutationResult = operationMutex.withLock {
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileMutationResult.MetadataUnavailable
-        if (metadata.profiles.isEmpty() && metadata.activeProfileId == null) {
-            return@withLock ProfileMutationResult.Success
-        }
-        val credentialsCleared = try {
-            credentialStorage.clearAllCredentials()
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            return@withLock ProfileMutationResult.CredentialStorageUnavailable
-        }
-        if (!credentialsCleared) {
-            return@withLock ProfileMutationResult.CredentialDeleteFailed
-        }
-        try {
-            metadataStore.saveMetadata(emptyList(), null)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            return@withLock ProfileMutationResult.MetadataUnavailable
-        }
-        ProfileMutationResult.Success
+    suspend fun deleteAllProfiles(): ProfileMutationResult = mutate {
+        val metadata = readMetadataLocked() ?: return@mutate ProfileMutationResult.MetadataUnavailable
+        val cleared = clearCredentialsLocked()
+        if (cleared != ProfileMutationResult.Success) return@mutate cleared
+        saveMetadataLocked(metadata.copy(profiles = emptyList(), activeProfileId = null, credentialSlots = emptyMap()))
     }
 
-    suspend fun deleteProfile(profileId: String): ProfileMutationResult =
-        operationMutex.withLock {
-            val metadata = readMetadataLocked()
-                ?: return@withLock ProfileMutationResult.MetadataUnavailable
-            val currentProfiles = metadata.profiles
-            if (currentProfiles.none { it.profileId == profileId }) {
-                return@withLock ProfileMutationResult.ProfileNotFound
+    suspend fun deleteProfile(profileId: String): ProfileMutationResult = mutate {
+        val metadata = readMetadataLocked() ?: return@mutate ProfileMutationResult.MetadataUnavailable
+        if (metadata.profiles.none { it.profileId == profileId }) return@mutate ProfileMutationResult.ProfileNotFound
+        // No credential read is needed to delete all known addresses, including an unused slot.
+        for (slot in AiCredentialSlot.entries) {
+            if (!credentialStorage.delete(AiCredentialAddress(profileId, slot))) {
+                return@mutate ProfileMutationResult.CredentialDeleteFailed
             }
-            if (!credentialStorage.delete(profileId)) {
-                return@withLock ProfileMutationResult.CredentialDeleteFailed
-            }
-
-            // 凭据已删但元数据写失败时**不做回滚**：留下一个凭据为 Missing 的 profile，
-            // 用户经「替换 API Key」即可恢复。曾经的回滚（先读出明文 key、失败时写回）是个
-            // 不完整且不可观察的伪事务：write 的结果无从上报、协程取消与进程崩溃都会绕过它，
-            // 而为回滚所做的预读会让「凭据已损坏但仍想删掉该 profile」的用户彻底删不掉。
-            val nextActiveProfileId = metadata.activeProfileId.takeUnless { it == profileId }
-            try {
-                metadataStore.saveMetadata(
-                    profiles = currentProfiles.filterNot { it.profileId == profileId },
-                    activeProfileId = nextActiveProfileId
-                )
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                return@withLock ProfileMutationResult.MetadataUnavailable
-            }
-            ProfileMutationResult.Success
         }
+        saveMetadataLocked(metadata.copy(
+            profiles = metadata.profiles.filterNot { it.profileId == profileId },
+            activeProfileId = metadata.activeProfileId.takeUnless { it == profileId },
+            credentialSlots = metadata.credentialSlots - profileId
+        ))
+    }
 
-    suspend fun resolveProfile(profileId: String): ProfileResolutionResult =
-        operationMutex.withLock { resolveProfileLocked(profileId) }
+    private suspend fun clearCredentialsLocked(): ProfileMutationResult = try {
+        if (credentialStorage.clearAllCredentials()) ProfileMutationResult.Success
+        else ProfileMutationResult.CredentialDeleteFailed
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Exception) {
+        ProfileMutationResult.CredentialStorageUnavailable
+    }
 
-    /**
-     * 先校验仅存在于元数据中的 endpoint 字段，再解析 profile。
-     *
-     * 校验器在 [AiCredentialStorage.read] 之前运行，因此 cleartext 或格式非法的 endpoint
-     * 不会作为副作用触发一次凭据访问或网络请求。
-     */
+    suspend fun resolveProfile(profileId: String): ProfileResolutionResult = operationMutex.withLock {
+        val metadata = readMetadataLocked() ?: return@withLock ProfileResolutionResult.StorageUnavailable
+        resolveProfileLocked(profileId, metadata)
+    }
+
+    /** Endpoint validation precedes decryption, including the legacy compatibility path. */
     suspend fun resolveValidatedProfile(
         profileId: String,
         endpointValidator: (String) -> Unit
     ): ProfileResolutionResult = operationMutex.withLock {
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileResolutionResult.StorageUnavailable
-        val profile = metadata.profiles.firstOrNull { it.profileId == profileId }
-            ?: return@withLock ProfileResolutionResult.ProfileNotFound
-        try {
-            endpointValidator(profile.baseUrl)
-        } catch (invalidEndpoint: IllegalArgumentException) {
-            return@withLock ProfileResolutionResult.InvalidEndpoint
-        }
-        resolveProfileLocked(profileId, metadata)
-    }
-
-    suspend fun resolveActiveProfile(): ProfileResolutionResult = operationMutex.withLock {
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileResolutionResult.StorageUnavailable
-        val profileId = metadata.activeProfileId
-            ?: return@withLock ProfileResolutionResult.NoActiveProfile
-        resolveProfileLocked(profileId, metadata)
-    }
-
-    /**
-     * 从同一份元数据快照中解析出活跃 profile，在解密凭据之前先校验其 endpoint，
-     * 并返回一份不可变的启动时刻 profile 快照。
-     */
-    suspend fun resolveValidatedActiveProfile(
-        endpointValidator: (String) -> Unit
-    ): ProfileResolutionResult = operationMutex.withLock {
-        val metadata = readMetadataLocked()
-            ?: return@withLock ProfileResolutionResult.StorageUnavailable
-        val profileId = metadata.activeProfileId
-            ?: return@withLock ProfileResolutionResult.NoActiveProfile
+        val metadata = readMetadataLocked() ?: return@withLock ProfileResolutionResult.StorageUnavailable
         val profile = metadata.profiles.firstOrNull { it.profileId == profileId }
             ?: return@withLock ProfileResolutionResult.ProfileNotFound
         try {
@@ -391,77 +271,105 @@ class AiProfileRepository(
         resolveProfileLocked(profileId, metadata)
     }
 
-    private suspend fun readMetadataLocked(): AiProfileMetadataSnapshot? =
-        when (val metadata = metadataStore.readMetadata()) {
-            is AiProfileMetadataReadResult.Available -> metadata.snapshot
+    suspend fun resolveActiveProfile(): ProfileResolutionResult = operationMutex.withLock {
+        val metadata = readMetadataLocked() ?: return@withLock ProfileResolutionResult.StorageUnavailable
+        val id = metadata.activeProfileId ?: return@withLock ProfileResolutionResult.NoActiveProfile
+        resolveProfileLocked(id, metadata)
+    }
+
+    suspend fun resolveValidatedActiveProfile(
+        endpointValidator: (String) -> Unit
+    ): ProfileResolutionResult = operationMutex.withLock {
+        val metadata = readMetadataLocked() ?: return@withLock ProfileResolutionResult.StorageUnavailable
+        val id = metadata.activeProfileId ?: return@withLock ProfileResolutionResult.NoActiveProfile
+        val profile = metadata.profiles.firstOrNull { it.profileId == id }
+            ?: return@withLock ProfileResolutionResult.ProfileNotFound
+        try {
+            endpointValidator(profile.baseUrl)
+        } catch (_: IllegalArgumentException) {
+            return@withLock ProfileResolutionResult.InvalidEndpoint
+        }
+        resolveProfileLocked(id, metadata)
+    }
+
+    private suspend fun readMetadataLocked(): AiProfileMetadataSnapshot? = try {
+        when (val result = metadataStore.readMetadata()) {
+            is AiProfileMetadataReadResult.Available -> result.snapshot
             AiProfileMetadataReadResult.Unavailable -> null
         }
-
-    private suspend fun resolveProfileLocked(profileId: String): ProfileResolutionResult {
-        val metadata = readMetadataLocked()
-            ?: return ProfileResolutionResult.StorageUnavailable
-        return resolveProfileLocked(profileId, metadata)
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Exception) {
+        null
     }
 
     private suspend fun resolveProfileLocked(
         profileId: String,
         metadata: AiProfileMetadataSnapshot
     ): ProfileResolutionResult {
-        val profile = metadata.profiles
-            .firstOrNull { it.profileId == profileId }
+        val profile = metadata.profiles.firstOrNull { it.profileId == profileId }
             ?: return ProfileResolutionResult.ProfileNotFound
-        return when (val credential = credentialStorage.read(profileId)) {
-            is CredentialReadResult.Available -> ProfileResolutionResult.Available(
-                ResolvedAiProfile(
-                    profileId = profile.profileId,
-                    providerTemplate = profile.providerTemplate,
-                    baseUrl = profile.baseUrl,
-                    modelId = profile.modelId,
-                    authStrategy = profile.authStrategy,
-                    temperature = profile.temperature,
-                    apiKey = credential.apiKey
-                )
-            )
-
+        val slot = metadata.credentialSlots[profileId] ?: return ProfileResolutionResult.StorageUnavailable
+        return when (val credential = credentialStorage.read(AiCredentialAddress(profileId, slot))) {
+            is CredentialReadResult.Available -> ProfileResolutionResult.Available(ResolvedAiProfile(
+                profileId = profile.profileId,
+                providerTemplate = profile.providerTemplate,
+                baseUrl = profile.baseUrl,
+                modelId = profile.modelId,
+                authStrategy = profile.authStrategy,
+                temperature = profile.temperature,
+                apiKey = credential.apiKey
+            ))
             CredentialReadResult.Missing -> ProfileResolutionResult.Missing
             CredentialReadResult.StorageUnavailable -> ProfileResolutionResult.StorageUnavailable
         }
     }
 
-    private suspend fun restoreCredential(
-        profileId: String,
-        previousCredential: CredentialReadResult
-    ) {
-        when (previousCredential) {
-            is CredentialReadResult.Available ->
-                credentialStorage.write(profileId, previousCredential.apiKey)
-            CredentialReadResult.Missing -> credentialStorage.delete(profileId)
-            CredentialReadResult.StorageUnavailable -> Unit
-        }
-    }
-
-    private suspend fun saveUpdatedProfileMetadata(
+    private suspend fun saveProfileLocked(
         metadata: AiProfileMetadataSnapshot,
-        profileIndex: Int,
-        normalizedProfile: AiProviderProfile
-    ): ProfileMutationResult {
-        val updatedProfiles = metadata.profiles.toMutableList().apply {
-            this[profileIndex] = normalizedProfile
-        }
+        index: Int,
+        profile: AiProviderProfile
+    ): ProfileMutationResult = saveMetadataLocked(metadata.copy(
+        profiles = metadata.profiles.toMutableList().apply { this[index] = profile }
+    ))
+
+    private suspend fun saveMetadataLocked(metadata: AiProfileMetadataSnapshot): ProfileMutationResult {
+        metadataWriteUncertain = true
         return try {
-            metadataStore.saveMetadata(updatedProfiles, metadata.activeProfileId)
+            metadataStore.saveMetadata(metadata.profiles, metadata.activeProfileId, metadata.credentialSlots)
+            metadataWriteUncertain = false
             ProfileMutationResult.Success
         } catch (cancellation: CancellationException) {
+            // DataStore's actor may still commit. The inactive slot must not be reused.
             throw cancellation
+        } catch (_: IOException) {
+            metadataWriteUncertain = false
+            ProfileMutationResult.MetadataUnavailable
         } catch (_: Exception) {
             ProfileMutationResult.MetadataUnavailable
         }
     }
 
-    private fun AiProviderProfile.connectionIdentity(): List<Any> = listOf(
-        providerTemplate,
-        baseUrl.trim(),
-        modelId.trim(),
-        authStrategy
+    private suspend fun mutate(block: suspend () -> ProfileMutationResult): ProfileMutationResult {
+        currentCoroutineContext().ensureActive()
+        return applicationScope.async(start = CoroutineStart.UNDISPATCHED) {
+            currentCoroutineContext().ensureActive()
+            operationMutex.withLock {
+                if (metadataWriteUncertain) ProfileMutationResult.MetadataUnavailable else block()
+            }
+        }.await()
+    }
+
+    private fun AiProviderProfile.normalized(): AiProviderProfile = copy(
+        displayName = displayName.trim(),
+        baseUrl = baseUrl.trim(),
+        modelId = modelId.trim()
     )
+
+    private fun AiProviderProfile.isValid(): Boolean =
+        profileId.isNotBlank() && displayName.isNotBlank() && baseUrl.isNotBlank() &&
+            modelId.isNotBlank() && temperature.isFinite()
+
+    private fun AiProviderProfile.connectionIdentity(): List<Any> =
+        listOf(providerTemplate, baseUrl.trim(), modelId.trim(), authStrategy)
 }

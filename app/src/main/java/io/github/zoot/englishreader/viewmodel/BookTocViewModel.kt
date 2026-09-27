@@ -7,11 +7,14 @@ import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.repository.BookRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -26,15 +29,14 @@ data class BookTocUiState(
     val chapters: List<BookChapterEntity> = emptyList(),
     /** 上次读到的章节 articleId；无进度时为 null。用于高亮与「继续阅读」。 */
     val lastReadArticleId: Long? = null,
-    val isLoading: Boolean = true
+    val isLoading: Boolean = true,
+    val loadFailed: Boolean = false
 )
 
 /**
  * 一本书的目录。
  *
- * 章节列表走 Flow：删书或改书名后目录页要跟着变，否则用户会停在一个已不存在的书上。
- * 进度是一次性读取而非 Flow —— 它只在进入章节时写入，而写入的那一刻用户正在离开
- * 这个页面，订阅它只会带来无谓的重组。回到目录页时 [refreshProgress] 重读。
+ * 章节与阅读进度持续观察；保留在返回栈中的 VM 也能收到晚于页面恢复提交的进度。
  */
 @HiltViewModel
 class BookTocViewModel @Inject constructor(
@@ -48,28 +50,44 @@ class BookTocViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(BookTocUiState())
     val uiState: StateFlow<BookTocUiState> = _uiState.asStateFlow()
+    private var loadJob: Job? = null
+    private var loadGeneration = 0L
 
     init {
-        bookRepository.getChapters(bookId)
-            .onEach { chapters ->
-                _uiState.value = _uiState.value.copy(chapters = chapters, isLoading = false)
-            }
-            .launchIn(viewModelScope)
-
-        viewModelScope.launch {
-            val book = bookRepository.getBookById(bookId)
-            _uiState.value = _uiState.value.copy(book = book, isLoading = false)
-        }
-        refreshProgress()
+        retryLoading()
     }
 
-    /** 重读阅读进度。目录页每次回到前台调用，用于同步刚刚读过的章节。 */
-    fun refreshProgress() {
-        viewModelScope.launch {
-            val progress = bookRepository.getProgress(bookId)
-            _uiState.value = _uiState.value.copy(
-                lastReadArticleId = progress?.chapterArticleId
-            )
+    fun retryLoading() {
+        val generation = ++loadGeneration
+        loadJob?.cancel()
+        _uiState.value = _uiState.value.copy(isLoading = true, loadFailed = false)
+        loadJob = viewModelScope.launch {
+            try {
+                combine(
+                    flow { emit(bookRepository.getBookById(bookId)) },
+                    bookRepository.getChapters(bookId),
+                    bookRepository.observeProgress(bookId)
+                ) { book, chapters, progress ->
+                    BookTocUiState(
+                        book = book,
+                        chapters = chapters,
+                        lastReadArticleId = progress?.chapterArticleId,
+                        isLoading = false
+                    )
+                }.collect { state ->
+                    if (generation == loadGeneration) _uiState.value = state
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == loadGeneration) {
+                    _uiState.value = _uiState.value.copy(loadFailed = true)
+                }
+            } finally {
+                if (generation == loadGeneration) {
+                    _uiState.value = _uiState.value.copy(isLoading = false)
+                }
+            }
         }
     }
 

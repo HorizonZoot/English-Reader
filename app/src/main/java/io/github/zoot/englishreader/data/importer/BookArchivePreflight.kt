@@ -123,13 +123,20 @@ internal object BookArchivePreflight {
             // 否则用户看到的数字与实际触发原因不符。
             val boundByCumulative = remaining < perEntry
             val limit = minOf(perEntry, remaining).toInt()
-            val output = ByteArray(limit + 1)
+            var output = ByteArray(minOf(READ_CHUNK_BYTES, limit))
             var filled = 0
 
             try {
                 zip.getInputStream(entry).use { input ->
-                    while (filled < output.size) {
-                        val read = input.read(output, filled, output.size - filled)
+                    while (true) {
+                        if (filled == limit) {
+                            if (input.read() >= 0) filled++
+                            break
+                        }
+                        if (filled == output.size) {
+                            output = output.copyOf(minOf(limit, output.size * 2))
+                        }
+                        val read = input.read(output, filled, minOf(READ_CHUNK_BYTES, output.size - filled))
                         if (read < 0) break
                         filled += read
                     }
@@ -150,7 +157,7 @@ internal object BookArchivePreflight {
                 )
             }
             inflatedBytes += filled
-            return output.copyOf(filled)
+            return if (filled == output.size) output else output.copyOf(filled)
         }
     }
 
@@ -312,5 +319,6 @@ internal object BookArchivePreflight {
     private const val CONTAINER_PATH = "META-INF/container.xml"
     private const val ENCRYPTION_PATH = "META-INF/encryption.xml"
     private const val OPF_MEDIA_TYPE = "application/oebps-package+xml"
+    private const val READ_CHUNK_BYTES = 8_192
     private val TEXT_EXTENSIONS = setOf("xml", "opf", "ncx", "xhtml", "html", "htm")
 }

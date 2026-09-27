@@ -16,9 +16,12 @@ import io.github.zoot.englishreader.data.ai.ExplanationType
 import io.github.zoot.englishreader.data.ai.ResolvedAiExplanationOperation
 import io.github.zoot.englishreader.data.ai.ResolvedAiExplanationRequest
 import io.github.zoot.englishreader.data.dao.ArticleDao
+import io.github.zoot.englishreader.data.dao.TranslationTaskTarget
 import io.github.zoot.englishreader.data.dao.WholeTranslationDao
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.TranslationProgressIntegrityException
+import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
 import io.github.zoot.englishreader.data.local.AiAuthStrategy
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
@@ -27,9 +30,16 @@ import io.github.zoot.englishreader.model.ArticleEditResult
 import io.github.zoot.englishreader.model.ArticleEditSnapshot
 import io.github.zoot.englishreader.model.DefaultTranslationMaterializationPolicy
 import io.github.zoot.englishreader.model.TranslationFailureReason
+import io.github.zoot.englishreader.model.TranslationFingerprint
 import io.github.zoot.englishreader.model.TranslationMaterializationPolicy
+import io.github.zoot.englishreader.model.TranslationPlannerVersion
+import io.github.zoot.englishreader.model.TranslationSegmentationMode
+import io.github.zoot.englishreader.model.WholeTranslationPrimaryAction
+import io.github.zoot.englishreader.model.WholeTranslationProgress
 import io.github.zoot.englishreader.model.WholeTranslationScope
+import io.github.zoot.englishreader.model.WholeTranslationSheetState
 import io.github.zoot.englishreader.model.WholeTranslationTaskStatus
+import io.github.zoot.englishreader.util.ParagraphAligner
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -42,6 +52,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -157,6 +168,68 @@ class WholeTranslationRepositoryTest {
     }
 
     // ---- 恢复与重试：核心不变量 ----
+
+    @Test
+    fun observe_persistedRunningAfterRepositoryRecreated_requiresExplicitResumeAndPreservesLease() = runTest {
+        val articleId = insertArticle("A.\n\nB.\n\nC.")
+        val scope = WholeTranslationScope.CurrentArticle(articleId)
+        val interruptedProcess = SupervisorJob()
+        val gate = CompletableDeferred<Unit>()
+        coEvery { executor.execute(any(), any()) } coAnswers {
+            val text = firstArg<ResolvedAiExplanationOperation>().request.normalizedInput
+            requestedInputs += text
+            if (text == "B.") gate.await()
+            AiClientResult.Success("译:$text")
+        }
+        val original = WholeTranslationRepository(
+            db.wholeTranslationDao(), db.articleDao(), resolver, executor,
+            CoroutineScope(interruptedProcess + StandardTestDispatcher(testScheduler)), { NOW }, POLICY
+        )
+        val taskId = (original.start(scope) as WholeTranslationStartResult.Started).taskId
+        advanceUntilIdle()
+        assertEquals(listOf("A.", "B."), requestedInputs)
+        interruptedProcess.cancel()
+        interruptedProcess.join()
+        advanceUntilIdle()
+        val saved = db.wholeTranslationDao().getSegments(taskId)
+        assertEquals(WholeTranslationTaskStatus.RUNNING, taskStatus(taskId))
+        assertEquals(listOf("translated", "translating", "untranslated"), saved.map { it.status })
+
+        requestedInputs.clear()
+        var resolutions = 0
+        coEvery { resolver.resolveActiveProfileSnapshot() } answers {
+            resolutions++
+            ProfileResolutionResult.Available(PROFILE)
+        }
+        var now = NOW
+        val restored = WholeTranslationRepository(
+            db.wholeTranslationDao(), db.articleDao(), resolver, executor, this, { now }, POLICY
+        )
+        val view = requireNotNull(restored.observe(taskId).first())
+        assertEquals(WholeTranslationTaskStatus.PAUSED, view.status)
+        assertEquals(view, restored.findResumable(scope))
+        val sheet = WholeTranslationSheetState.Tracking(
+            view.taskId, view.scopeKey, view.status, view.progress, view.failureReason
+        )
+        assertEquals(WholeTranslationPrimaryAction.RESUME, sheet.primaryAction)
+        assertEquals(0, resolutions)
+        assertTrue(requestedInputs.isEmpty())
+        assertEquals(saved, db.wholeTranslationDao().getSegments(taskId))
+
+        succeedWith { "译:$it" }
+        restored.resume(taskId)
+        advanceUntilIdle()
+        assertEquals(listOf("C."), requestedInputs)
+        assertEquals(saved[0], db.wholeTranslationDao().getSegments(taskId)[0])
+        assertEquals(saved[1], db.wholeTranslationDao().getSegments(taskId)[1])
+
+        now += WholeTranslationRepository.LEASE_DURATION_MS
+        restored.resume(taskId)
+        advanceUntilIdle()
+        assertEquals(listOf("C.", "B."), requestedInputs)
+        assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus(taskId))
+        assertEquals("译:A.\n\n译:B.\n\n译:C.", db.articleDao().getArticleById(articleId)?.translation)
+    }
 
     /** 已成功的段落绝不重新请求——这是整个「可恢复」语义的全部意义。 */
     @Test
@@ -431,6 +504,158 @@ class WholeTranslationRepositoryTest {
     }
 
     // ---- 观察 ----
+
+    @Test
+    fun observe_progressProjection_classifiesFailuresAndMatchesResumableSnapshot() = runTest {
+        val reasons = listOf("transient_network", "provider_response", "unknown", "configuration", "paragraph_too_long", "future", null)
+        val articleId = insertArticle((0 until 10).joinToString("\n\n") { "Paragraph $it." })
+        val taskId = createPausedTask(articleId)
+        val stored = db.wholeTranslationDao()
+        stored.tryClaimSegment(taskId, articleId, 0, NOW + 1, NOW, 0)
+        stored.checkpointSuccess(taskId, articleId, 0, stored.getSegments(taskId)[0].sourceFingerprint, "译文", NOW)
+        stored.tryClaimSegment(taskId, articleId, 1, NOW + 1, NOW, 0)
+        reasons.forEachIndexed { index, reason -> setClaimState(taskId, index + 3, "failed", reason) }
+        val repo = repository(this)
+
+        val view = requireNotNull(repo.observe(taskId).first())
+
+        assertEquals(WholeTranslationProgress(10, 1, 1, 7, 1,
+            retryableFailures = 3, configurationFailures = 1, permanentFailures = 1, unclassifiedFailures = 2), view.progress)
+        assertEquals(view, repo.findResumable(WholeTranslationScope.CurrentArticle(articleId)))
+        assertEquals(NOW + 1, stored.getProgressRows(taskId)[1].leaseExpiresAt)
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun getProgressRows_translationPresence_matchesKotlinBlankSemantics() = runTest {
+        val articleId = insertArticle("Only.")
+        val taskId = createPausedTask(articleId)
+        val whitespace = (Char.MIN_VALUE..Char.MAX_VALUE).filter { it.isWhitespace() }.joinToString("")
+        val values = listOf(null, "", whitespace, "\u0000", " \u0000 ", "\u2003译文\u2003") +
+            whitespace.map { it.toString() }
+        for (value in values) {
+            db.openHelper.writableDatabase.execSQL(
+                "UPDATE translation_segments SET status = 'translated', translatedText = ? WHERE taskId = ?",
+                arrayOf(value, taskId)
+            )
+            assertEquals(!value.isNullOrBlank(), db.wholeTranslationDao().getProgressRows(taskId).single().hasNonBlankTranslation)
+        }
+    }
+
+    @Test
+    fun observe_invalidProgressRow_rejectsBothUiReadPaths() = runTest {
+        data class InvalidRow(
+            val articleId: Long? = null,
+            val index: Int = 0,
+            val attempts: Int = 0,
+            val status: String = "untranslated",
+            val translation: String? = null
+        )
+        val cases = listOf(
+            InvalidRow(articleId = 0), InvalidRow(index = -1), InvalidRow(attempts = -1),
+            InvalidRow(status = "future"), InvalidRow(status = "translated"),
+            InvalidRow(status = "translated", translation = ""),
+            InvalidRow(status = "translated", translation = "\t\n\u00a0\u2003\u202f")
+        )
+        val repo = repository(this)
+        for (case in cases) {
+            val articleId = insertArticle("Only.")
+            val taskId = createPausedTask(articleId)
+            db.openHelper.writableDatabase.execSQL(
+                "UPDATE translation_segments SET articleId = ?, paragraphIndex = ?, attemptCount = ?, " +
+                    "status = ?, translatedText = ? WHERE taskId = ?",
+                arrayOf(case.articleId ?: articleId, case.index, case.attempts, case.status, case.translation, taskId)
+            )
+            val observed = runCatching { repo.observe(taskId).first() }.exceptionOrNull()
+            val resumable = runCatching { repo.findResumable(WholeTranslationScope.CurrentArticle(articleId)) }.exceptionOrNull()
+            assertTrue("observe must reject $case, got $observed", observed is TranslationProgressIntegrityException)
+            assertTrue("findResumable must reject $case, got $resumable", resumable is TranslationProgressIntegrityException)
+        }
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun observe_workerLifecycleWithoutDatabaseChanges_tracksRunningAndFailedStatusWrite() = runTest {
+        val articleId = insertArticle("Only.")
+        val taskId = createPausedTask(articleId)
+        val stored = db.wholeTranslationDao()
+        assertTrue(stored.beginTask(taskId, NOW))
+        val before = stored.getSegments(taskId)
+        val beginEntered = CompletableDeferred<Unit>()
+        val beginGate = CompletableDeferred<Unit>()
+        val failing = object : WholeTranslationDao by stored {
+            override suspend fun beginTask(taskId: Long, now: Long): Boolean {
+                beginEntered.complete(Unit)
+                beginGate.await()
+                throw IOException()
+            }
+
+            override suspend fun updateTaskStatus(taskId: Long, status: String, failureReason: String?, now: Long): Int =
+                throw IOException()
+        }
+        val repo = WholeTranslationRepository(failing, db.articleDao(), resolver, executor, this, { NOW }, POLICY)
+        val seen = mutableListOf<WholeTranslationTaskStatus>()
+        val collector = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            repo.observe(taskId).collect { it?.let { view -> seen += view.status } }
+        }
+        advanceUntilIdle()
+        assertEquals(WholeTranslationTaskStatus.PAUSED, seen.last())
+
+        repo.resume(taskId)
+        runCurrent()
+        assertTrue(beginEntered.isCompleted)
+        assertTrue(!beginGate.isCompleted)
+        assertEquals(WholeTranslationTaskStatus.RUNNING, seen.last())
+        assertEquals(before, stored.getSegments(taskId))
+        beginGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(WholeTranslationTaskStatus.PAUSED, seen.last())
+        assertEquals("running", stored.getTask(taskId)?.status)
+        assertEquals(before, stored.getSegments(taskId))
+        assertTrue(requestedInputs.isEmpty())
+        collector.cancel()
+    }
+
+    @Test
+    fun resume_oldWorkerCompletesAfterReplacement_preservesActiveWorker() = runTest {
+        val articleId = insertArticle("Only.")
+        val taskId = createPausedTask(articleId)
+        val oldGate = CompletableDeferred<Unit>()
+        val newGate = CompletableDeferred<Unit>()
+        var requests = 0
+        coEvery { executor.execute(any(), any()) } coAnswers {
+            requests++
+            if (requests == 1) withContext(NonCancellable) { oldGate.await() } else newGate.await()
+            AiClientResult.Success("译文")
+        }
+        var now = NOW
+        val repo = WholeTranslationRepository(db.wholeTranslationDao(), db.articleDao(), resolver, executor, this, { now }, POLICY)
+        try {
+            repo.resume(taskId)
+            advanceUntilIdle()
+            assertEquals(1, requests)
+            repo.pause(taskId)
+            now += WholeTranslationRepository.LEASE_DURATION_MS
+            repo.resume(taskId)
+            runCurrent()
+            assertEquals(2, requests)
+            assertEquals(WholeTranslationTaskStatus.RUNNING, repo.observe(taskId).first()?.status)
+
+            oldGate.complete(Unit)
+            runCurrent()
+            assertTrue(!newGate.isCompleted)
+            assertEquals(WholeTranslationTaskStatus.RUNNING, repo.observe(taskId).first()?.status)
+            repo.resume(taskId)
+            runCurrent()
+            assertEquals(2, requests)
+        } finally {
+            oldGate.complete(Unit)
+            newGate.complete(Unit)
+            advanceUntilIdle()
+        }
+        assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus(taskId))
+    }
 
     /**
      * 只改任务行、不动任何段落行时，observer 也必须收到新状态。
@@ -837,6 +1062,28 @@ class WholeTranslationRepositoryTest {
     }
 
     // ---- helpers ----
+
+    private fun setClaimState(taskId: Long, index: Int, status: String, reason: String? = null, lease: Long? = null) {
+        db.openHelper.writableDatabase.execSQL(
+            "UPDATE translation_segments SET status = ?, failureReason = ?, leaseExpiresAt = ?, " +
+                "translatedText = NULL WHERE taskId = ? AND paragraphIndex = ?",
+            arrayOf(status, reason, lease, taskId, index)
+        )
+    }
+
+    private suspend fun createPausedTask(articleId: Long): Long {
+        val content = requireNotNull(db.articleDao().getArticleById(articleId)).content
+        return db.wholeTranslationDao().createTask(
+            WholeTranslationTaskEntity(scopeKey = "article:$articleId", status = "paused", createdAt = NOW, updatedAt = NOW),
+            listOf(TranslationTaskTarget(articleId, TranslationFingerprint.forArticle(content),
+                TranslationSegmentationMode.PRESERVE.toStableToken(), TranslationPlannerVersion.LEGACY)),
+            ParagraphAligner.splitParagraphs(content).mapIndexed { index, text ->
+                TranslationSegmentEntity(taskId = 0, articleId = articleId, paragraphIndex = index,
+                    sourceFingerprint = TranslationFingerprint.forParagraph(text), status = "untranslated", updatedAt = NOW)
+            },
+            NOW
+        )
+    }
 
     private fun repository(scope: CoroutineScope) = WholeTranslationRepository(
         dao = db.wholeTranslationDao(),

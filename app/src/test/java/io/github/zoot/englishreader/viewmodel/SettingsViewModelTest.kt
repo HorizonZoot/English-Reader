@@ -37,6 +37,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -130,6 +132,8 @@ class SettingsViewModelTest {
 
         viewModel.createDeepSeekProfile(apiKey = "secret-key")
         viewModel.updateProfile(
+            editorSessionId = "editor-session",
+            draftRevision = 0,
             profileId = "profile-1",
             displayName = "Renamed",
             providerTemplate = AiProviderTemplate.DEEPSEEK,
@@ -161,6 +165,8 @@ class SettingsViewModelTest {
 
         repeat(2) {
             viewModel.updateProfile(
+                editorSessionId = "editor-session",
+                draftRevision = 0,
                 profileId = "profile-1",
                 displayName = "Renamed",
                 providerTemplate = AiProviderTemplate.DEEPSEEK,
@@ -236,6 +242,124 @@ class SettingsViewModelTest {
             advanceUntilIdle()
 
             assertFalse(viewModel.profileMutationInFlight.value)
+            assertNull(viewModel.profileMutationState.value)
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun createProfile_busyAndInvalidAttempts_preserveAcceptedMutationIdentity() = runTest {
+        val releaseMutation = CompletableDeferred<Unit>()
+        val repository = mockProfileRepository()
+        coEvery { repository.createProfile(any(), any()) } coAnswers {
+            releaseMutation.await()
+            ProfileMutationResult.Success
+        }
+        val viewModel = createViewModel(repository)
+
+        val accepted = viewModel.createDeepSeekProfile("secret-key", "editor-a", 4)
+            as ProfileMutationSubmission.Accepted
+        val running = ProfileMutationState(accepted.mutationId, "editor-a", 4)
+        assertEquals(running, viewModel.profileMutationState.value)
+        assertEquals(
+            ProfileMutationSubmission.Busy,
+            viewModel.createDeepSeekProfile("another-key", "editor-b", 0)
+        )
+        assertEquals(
+            ProfileMutationSubmission.Invalid,
+            viewModel.createDeepSeekProfile(" ", "editor-c", 0)
+        )
+        assertEquals(running, viewModel.profileMutationState.value)
+        coVerify(exactly = 1) { repository.createProfile(any(), any()) }
+
+        releaseMutation.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            running.copy(result = ProfileMutationResult.Success),
+            viewModel.profileMutationState.value
+        )
+    }
+
+    @Test
+    fun createProfile_synchronousCompletion_registersIdentityBeforeRepositoryRuns() = runTest {
+        val repository = mockProfileRepository()
+        lateinit var viewModel: SettingsViewModel
+        var observedRunning: ProfileMutationState? = null
+        coEvery { repository.createProfile(any(), any()) } coAnswers {
+            observedRunning = viewModel.profileMutationState.value
+            assertTrue(viewModel.profileMutationInFlight.value)
+            ProfileMutationResult.Success
+        }
+        viewModel = createViewModel(repository)
+
+        val accepted = viewModel.createDeepSeekProfile("secret-key", "editor-a", 9)
+            as ProfileMutationSubmission.Accepted
+
+        assertEquals(ProfileMutationState(accepted.mutationId, "editor-a", 9), observedRunning)
+        assertEquals(
+            observedRunning!!.copy(result = ProfileMutationResult.Success),
+            viewModel.profileMutationState.value
+        )
+        assertFalse(viewModel.profileMutationInFlight.value)
+        val stateText = viewModel.profileMutationState.value.toString()
+        for (privateValue in listOf("secret-key", "api.deepseek.com", "deepseek-chat", "DeepSeek")) {
+            assertFalse(stateText.contains(privateValue))
+        }
+    }
+
+    @Test
+    fun profileMutation_recollectedCompletion_keepsOneQueuedNotification() = runTest {
+        val repository = mockProfileRepository()
+        coEvery { repository.createProfile(any(), any()) } returns ProfileMutationResult.Success
+        val viewModel = createViewModel(repository)
+        val accepted = viewModel.createDeepSeekProfile("secret-key") as ProfileMutationSubmission.Accepted
+
+        val completed = viewModel.profileMutationState.first()
+        assertEquals(ProfileMutationResult.Success, completed?.result)
+        assertEquals(completed, viewModel.profileMutationState.first())
+        viewModel.profileActionEvents.test {
+            assertEquals(ProfileActionResult.CREATED, awaitItem().action)
+            expectNoEvents()
+        }
+        viewModel.acknowledgeProfileMutation(accepted.mutationId)
+
+        assertNull(viewModel.profileMutationState.value)
+        viewModel.profileActionEvents.test { expectNoEvents() }
+    }
+
+    @Test
+    fun acknowledgeProfileMutation_oldCompletion_doesNotClearNewRunningOrFinishedMutation() = runTest {
+        val repository = mockProfileRepository()
+        coEvery { repository.createProfile(any(), any()) } returns ProfileMutationResult.Success
+        val viewModel = createViewModel(repository)
+        val first = viewModel.createDeepSeekProfile("first-key") as ProfileMutationSubmission.Accepted
+        val releaseSecond = CompletableDeferred<Unit>()
+        coEvery { repository.createProfile(any(), any()) } coAnswers {
+            releaseSecond.await()
+            ProfileMutationResult.CredentialWriteFailed
+        }
+
+        val second = viewModel.createDeepSeekProfile("second-key", "editor-b", 2)
+            as ProfileMutationSubmission.Accepted
+        val running = viewModel.profileMutationState.value
+        assertNotEquals(first.mutationId, second.mutationId)
+        viewModel.acknowledgeProfileMutation(first.mutationId)
+        viewModel.acknowledgeProfileMutation(second.mutationId)
+        assertEquals(running, viewModel.profileMutationState.value)
+        assertTrue(viewModel.profileMutationInFlight.value)
+
+        releaseSecond.complete(Unit)
+        advanceUntilIdle()
+        val finished = running!!.copy(result = ProfileMutationResult.CredentialWriteFailed)
+        assertEquals(finished, viewModel.profileMutationState.value)
+        viewModel.acknowledgeProfileMutation(first.mutationId)
+        assertEquals(finished, viewModel.profileMutationState.value)
+        viewModel.acknowledgeProfileMutation(second.mutationId)
+        assertNull(viewModel.profileMutationState.value)
+        viewModel.profileActionEvents.test {
+            assertEquals(ProfileActionResult.CREATED, awaitItem().action)
+            assertEquals(ProfileMutationResult.CredentialWriteFailed, awaitItem().failure)
             expectNoEvents()
         }
     }
@@ -309,6 +433,8 @@ class SettingsViewModelTest {
         val viewModel = createViewModel(repository)
 
         viewModel.updateProfile(
+            editorSessionId = "editor-session",
+            draftRevision = 0,
             profileId = "profile-1",
             displayName = " Renamed ",
             providerTemplate = AiProviderTemplate.DEEPSEEK,
@@ -685,15 +811,19 @@ class SettingsViewModelTest {
         every { activeProfileId } returns flowOf(null)
     }
 
-    private fun SettingsViewModel.createDeepSeekProfile(apiKey: String) {
-        createProfile(
-            displayName = "DeepSeek",
-            providerTemplate = AiProviderTemplate.DEEPSEEK,
-            baseUrl = "https://api.deepseek.com/v1",
-            modelId = "deepseek-chat",
-            apiKey = apiKey
-        )
-    }
+    private fun SettingsViewModel.createDeepSeekProfile(
+        apiKey: String,
+        editorSessionId: String = "editor-session",
+        draftRevision: Long = 0
+    ): ProfileMutationSubmission = createProfile(
+        editorSessionId = editorSessionId,
+        draftRevision = draftRevision,
+        displayName = "DeepSeek",
+        providerTemplate = AiProviderTemplate.DEEPSEEK,
+        baseUrl = "https://api.deepseek.com/v1",
+        modelId = "deepseek-chat",
+        apiKey = apiKey
+    )
 
     private fun mockSettingsPreferences(): SettingsPreferences = mockk {
         every { fontSizeOption } returns flowOf(FontSizeOption.DEFAULT)

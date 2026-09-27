@@ -27,8 +27,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,49 +49,21 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import io.github.zoot.englishreader.R
+import io.github.zoot.englishreader.viewmodel.ImportOutcome
+import io.github.zoot.englishreader.viewmodel.ImportState
 import kotlinx.coroutines.delay
 
-/** 导入的终态。只区分成功与失败——具体原因仍由既有的 Snackbar 文案承担。 */
-enum class ImportOutcome { SUCCESS, FAILURE }
-
 /**
- * 导入状态指示：一段细线圆弧 + 一行状态文字，导入结束时化为 ✓ / ×。
- *
- * ## 为什么只有一行「正在导入…」，没有阶段
- *
- * `ArticleListViewModel.isImporting` 是布尔量，没有阶段信息。要做「读取 → 解析 → 保存」
- * 三段文字，必须让 `BookImporter` / `EpubBookParser` 回吐进度——那是核心解析逻辑，不在
- * 本次范围。所以这里固定显示一行，不为动画去改业务。
- *
- * ## 出现阈值
- *
- * [isImporting] 为 TXT / Markdown / 粘贴导入所共用，而那几条路是毫秒级的：立即显示会让
- * 覆盖层「闪」一下，比没有动画更廉价。因此导入持续超过 [APPEAR_DELAY_MS] 才淡入，快速导入
- * 在指示器出现之前就已结束，用户完全看不到它。这道阈值只推迟**指示器自己的出现**，不推迟
- * 导入、也不推迟既有的完成流程（Snackbar 仍在事件到达的瞬间弹出）。
- *
- * ## 为什么状态机只用一个 LaunchedEffect
- *
- * 出现阈值与终态收尾若各用一个 effect，二者会在同一帧内竞争：导入成功时
- * `isImporting` 转 false 与终态事件几乎同时到达，先跑的那个会把后跑的结论覆盖掉
- * （按声明顺序，「导入结束」会先把指示器收掉，✓ 再也没机会出现）。合并成一个带优先级的
- * effect 后，终态优先于「导入结束」，顺序不再依赖声明位置。
- *
- * 同时它必须处理**取消路径**：`importFromFile` 对 `CancellationException` 原样上抛、
- * **不发终态事件**（用户中途离开页面就是这条路）。只靠终态事件收尾会留下一个永远空转的
- * 指示器，所以 `else` 分支在「没在导入且无终态」时无条件收掉。
- *
- * @param outcome 终态闩锁；由调用方在既有 `uiEvent` collector 里置位，播完后通过
- *   [onOutcomeShown] 清除。刻意不在本组件内部订阅 `uiEvent`：那会是第二个 collector，
- *   而 `ArticleListScreen` 的注释明确警告过它会放大 Snackbar 的顺序竞争。
+ * 按 importId 隔离出现阈值与终态动画，不依赖观察到两次导入之间的 Idle。
+ * 只有本次实际显示过 Loading 才播放终态；首次看到 Finished 时静默确认。
+ * Snackbar 独立消费 VM 的提示队列，不参与这里的业务收尾。
  */
 @Composable
 fun ImportStatusOverlay(
-    isImporting: Boolean,
-    outcome: ImportOutcome?,
-    onOutcomeShown: () -> Unit,
+    state: ImportState,
+    onFinishedShown: (String) -> Unit,
     modifier: Modifier = Modifier
-) {
+) = key(state.importId) {
     var visible by remember { mutableStateOf(false) }
 
     /**
@@ -100,46 +74,27 @@ fun ImportStatusOverlay(
      * 刚才看到的那个字形。
      */
     var shown by remember { mutableStateOf<Shown>(Shown.Loading) }
+    val acknowledge by rememberUpdatedState(onFinishedShown)
 
-    /**
-     * 本轮导入已出过终态。
-     *
-     * `importBook` 先 `trySend` 终态事件、再在 `finally` 里落下 `isImporting`，所以存在
-     * 一个「终态已到、导入态还没落」的窗口。没有这道闩锁时，播完 ✓ 后 `onOutcomeShown`
-     * 会把 outcome 清空，effect 随即以「仍在导入」重启，250ms 后又淡入一个转圈——
-     * 用户看到的是 ✓ 之后闪一下 loading。
-     */
-    var settled by remember { mutableStateOf(false) }
-
-    LaunchedEffect(isImporting, outcome) {
-        when {
-            // 终态优先：此时 isImporting 往往已经是 false，若让下面的分支先跑就没有 ✓ 了。
-            outcome != null -> {
-                // 指示器没真的出现过（快速导入）就不要凭空弹一个 ✓——那正是要避免的闪现。
-                // visible 为真必然意味着 shown 是 Loading：终态分支收尾时会把它置回 false。
+    LaunchedEffect(state) {
+        when (state) {
+            is ImportState.Finished -> {
                 if (visible) {
-                    shown = Shown.Terminal(outcome)
+                    shown = Shown.Terminal(state.outcome)
                     delay(TERMINAL_HOLD_MS)
                     visible = false
+                    delay(EXIT_MS.toLong())
                 }
-                settled = true
-                onOutcomeShown()
+                acknowledge(state.importId)
             }
 
-            isImporting -> {
-                if (!settled) {
-                    delay(APPEAR_DELAY_MS)
-                    shown = Shown.Loading
-                    visible = true
-                }
+            is ImportState.Running -> {
+                delay(APPEAR_DELAY_MS)
+                shown = Shown.Loading
+                visible = true
             }
 
-            // 导入结束：取消路径（不发终态事件）也走这里，不能留一个空转的指示器。
-            // 同时解锁 settled，让下一次导入能正常显示。
-            else -> {
-                visible = false
-                settled = false
-            }
+            ImportState.Idle -> visible = false
         }
     }
 

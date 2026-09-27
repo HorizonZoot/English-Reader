@@ -247,7 +247,11 @@ data class WholeTranslationProgress(
     val translated: Int,
     val translating: Int,
     val failed: Int,
-    val untranslated: Int
+    val untranslated: Int,
+    val retryableFailures: Int = 0,
+    val configurationFailures: Int = 0,
+    val permanentFailures: Int = 0,
+    val unclassifiedFailures: Int = failed - retryableFailures - configurationFailures - permanentFailures
 ) {
     init {
         require(total >= 0) { "total must not be negative" }
@@ -256,17 +260,51 @@ data class WholeTranslationProgress(
     /** 全部段落均已成功——最终事务性写入的前置条件。 */
     val isFullyTranslated: Boolean get() = total > 0 && translated == total
 
-    /** 存在可重试的失败项时，UI 显示「重试失败项」。 */
+    /** 包括永久失败和无法识别原因的失败，不等同于可重试。 */
     val hasFailures: Boolean get() = failed > 0
+
+    val canRetryFailures: Boolean get() = retryableFailures > 0 || configurationFailures > 0
 
     companion object {
         fun from(segments: List<TranslationSegment>): WholeTranslationProgress =
-            WholeTranslationProgress(
-                total = segments.size,
-                translated = segments.count { it.status == TranslationSegmentStatus.TRANSLATED },
-                translating = segments.count { it.status == TranslationSegmentStatus.TRANSLATING },
-                failed = segments.count { it.status == TranslationSegmentStatus.FAILED },
-                untranslated = segments.count { it.status == TranslationSegmentStatus.UNTRANSLATED }
+            summarize(segments, { it.status }, { it.failureReason })
+
+        internal fun <T> summarize(
+            rows: List<T>,
+            statusOf: (T) -> TranslationSegmentStatus,
+            failureReasonOf: (T) -> TranslationFailureReason?
+        ): WholeTranslationProgress {
+            var translated = 0
+            var translating = 0
+            var untranslated = 0
+            var retryable = 0
+            var configuration = 0
+            var permanent = 0
+            var unclassified = 0
+            for (row in rows) {
+                when (statusOf(row)) {
+                    TranslationSegmentStatus.TRANSLATED -> translated++
+                    TranslationSegmentStatus.TRANSLATING -> translating++
+                    TranslationSegmentStatus.UNTRANSLATED -> untranslated++
+                    TranslationSegmentStatus.FAILED -> when (failureReasonOf(row)?.category) {
+                        TranslationFailureCategory.RETRYABLE -> retryable++
+                        TranslationFailureCategory.FATAL -> configuration++
+                        TranslationFailureCategory.PERMANENT -> permanent++
+                        null -> unclassified++
+                    }
+                }
+            }
+            return WholeTranslationProgress(
+                total = rows.size,
+                translated = translated,
+                translating = translating,
+                failed = retryable + configuration + permanent + unclassified,
+                untranslated = untranslated,
+                retryableFailures = retryable,
+                configurationFailures = configuration,
+                permanentFailures = permanent,
+                unclassifiedFailures = unclassified
             )
+        }
     }
 }

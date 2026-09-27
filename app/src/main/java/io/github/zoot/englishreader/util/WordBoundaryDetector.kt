@@ -8,6 +8,8 @@ package io.github.zoot.englishreader.util
  */
 object WordBoundaryDetector {
 
+    data class WordRange(val word: String, val startOffset: Int, val endOffset: Int)
+
     /**
      * 从文本中提取指定位置的单词
      *
@@ -15,14 +17,18 @@ object WordBoundaryDetector {
      * @param offset 点击/长按位置的字符偏移
      * @return 提取的单词，如果位置不在单词内则返回 null
      */
-    fun getWordAtOffset(text: String, offset: Int): String? {
+    fun getWordAtOffset(text: String, offset: Int): String? =
+        getWordRangeAtOffset(text, offset)?.word
+
+    /** 词文本与半开范围来自同一段原文；首尾引号、连字符不属于词。 */
+    fun getWordRangeAtOffset(text: String, offset: Int): WordRange? {
         // 边界检查
         if (offset < 0 || offset > text.length) return null
 
         // 处理末尾位置：光标在文本最后
         if (offset == text.length) {
             if (text.isEmpty()) return null
-            return getWordAtOffset(text, text.length - 1)
+            return getWordRangeAtOffset(text, text.length - 1)
         }
 
         val char = text[offset]
@@ -36,19 +42,15 @@ object WordBoundaryDetector {
         }
 
         // 向后查找单词结束位置
-        var end = offset
-        while (end < text.length - 1 && isWordChar(text[end + 1])) {
+        var end = offset + 1
+        while (end < text.length && isWordChar(text[end])) {
             end++
         }
 
-        // 提取单词并去除首尾标点
-        val word = text.substring(start, end + 1)
-
-        // 先去除所有首尾标点（包括 hyphen/apostrophe）
-        val trimmed = word.trim { !it.isLetterOrDigit() }
-
-        // 过滤纯标点：必须包含至少一个字母或数字
-        return trimmed.takeIf { it.isNotEmpty() && it.any { c -> c.isLetterOrDigit() } }
+        while (start < end && !text[start].isLetterOrDigit()) start++
+        while (end > start && !text[end - 1].isLetterOrDigit()) end--
+        if (offset !in start until end) return null
+        return WordRange(text.substring(start, end), start, end)
     }
 
     /**

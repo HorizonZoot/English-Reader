@@ -1,5 +1,9 @@
 package io.github.zoot.englishreader.ui.screen
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
@@ -9,14 +13,21 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
+import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.ai.AiClient
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.ai.AiModelDiscoveryDraft
@@ -30,6 +41,11 @@ import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.data.repository.AiProfileRepository
 import io.github.zoot.englishreader.data.repository.ExplanationCacheRepository
 import io.github.zoot.englishreader.data.repository.ProfileMutationResult
+import io.github.zoot.englishreader.viewmodel.ModelDiscoveryState
+import io.github.zoot.englishreader.viewmodel.ProfileActionEvent
+import io.github.zoot.englishreader.viewmodel.ProfileActionResult
+import io.github.zoot.englishreader.viewmodel.ProfileMutationState
+import io.github.zoot.englishreader.viewmodel.ProfileMutationSubmission
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -37,14 +53,24 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.receiveAsFlow
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLog
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -52,6 +78,8 @@ class AiProfileConfigScreenTest {
 
     @get:Rule
     val composeTestRule = createComposeRule()
+
+    private var screenVisible by mutableStateOf(true)
 
     @Test
     fun emptyState_bothAddEntriesOpenTheSharedEditor() {
@@ -463,6 +491,201 @@ class AiProfileConfigScreenTest {
     }
 
     @Test
+    fun profileMutation_completionWhileSnackbarIsBlocked_closesOnlySubmittedEditor() {
+        val mutationStarted = CompletableDeferred<Unit>()
+        val releaseMutation = CompletableDeferred<Unit>()
+        val harness = harness()
+        coEvery { harness.repository.createProfile(any(), any()) } coAnswers {
+            mutationStarted.complete(Unit)
+            releaseMutation.await()
+            ProfileMutationResult.Success
+        }
+        coEvery { harness.cacheRepository.clearAllCache() } returns 1
+        coEvery { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) } returns
+            AiModelDiscoveryResult.Success(listOf("deepseek-v4-flash"))
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        confirmProbe()
+        composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo()
+        composeTestRule.mainClock.autoAdvance = false
+        composeTestRule.runOnIdle { harness.viewModel.clearAiExplanationCache() }
+        val firstMessage = string(R.string.settings_ai_cache_cleared)
+        advanceUiUntil { composeTestRule.onAllNodesWithText(firstMessage).fetchSemanticsNodes().size == 1 }
+        composeTestRule.onNodeWithText(firstMessage).assertExists()
+
+        composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo()
+        advanceUiUntil {
+            runCatching { composeTestRule.onNodeWithTag("profile_editor_save").assertIsDisplayed() }.isSuccess
+        }
+        // 本例验证保存与消息队列的顺序，使用按钮的无障碍点击入口；触摸遮挡留给设备验收。
+        composeTestRule.onNodeWithTag("profile_editor_save")
+            .assertIsDisplayed().assertIsEnabled()
+            .performSemanticsAction(SemanticsActions.OnClick) { click -> assertTrue(click()) }
+        advanceUiUntil { mutationStarted.isCompleted }
+        composeTestRule.runOnIdle {
+            assertTrue(harness.viewModel.profileMutationInFlight.value)
+            releaseMutation.complete(Unit)
+        }
+        advanceUiUntil { composeTestRule.onAllNodesWithText("新增 AI 配置").fetchSemanticsNodes().isEmpty() }
+        composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
+        composeTestRule.onNodeWithText(firstMessage).assertExists()
+
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        advanceUiUntil { composeTestRule.onAllNodesWithTag("profile_display_name").fetchSemanticsNodes().size == 1 }
+        composeTestRule.onNodeWithTag("profile_display_name").performTextReplacement("Draft B")
+        dismissSnackbar(firstMessage)
+        val completedMessage = string(R.string.settings_profile_created)
+        advanceUiUntil { composeTestRule.onAllNodesWithText(completedMessage).fetchSemanticsNodes().size == 1 }
+
+        composeTestRule.onNodeWithText(completedMessage).assertExists()
+        composeTestRule.onNodeWithText("新增 AI 配置").assertExists()
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("Draft B")
+        composeTestRule.onNodeWithTag("profile_api_key").assertEditableTextEquals("")
+    }
+
+    @Test
+    fun profileMutation_oldCompletionAfterSameProfileReopens_preservesNewSession() {
+        val target = profile("profile-1", "Primary")
+        val harness = ControlledMutationHarness(listOf(target))
+        setScreen(harness.viewModel)
+        composeTestRule.onNodeWithTag("profile_manage_${target.profileId}").performClick()
+        composeTestRule.onNodeWithText("编辑配置").performClick()
+        confirmProbe()
+        composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo().performClick()
+        val first = harness.accepted.single()
+
+        // 两个 StateFlow 可以在不同帧被观察，先开放编辑，再递送已完成的业务结果。
+        harness.inFlight.value = false
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithContentDescription("取消").performClick()
+        composeTestRule.onNodeWithTag("profile_manage_${target.profileId}").performClick()
+        composeTestRule.onNodeWithText("编辑配置").performClick()
+        harness.complete(first)
+        harness.events.trySend(ProfileActionEvent(ProfileActionResult.UPDATED, target.profileId))
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("编辑 AI 配置").assertExists()
+        composeTestRule.onNodeWithTag("profile_api_key").assertEditableTextEquals("")
+        confirmProbe()
+        composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo().performClick()
+        val second = harness.accepted.last()
+        assertFalse(first.editorSessionId == second.editorSessionId)
+        assertEquals(first.draftRevision, second.draftRevision)
+        harness.complete(second)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("编辑 AI 配置").assertDoesNotExist()
+    }
+
+    @Test
+    fun profileMutation_eachDraftFieldChangeInvalidatesCompletion_butVisibilityAndBusyTapDoNot() {
+        val harness = ControlledMutationHarness()
+        setScreen(harness.viewModel)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        composeTestRule.onNodeWithTag("profile_api_key_hidden").performClick()
+
+        fun submitAndReleaseUi(): ProfileMutationState {
+            confirmProbe()
+            composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo().performClick()
+            val accepted = harness.accepted.last()
+            harness.inFlight.value = false
+            composeTestRule.waitForIdle()
+            return accepted
+        }
+
+        val failed = submitAndReleaseUi()
+        harness.complete(failed, ProfileMutationResult.CredentialWriteFailed)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("profile_api_key").assertEditableTextEquals("sk-draft")
+
+        val changes = listOf(
+            "profile_display_name" to "Changed name",
+            "profile_temperature" to "0.6",
+            "profile_api_key" to "changed-key",
+            "profile_model_id" to "manual-model",
+            "profile_base_url" to "https://changed.example.com/v1"
+        )
+        for ((tag, value) in changes) {
+            val submitted = submitAndReleaseUi()
+            composeTestRule.onNodeWithTag(tag).performScrollTo().performTextClearance()
+            composeTestRule.onNodeWithTag(tag).performTextInput(value)
+            harness.complete(submitted)
+            composeTestRule.waitForIdle()
+            composeTestRule.onNodeWithText("新增 AI 配置").assertExists()
+            composeTestRule.onNodeWithTag(tag).assertEditableTextEquals(value)
+        }
+        val beforeProviderChange = submitAndReleaseUi()
+        composeTestRule.onNodeWithTag("profile_provider_selector").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("profile_provider_option_KIMI").performClick()
+        harness.complete(beforeProviderChange)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("新增 AI 配置").assertExists()
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("Kimi")
+
+        confirmProbe()
+        val previouslyAccepted = harness.accepted.size
+        composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo()
+            .performSemanticsAction(SemanticsActions.OnClick) { click ->
+                click()
+                click()
+            }
+        val unchanged = harness.accepted.last()
+        assertEquals(previouslyAccepted + 1, harness.accepted.size)
+        harness.inFlight.value = false
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("profile_api_key_visible").performScrollTo().performClick()
+        harness.complete(unchanged)
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
+    }
+
+    @Test
+    fun profileActionEvents_queuedBehindSnackbar_surviveScreenRecreation() {
+        val harness = ControlledMutationHarness()
+        setScreen(harness.viewModel)
+        composeTestRule.mainClock.autoAdvance = false
+        harness.events.trySend(ProfileActionEvent(ProfileActionResult.CACHE_CLEARED))
+        advanceUiUntil {
+            composeTestRule.onAllNodesWithText(string(R.string.settings_ai_cache_cleared)).fetchSemanticsNodes().size == 1
+        }
+        composeTestRule.onNodeWithText(string(R.string.settings_ai_cache_cleared)).assertExists()
+        harness.events.trySend(ProfileActionEvent(ProfileActionResult.SELECTED))
+        harness.events.trySend(ProfileActionEvent(ProfileActionResult.DELETED))
+
+        recreateScreen(harness)
+        advanceUiUntil {
+            composeTestRule.onAllNodesWithText(string(R.string.settings_profile_selected)).fetchSemanticsNodes().size == 1
+        }
+        composeTestRule.onNodeWithText(string(R.string.settings_profile_selected)).assertExists()
+        recreateScreen(harness)
+        advanceUiUntil {
+            composeTestRule.onAllNodesWithText(string(R.string.settings_profile_deleted)).fetchSemanticsNodes().size == 1
+        }
+        composeTestRule.onNodeWithText(string(R.string.settings_profile_deleted)).assertExists()
+        recreateScreen(harness)
+        composeTestRule.onNodeWithText(string(R.string.settings_profile_deleted)).assertDoesNotExist()
+    }
+
+    @Test
+    fun clearAiExplanationCache_sensitiveFailure_logsNoThrowableOrPrivateText() {
+        val harness = harness()
+        val privateMessage = "private-key https://private.example.com/tenant private-explanation"
+        coEvery { harness.cacheRepository.clearAllCache() } throws IOException(privateMessage)
+        setScreen(harness)
+        ShadowLog.clear()
+
+        composeTestRule.runOnIdle { harness.viewModel.clearAiExplanationCache() }
+        composeTestRule.waitForIdle()
+
+        val logs = ShadowLog.getLogsForTag("SettingsViewModel")
+        assertTrue(logs.isNotEmpty())
+        assertTrue(logs.all { it.throwable == null })
+        assertTrue(logs.all { !it.msg.contains("private-") })
+        composeTestRule.onNodeWithText(string(R.string.settings_profile_failed)).assertExists()
+    }
+
+    @Test
     fun testConnection_blankFields_showInlineErrorsWithoutSending() {
         val harness = harness()
         setScreen(harness)
@@ -553,12 +776,44 @@ class AiProfileConfigScreenTest {
         composeTestRule.waitForIdle()
     }
 
-    private fun setScreen(harness: Harness) {
+    private fun setScreen(harness: Harness) = setScreen(harness.viewModel)
+
+    private fun setScreen(viewModel: SettingsViewModel) {
         composeTestRule.setContent {
-            AiProfileConfigScreen(onBack = {}, viewModel = harness.viewModel)
+            if (screenVisible) AiProfileConfigScreen(onBack = {}, viewModel = viewModel)
         }
         composeTestRule.waitForIdle()
     }
+
+    private fun recreateScreen(harness: ControlledMutationHarness) {
+        composeTestRule.runOnIdle { screenVisible = false }
+        advanceUiUntil { harness.activeEventCollectors.get() == 0 }
+        composeTestRule.runOnIdle { screenVisible = true }
+        advanceUiUntil { harness.activeEventCollectors.get() == 1 }
+        composeTestRule.mainClock.advanceTimeByFrame()
+        composeTestRule.waitForIdle()
+    }
+
+    private fun advanceUiUntil(condition: () -> Boolean) {
+        val deadline = composeTestRule.mainClock.currentTime + 1_000
+        while (true) {
+            // Android Main 上的恢复与 Compose 的帧时钟分别推进。
+            composeTestRule.waitForIdle()
+            if (condition()) return
+            assertTrue("UI condition did not settle within 1s of virtual time", composeTestRule.mainClock.currentTime < deadline)
+            composeTestRule.mainClock.advanceTimeByFrame()
+        }
+    }
+
+    private fun dismissSnackbar(message: String) {
+        composeTestRule.onNode(
+            SemanticsMatcher.keyIsDefined(SemanticsActions.Dismiss) and
+                (hasText(message) or hasAnyDescendant(hasText(message)))
+        ).performSemanticsAction(SemanticsActions.Dismiss) { dismiss -> assertTrue(dismiss()) }
+    }
+
+    private fun string(resourceId: Int): String =
+        RuntimeEnvironment.getApplication().getString(resourceId)
 
     private fun harness(
         profiles: List<AiProviderProfile> = emptyList(),
@@ -621,4 +876,60 @@ class AiProfileConfigScreenTest {
         val aiClient: AiClient,
         val viewModel: SettingsViewModel
     )
+
+    private class ControlledMutationHarness(profiles: List<AiProviderProfile> = emptyList()) {
+        val mutationState = MutableStateFlow<ProfileMutationState?>(null)
+        val inFlight = MutableStateFlow(false)
+        val discovery = MutableStateFlow(ModelDiscoveryState())
+        val events = Channel<ProfileActionEvent>(Channel.BUFFERED)
+        val activeEventCollectors = AtomicInteger()
+        val accepted = mutableListOf<ProfileMutationState>()
+        val viewModel = mockk<SettingsViewModel>(relaxed = true).also { model ->
+            every { model.profiles } returns MutableStateFlow(profiles)
+            every { model.activeProfileId } returns MutableStateFlow(profiles.firstOrNull()?.profileId)
+            every { model.modelDiscovery } returns discovery
+            every { model.profileMutationInFlight } returns inFlight
+            every { model.profileMutationState } returns mutationState
+            every { model.profileActionEvents } returns events.receiveAsFlow()
+                .onStart { activeEventCollectors.incrementAndGet() }
+                .onCompletion { activeEventCollectors.decrementAndGet() }
+            every { model.invalidateModelDiscovery() } answers {
+                discovery.value = ModelDiscoveryState()
+                Unit
+            }
+            every { model.discoverModels(any(), any(), any()) } answers {
+                discovery.value = ModelDiscoveryState(
+                    result = AiModelDiscoveryResult.Success(listOf("deepseek-v4-flash"))
+                )
+                Unit
+            }
+            every { model.createProfile(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                accept(firstArg(), arg(1))
+            }
+            every { model.updateProfile(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                accept(firstArg(), arg(1))
+            }
+            every { model.acknowledgeProfileMutation(any()) } answers {
+                val current = mutationState.value
+                if (current != null && current.mutationId == firstArg<String>() && current.result != null) {
+                    mutationState.compareAndSet(current, null)
+                }
+                Unit
+            }
+        }
+
+        private fun accept(editorSessionId: String, revision: Long): ProfileMutationSubmission {
+            if (inFlight.value) return ProfileMutationSubmission.Busy
+            val mutation = ProfileMutationState("mutation-${accepted.size}", editorSessionId, revision)
+            accepted += mutation
+            mutationState.value = mutation
+            inFlight.value = true
+            return ProfileMutationSubmission.Accepted(mutation.mutationId)
+        }
+
+        fun complete(mutation: ProfileMutationState, result: ProfileMutationResult = ProfileMutationResult.Success) {
+            inFlight.value = false
+            mutationState.value = mutation.copy(result = result)
+        }
+    }
 }

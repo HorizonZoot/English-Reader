@@ -1,6 +1,6 @@
 package io.github.zoot.englishreader.viewmodel
 
-import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -50,10 +50,9 @@ class LibraryItemTest {
         assertEquals(8_000L, unread.sortKey)
     }
 
-    private fun article(id: Long, createdAt: Long = 0L) = ArticleEntity(
+    private fun article(id: Long, createdAt: Long = 0L) = ArticleSummary(
         id = id,
         title = "A$id",
-        content = "body",
         createdAt = createdAt
     )
 

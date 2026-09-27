@@ -95,8 +95,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
         // Readium 3.x AAR metadata declares coreLibraryDesugaringEnabled=true, so every consumer
-        // must enable it. SPIKE-ONLY: this is an app-wide (all variants) build change, not a
-        // debug-only one. Remove together with the Readium dependencies if the spike is rejected.
+        // must enable it. Readium is a production dependency, so this applies to every variant.
         isCoreLibraryDesugaringEnabled = true
     }
 

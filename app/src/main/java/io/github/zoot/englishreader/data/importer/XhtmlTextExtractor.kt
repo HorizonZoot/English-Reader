@@ -30,9 +30,6 @@ object XhtmlTextExtractor {
     )
     private val SKIP_CONTENT_TAGS = setOf("script", "style", "head", "title")
 
-    private val THREE_OR_MORE_NEWLINES = Regex("\n{3,}")
-    private val TRAILING_SPACES = Regex("[ \\t]+\n")
-
     /** 命名实体引用。数字引用（&#8212;）由 XML 解析器原生处理，不在此列。 */
     private val NAMED_ENTITY = Regex("&([A-Za-z][A-Za-z0-9]{1,31});")
 
@@ -90,7 +87,7 @@ object XhtmlTextExtractor {
     fun extract(xhtml: String): String {
         val parser = XmlParsers.forXml(resolveEntities(xhtml))
 
-        val out = StringBuilder()
+        val out = ExtractedText()
         // 用计数而非布尔：<style> 内可能再嵌 <style>（畸形文档），布尔会提前恢复输出
         var skipDepth = 0
 
@@ -103,7 +100,7 @@ object XhtmlTextExtractor {
                         when {
                             tag in SKIP_CONTENT_TAGS -> skipDepth++
                             skipDepth > 0 -> Unit
-                            tag == "br" -> out.append('\n')
+                            tag == "br" -> out.appendLineBreak()
                             tag in PARAGRAPH_TAGS -> out.appendParagraphBreak()
                         }
                     }
@@ -228,22 +225,60 @@ object XhtmlTextExtractor {
         return xhtml.length
     }
 
-    /** 追加段落边界，且不重复堆叠——嵌套 div 会连续触发多次。 */
-    private fun StringBuilder.appendParagraphBreak() {
-        if (isEmpty()) return
-        var existing = 0
-        var i = length - 1
-        while (i >= 0 && (this[i] == '\n' || this[i] == ' ' || this[i] == '\t')) {
-            if (this[i] == '\n') existing++
-            i--
+    /** 每次提取私有的尾部状态，只扫描新文本，不反复回看已累积的空白。 */
+    private class ExtractedText {
+        private val text = StringBuilder()
+        private var trailingLineBreaks = 0
+
+        fun append(value: String) {
+            text.append(value)
+            for (char in value) {
+                when (char) {
+                    '\n' -> trailingLineBreaks = (trailingLineBreaks + 1).coerceAtMost(2)
+                    ' ', '\t' -> Unit
+                    else -> trailingLineBreaks = 0
+                }
+            }
         }
-        repeat((2 - existing).coerceAtLeast(0)) { append('\n') }
+
+        fun appendLineBreak() {
+            text.append('\n')
+            trailingLineBreaks = (trailingLineBreaks + 1).coerceAtMost(2)
+        }
+
+        fun appendParagraphBreak() {
+            if (text.isEmpty()) return
+            repeat(2 - trailingLineBreaks) { appendLineBreak() }
+        }
+
+        override fun toString(): String = text.toString()
     }
 
     private fun normalize(text: String): String {
-        var result = text.replace('\u00A0', ' ')  // nbsp 视作普通空格
-        result = TRAILING_SPACES.replace(result, "\n")
-        result = THREE_OR_MORE_NEWLINES.replace(result, "\n\n")
-        return result.trim()
+        val result = StringBuilder(text.length)
+        var trailingSpaces = 0
+        var lineBreaks = 0
+        for (source in text) {
+            val char = if (source == '\u00A0') ' ' else source
+            when (char) {
+                ' ', '\t' -> {
+                    result.append(char)
+                    trailingSpaces++
+                }
+                '\n' -> {
+                    // A long space run without a following LF made the old regex rescan every suffix.
+                    result.setLength(result.length - trailingSpaces)
+                    trailingSpaces = 0
+                    if (lineBreaks < 2) result.append('\n')
+                    lineBreaks = (lineBreaks + 1).coerceAtMost(2)
+                }
+                else -> {
+                    result.append(char)
+                    trailingSpaces = 0
+                    lineBreaks = 0
+                }
+            }
+        }
+        return result.toString().trim()
     }
 }

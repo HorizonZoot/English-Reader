@@ -33,4 +33,29 @@ class WordBoundaryDetectorTest {
             assertNull("text=$text offset=$offset", WordBoundaryDetector.getWordAtOffset(text, offset))
         }
     }
+
+    @Test
+    fun getWordRangeAtOffset_trimsEdgesAndPreservesInternalPunctuation() {
+        val text = "'word' -word- --can't-- 'well-known'"
+        val expected = listOf("word", "word", "can't", "well-known")
+        var from = 0
+        expected.forEach { word ->
+            val start = text.indexOf(word, from)
+            for (offset in start until start + word.length) {
+                val range = WordBoundaryDetector.getWordRangeAtOffset(text, offset)
+                assertEquals(WordBoundaryDetector.WordRange(word, start, start + word.length), range)
+                assertEquals(word, text.substring(range!!.startOffset, range.endOffset))
+                assertEquals(word, WordBoundaryDetector.getWordAtOffset(text, offset))
+            }
+            from = start + word.length
+        }
+    }
+
+    @Test
+    fun getWordRangeAtOffset_edgeAndStandalonePunctuation_returnsNull() {
+        listOf("'word'" to 0, "'word'" to 5, "-word-" to 0, "-word-" to 5,
+            "---" to 1, "''" to 0, "" to 0).forEach { (text, offset) ->
+            assertNull("text=$text offset=$offset", WordBoundaryDetector.getWordRangeAtOffset(text, offset))
+        }
+    }
 }

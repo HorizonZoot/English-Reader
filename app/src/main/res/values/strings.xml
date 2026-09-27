@@ -40,6 +40,7 @@
     <string name="book_delete_confirmation">确定删除《%1$s》及其全部章节吗？生词本中的单词会保留。</string>
     <string name="book_toc_title">目录</string>
     <string name="book_toc_empty">这本书没有可阅读的章节</string>
+    <string name="book_toc_load_failed">目录加载失败，请重试</string>
     <string name="book_continue_reading">继续阅读</string>
     <string name="chapter_position">第 %1$d 章 / 共 %2$d 章</string>
     <string name="library_item_book">书籍</string>
@@ -147,7 +148,8 @@
     <string name="tts_network_once_disclosure">本次重试仅朗读当前句子。系统语音引擎可能将该句文本发送至其服务端；不会更改网络语音设置。连续使用网络语音请在设置页开启。</string>
     <string name="tts_use_network_once">仅本句使用网络语音</string>
     <string name="reading_voice_settings">语音设置</string>
-    <string name="reading_voice_scope">仅影响句子、连续朗读及试听，不改变单词发音。打开面板会暂停朗读，关闭后需手动继续。</string>
+    <string name="reading_voice_scope">音色与网络语音设置适用于句子、连续朗读、试听，以及真人录音不可用时的单词发音。真人录音不变，单词始终以 1 倍速发音。打开面板会暂停朗读，关闭后需手动继续。</string>
+    <string name="reading_vocabulary_load_failed">已收藏单词加载失败，请重试</string>
     <string name="reading_voice_rate">朗读语速</string>
     <string name="reading_voice_rate_value">语速 · %1$.1fx</string>
     <string name="reading_voice_preview">试听</string>
@@ -211,12 +213,14 @@
     <string name="whole_translation_continue_background">后台继续</string>
     <string name="whole_translation_done">完成</string>
     <string name="whole_translation_cancel_task">取消任务</string>
+    <string name="whole_translation_cancel_failed">取消翻译失败，请重试</string>
     <string name="whole_translation_progress">已翻译 %1$d / %2$d</string>
     <string name="whole_translation_progress_failed">已翻译 %1$d / %2$d，失败 %3$d</string>
     <string name="whole_translation_status_running">正在翻译…</string>
     <string name="whole_translation_status_paused">已暂停</string>
     <string name="whole_translation_status_completed">翻译完成，已显示中文对照</string>
-    <string name="whole_translation_status_failed_configuration">任务已停止：AI 配置或凭据不可用，请检查设置后重试</string>
+    <string name="whole_translation_status_failed_configuration">任务已停止：AI 配置或凭据不可用，请检查设置</string>
+    <string name="whole_translation_status_blocked">剩余失败项无法直接重试；可取消此任务，调整分段或原文后重新翻译。</string>
     <string name="whole_translation_status_failed_generic">任务已停止</string>
     <string name="whole_translation_rejected_no_content">没有可翻译的段落</string>
     <string name="whole_translation_rejected_generic">无法开始翻译</string>

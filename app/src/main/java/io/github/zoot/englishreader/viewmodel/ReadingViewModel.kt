@@ -66,6 +66,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -147,7 +149,7 @@ enum class VocabularySaveResult {
     FAILED
 }
 
-enum class ReadingError { LOAD, SAVE_POSITION, SAVE_PREFERENCE }
+enum class ReadingError { LOAD, SAVE_POSITION, SAVE_PREFERENCE, LOAD_VOCABULARY, CANCEL_TRANSLATION }
 
 /** 当前文章在书中的导航位置；独立文章没有章节上下文。 */
 
@@ -450,19 +452,11 @@ class ReadingViewModel @Inject constructor(
     private var translationPreparationJob: Job? = null
     private var articleLoadGeneration = 0L
 
-    /**
-     * 发音请求的持有者与代次。
-     *
-     * 两者都必需，各挡一种情况：
-     *  - `playWordAudioJob` 让 [stopAudio] 能真的取消在途请求。原来那个协程不被任何字段持有，
-     *    关闭词义弹窗后它会照常恢复并开始播放 —— 用户已经离开却听到声音。
-     *  - `audioRequestGeneration` 作废「已经越过挂起点、取消挡不住」的那次。协程可能正好在
-     *    `cache.get()` 返回后、`play()` 之前，此时 cancel 不会阻止它调 player；代次不匹配才会。
-     *
-     * 加载态也按代次归属：旧请求返回时不得清掉新请求刚置上的转圈。
-     */
+    // 请求身份比准备 Job 长寿，播放开始后的异步错误仍由同一请求持有。
     private var playWordAudioJob: Job? = null
+    private var wordAudioFallbackJob: Job? = null
     private var audioRequestGeneration = 0L
+    private var audioRequestToken: AudioPlayer.RequestToken? = null
     private var requestedArticleId: Long? = null
     private var openedRouteArticleId: Long? = null
 
@@ -533,7 +527,9 @@ class ReadingViewModel @Inject constructor(
                 // 位置先发布，内容随后可见；首帧的临时位置不得冲掉已保存的锚点。
                 _pendingPositionTarget.value = ReadingPositionTarget(
                     position = position,
-                    entry = if (entry == ReadingEntry.RESUME && stored == null) ReadingEntry.START else entry,
+                    entry = if (entry == ReadingEntry.RESUME && stored == null && wordAnchor == null) {
+                        ReadingEntry.START
+                    } else entry,
                     requestId = ++positionRequestId
                 )
                 _chapterContext.value = context
@@ -695,26 +691,30 @@ class ReadingViewModel @Inject constructor(
         )
         if (_selectedSentence.value == snapshot) return
 
+        invalidateWordLookup()
         _selectedSentence.value = snapshot
         dismissAiSheet()
         dismissSentenceTranslation()
         stopAudio(preserveTtsPreparation = true)
-        // 点击句子时清除单词高亮
-        _selectedWord.value = null
     }
 
     fun clearSelection() = clearSelection(preserveTtsPreparation = false)
 
     private fun clearSelection(preserveTtsPreparation: Boolean) {
-        _wordDefinition.value = null
-        _isLoadingDefinition.value = false
-        wordSelectionGeneration++
-        lookupWordJob?.cancel()
+        invalidateWordLookup()
         dismissAiSheet()
         dismissSentenceTranslation()
-        _selectedWord.value = null
         _selectedSentence.value = null
         stopAudio(preserveTtsPreparation)
+    }
+
+    private fun invalidateWordLookup() {
+        wordSelectionGeneration++
+        lookupWordJob?.cancel()
+        lookupWordJob = null
+        _wordDefinition.value = null
+        _isLoadingDefinition.value = false
+        _selectedWord.value = null
     }
 
     /** 只用不可变快照里的规范化文本发起句子解释。 */
@@ -950,7 +950,21 @@ class ReadingViewModel @Inject constructor(
     /** 显式取消任务本身（付费工作停止）。与 [dismissWholeTranslation] 不同。 */
     fun cancelWholeTranslation() {
         val tracking = _wholeTranslation.value as? WholeTranslationSheetState.Tracking ?: return
-        viewModelScope.launch { wholeTranslationRepository.cancel(tracking.taskId) }
+        val generation = wholeTranslationGeneration
+        val articleId = _article.value?.id ?: return
+        viewModelScope.launch {
+            try {
+                wholeTranslationRepository.cancel(tracking.taskId)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == wholeTranslationGeneration && articleId == _article.value?.id &&
+                    (_wholeTranslation.value as? WholeTranslationSheetState.Tracking)?.taskId == tracking.taskId
+                ) {
+                    _readingErrors.trySend(ReadingError.CANCEL_TRANSLATION)
+                }
+            }
+        }
     }
 
     /**
@@ -1512,7 +1526,13 @@ class ReadingViewModel @Inject constructor(
     fun lookupWord(word: String) {
         val generation = ++wordSelectionGeneration
         lookupWordJob?.cancel()
+        val articleId = requestedArticleId
+        val articleGeneration = articleLoadGeneration
+        fun isCurrentRequest(): Boolean = generation == wordSelectionGeneration &&
+            articleGeneration == articleLoadGeneration && articleId == requestedArticleId &&
+            articleId == _article.value?.id
         lookupWordJob = viewModelScope.launch {
+            if (!isCurrentRequest()) return@launch
             _isLoadingDefinition.value = true
             try {
                 val cleanWord = word.trim().lowercase()
@@ -1520,12 +1540,12 @@ class ReadingViewModel @Inject constructor(
 
                 // 优先查询离线词典（含词形还原：lives→live）
                 val offlineResult = dictionaryRepository.lookupOffline(cleanWord)
+                if (!isCurrentRequest()) return@launch
                 if (offlineResult != null) {
                     val entry = offlineResult.entry
                     // 发音用用户长按的原词（cleanWord），而非还原后的原形：
                     // lives/live 发音不同，读用户实际看到的词更准。有道 dictvoice 亦基于原词。
                     val audioUrl = buildYoudaoAudioUrl(cleanWord)
-                    if (generation != wordSelectionGeneration) return@launch
                     _wordDefinition.value = WordDefinition(
                         word = entry.word,  // 显示原形（词形还原命中时即 live）
                         phonetic = entry.phonetic,
@@ -1561,7 +1581,7 @@ class ReadingViewModel @Inject constructor(
                 val responses = dictionaryRepository.lookupOnline(cleanWord)
                 if (responses.isNotEmpty()) {
                     val response = responses.first()
-                    if (generation != wordSelectionGeneration) return@launch
+                    if (!isCurrentRequest()) return@launch
 
                     // 提取音标和音频 URL
                     val phonetic = response.phonetic
@@ -1595,8 +1615,8 @@ class ReadingViewModel @Inject constructor(
                     // 有网走真人音、无网静默）。silent=true：自动播放失败静默，不弹 Snackbar。
                     playWordAudio(cleanWord, audioUrl, silent = true)
                 } else {
-                    if (generation == wordSelectionGeneration) {
-                        _definitionError.send(DictionaryErrorType.WORD_NOT_FOUND)
+                    if (isCurrentRequest()) {
+                        _definitionError.trySend(DictionaryErrorType.WORD_NOT_FOUND)
                         _selectedWord.value = null
                     }
                 }
@@ -1611,12 +1631,12 @@ class ReadingViewModel @Inject constructor(
                 } else {
                     DictionaryErrorType.UNKNOWN_ERROR
                 }
-                if (generation == wordSelectionGeneration) {
-                    _definitionError.send(errorType)
+                if (isCurrentRequest()) {
+                    _definitionError.trySend(errorType)
                     _selectedWord.value = null
                 }
             } finally {
-                if (generation == wordSelectionGeneration) {
+                if (isCurrentRequest()) {
                     _isLoadingDefinition.value = false
                 }
             }
@@ -1627,10 +1647,7 @@ class ReadingViewModel @Inject constructor(
     fun beginWordSelection(word: String) {
         val cleanWord = word.trim().lowercase()
         if (cleanWord.isBlank()) return
-        wordSelectionGeneration++
-        lookupWordJob?.cancel()
-        _isLoadingDefinition.value = false
-        _wordDefinition.value = null
+        invalidateWordLookup()
         _selectedWord.value = cleanWord
         _selectedSentence.value = null
         dismissAiSheet()
@@ -1647,10 +1664,21 @@ class ReadingViewModel @Inject constructor(
         val articleId = _article.value?.id ?: return
         val generation = articleLoadGeneration
         viewModelScope.launch {
-            // 只取首次发射，避免这里挂上一个永不结束的 flow 收集
-            val vocabList = vocabularyRepository.getVocabularyByArticle(articleId).first()
-            if (generation == articleLoadGeneration && articleId == requestedArticleId) {
-                _vocabularyWords.value = vocabList.mapTo(mutableSetOf()) { it.word.lowercase() }
+            try {
+                val vocabList = vocabularyRepository.getVocabularyByArticle(articleId).first()
+                if (generation == articleLoadGeneration && articleId == requestedArticleId &&
+                    articleId == _article.value?.id
+                ) {
+                    _vocabularyWords.value = vocabList.mapTo(mutableSetOf()) { it.word.lowercase() }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == articleLoadGeneration && articleId == requestedArticleId &&
+                    articleId == _article.value?.id
+                ) {
+                    _readingErrors.trySend(ReadingError.LOAD_VOCABULARY)
+                }
             }
         }
     }
@@ -1667,150 +1695,90 @@ class ReadingViewModel @Inject constructor(
      *   避免离线阅读时每长按一个词都弹错误提示或响机器音。用户手动点播放按钮时为 false，明确反馈。
      */
     fun playWordAudio(word: String, audioUrl: String?, silent: Boolean = false) {
-        if (_readingTtsState.value.phase != ReadingTtsPhase.IDLE) stopAudio()
-        // audioUrl 为空表示这条结果没有真人音可播（在线词典缺 audio 字段），与网络无关，
-        // 也没有可缓存的来源，所以直接兜底。
-        if (audioUrl == null) {
-            if (!silent) speakViaTts(word)
-            return
-        }
-        val generation = ++audioRequestGeneration
-        playWordAudioJob?.cancel()
-        playWordAudioJob = viewModelScope.launch {
+        stopAudio(preserveTtsPreparation = true)
+        val generation = audioRequestGeneration
+        val token = audioPlayer.beginRequest()
+        audioRequestToken = token
+        playWordAudioJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
-                // **先查缓存，再判网络。** 顺序是审计纠正过的：原来离线检查在最前面，于是
-                // 明明已经缓存过的词在离线时也用不上 —— 手动点击直接走 TTS 机器音，自动播放
-                // 静默。而缓存的全部意义就是让这些词离线可用。
-                //
-                // 「无网时不必发起网络请求空等」这个收益并没有丢：未命中且离线时下面立刻兜底，
-                // 一样不发请求。
-                val cached = pronunciationAudioCache.get(word.lowercase())
-
-                // 缓存查询回来时这次请求可能已经作废（用户关了弹窗、或换了词）。
-                //
-                // 这一行与 `playWordAudioJob?.cancel()` 各挡一格，两者不可互相替代：
-                //  - 协程**挂在** `cache.get()` 上时被作废 → cancel 让它直接结束，走不到这里
-                //  - 协程**已越过** `cache.get()`、还没调 `play()` 时被作废 → 取消只在挂起点
-                //    投递，此时 cancel 只是标记 Job，不中断当前执行；只有代次能作废它
-                //
-                // 判据：`playWordAudio_invalidatedAfterCacheLookupButBeforePlay_doesNotPlay`
-                // 用不挂起的 `cache.get` 桩（在返回前内联调 `stopAudio()`）复现第二格。
-                // 去掉这一行那条会红。
-                //
-                // 我原先在这里写过「那个窗口在单测里无法确定性复现，所以没有判据」——
-                // 那是错的，复审给出了上面这个构造。留着一句错误的「测不了」比没有注释更糟：
-                // 它会让下一个人以为这行不可验证，从而不敢改也不敢删。
-                if (generation != audioRequestGeneration) return@launch
-
-                if (cached == null && !networkChecker.isOnline()) {
-                    if (!silent) speakViaTts(word)
+                if (audioUrl == null) {
+                    if (!silent) speakViaTts(word, generation, token)
                     return@launch
                 }
-
-                // 命中时**不置加载态** —— 本地文件的 prepare() 是毫秒级，闪一下转圈比不转
-                // 更难看。这也让「命中不转圈」成为可测性质：测试断言传给 player 的是本地路径。
+                // 缓存优先，离线也能播放之前下载的真人读音。
+                val cached = pronunciationAudioCache.get(word.lowercase())
+                if (!isCurrentWordAudioRequest(generation, token)) return@launch
+                if (cached == null && !networkChecker.isOnline()) {
+                    if (!silent) speakViaTts(word, generation, token)
+                    return@launch
+                }
                 if (cached == null) _isLoadingAudio.value = true
-
                 audioPlayer.play(
+                    token = token,
                     url = cached?.absolutePath ?: audioUrl,
-                    onComplete = {
-                        Log.d("ReadingViewModel", "Audio playback completed")
-                    },
                     onError = { exception ->
-                        // 回到主线程后再检查代次，旧回调不能打断后来开始的句子朗读。
                         viewModelScope.launch playbackFailure@ {
-                            if (generation != audioRequestGeneration) return@playbackFailure
+                            if (!isCurrentWordAudioRequest(generation, token)) return@playbackFailure
+                            wordAudioFallbackJob?.cancel()
+                            wordAudioFallbackJob = currentCoroutineContext().job
                             _isLoadingAudio.value = false
                             Log.e("ReadingViewModel", "Audio playback failed: ${exception.javaClass.simpleName}")
-                            // 本地文件不可播时清掉坏缓存；远端失败不删除缓存。
                             if (cached != null) {
-                                viewModelScope.launch {
+                                try {
                                     pronunciationAudioCache.invalidate(word.lowercase())
+                                } catch (cancellation: CancellationException) {
+                                    throw cancellation
+                                } catch (_: Exception) {
+                                    Log.w("ReadingViewModel", "Failed to invalidate pronunciation audio")
                                 }
                             }
-                            if (!silent) speakViaTts(word)
+                            if (!silent && isCurrentWordAudioRequest(generation, token)) {
+                                speakViaTts(word, generation, token)
+                            }
                         }
                     }
                 )
-
-                // 播放已经启动，转圈到此为止。
-                //
-                // **不能**放在 `onComplete` 里：那个回调挂的是 `MediaPlayer` 的
-                // `setOnCompletionListener`，音频**播完**才触发。放在那里的话转圈时长
-                // 变成「网络等待 + 整段音频播放」——声音已经响了还在转，与「正在加载」
-                // 这个语义自相矛盾。实测确认过：`play` 返回后 `isLoadingAudio` 仍为 true。
-                //
-                // 还有一个更隐蔽的后果：连续查两个词时，A 的 `onComplete` 会把 B 刚置上的
-                // 转圈关掉。`play` 是 suspend 且在 `start()` 之后才返回，所以在这里置 false
-                // 既准确又不会跨请求串台。
-                if (generation == audioRequestGeneration) _isLoadingAudio.value = false
-
-                // 未命中：播放已经启动，另起协程把音频下载入缓存，不阻塞本次播放。
-                //
-                // 这让首次播放发**两个**请求（一个给 MediaPlayer 流式播，一个给缓存下载），
-                // 多约 19 KB 流量。这是刻意的，不是 bug：改成「先下完再播」会让首次延迟变长，
-                // 因为 prepare() 本来是流式的、拿到足够缓冲就开始播。用一次 19 KB 换后续每次
-                // 为零。详见 design.md「为什么不边播边缓存」。
+                if (!isCurrentWordAudioRequest(generation, token)) return@launch
+                // play 在 start 后返回，转圈不等待整段音频播放完成。
+                _isLoadingAudio.value = false
                 if (cached == null && networkChecker.isOnline()) {
                     viewModelScope.launch {
                         runCatching { pronunciationAudioCache.download(word.lowercase(), audioUrl) }
                             .onFailure {
                                 if (it is CancellationException) throw it
-                                // 缓存失败不影响发音：本次播的是远端，下次查词会再试一次下载。
                                 Log.w("ReadingViewModel", "Failed to cache pronunciation audio")
                             }
                     }
                 }
-            } catch (e: CancellationException) {
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (exception: Exception) {
+                if (!isCurrentWordAudioRequest(generation, token)) return@launch
+                Log.e("ReadingViewModel", "Failed to start audio playback: ${exception.javaClass.simpleName}")
+                if (!silent) speakViaTts(word, generation, token)
+            } finally {
                 if (generation == audioRequestGeneration) _isLoadingAudio.value = false
-                throw e
-            } catch (e: Exception) {
-                if (generation != audioRequestGeneration) return@launch
-                _isLoadingAudio.value = false
-                // 同上，只记类名：这层包住的是 audioPlayer.play(url = audioUrl, ...)，
-                // 同步抛出的异常同样可能回显带单词的 URL。
-                Log.e("ReadingViewModel", "Failed to start audio playback: ${e.javaClass.simpleName}")
-                if (!silent) speakViaTts(word)
             }
         }
+        playWordAudioJob?.start()
     }
 
-    /**
-     * 用系统 TTS 朗读，语言包/引擎不可用时发 [ttsUnavailable] 事件（UI 映射为本地化提示）。
-     *
-     * 联网授权从设置读取，与整句朗读同一个开关：单词兜底原先硬编码「只用本地语音」，于是
-     * 即便用户已经开启联网 TTS，查词兜底也只能用那套机械的离线拼接音。授权仍然由用户掌握，
-     * 这里只是不再替他否决。
-     *
-     * 语音同样现读：原先单词发音传 `TtsReadingSettings()`，用户在设置里挑的语音对它完全无效。
-     * 叠加「离线优先」后这会变成听得见的割裂——好语音基本都是网络语音，于是已授权且挑了网络
-     * 神经语音的用户，整句是神经音、点单词却掉回本地拼接音。语速**不**跟随（见
-     * [TtsPlayer.speakWord]）。
-     *
-     * 两个偏好各读一次而不是 `combine`：它们只喂给同一次 `speakWord` 调用，没有跨字段一致性
-     * 要求，而下面那道代次校验已经挡住「读偏好期间这次请求作废」这一格。
-     *
-     * ## 为什么要占用 [playWordAudioJob] 与代次
-     *
-     * 读偏好是 suspend，所以本函数必须起协程；而**游离的协程会绕开 [stopAudio]**——它靠
-     * `playWordAudioJob?.cancel()` 取消在途请求。用户关掉弹窗后，一个没人持有的协程仍会恢复
-     * 并调 `speakWord`，于是机器音在弹窗消失之后才响。这正是本文件 `playWordAudioJob` 声明处
-     * 记着的那个坑（「原来那个协程不被任何字段持有」），不能重新引入。
-     *
-     * 代次校验与 cancel 各挡一格，理由同 [playWordAudio]：cancel 只在挂起点生效，已越过
-     * `first()` 的那次只能靠代次作废。
-     */
-    private fun speakViaTts(word: String) {
-        val generation = ++audioRequestGeneration
-        playWordAudioJob?.cancel()
-        playWordAudioJob = viewModelScope.launch {
+    private fun isCurrentWordAudioRequest(generation: Long, token: AudioPlayer.RequestToken): Boolean =
+        generation == audioRequestGeneration && audioRequestToken === token && audioPlayer.isCurrent(token)
+
+    /** 单词 TTS 现读音色与网络同意，语速仍由 speakWord 固定为 1 倍。 */
+    private suspend fun speakViaTts(word: String, generation: Long, token: AudioPlayer.RequestToken) {
+        try {
             val allowNetwork = settingsPreferences.allowNetworkTts.first()
             val voiceId = settingsPreferences.ttsReadingSettings.first().voiceId
-            if (generation != audioRequestGeneration) return@launch
+            if (!isCurrentWordAudioRequest(generation, token)) return
             ttsPlayer.speakWord(word, voiceId, allowNetwork) {
-                // trySend：CONFLATED channel 永不阻塞，回调可能在主线程同步触发，无需起协程。
-                _ttsUnavailable.trySend(Unit)
+                if (isCurrentWordAudioRequest(generation, token)) _ttsUnavailable.trySend(Unit)
             }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            if (isCurrentWordAudioRequest(generation, token)) _ttsUnavailable.trySend(Unit)
         }
     }
 
@@ -1899,8 +1867,12 @@ class ReadingViewModel @Inject constructor(
         audioRequestGeneration++
         playWordAudioJob?.cancel()
         playWordAudioJob = null
+        wordAudioFallbackJob?.cancel()
+        wordAudioFallbackJob = null
+        val token = audioRequestToken
+        audioRequestToken = null
+        token?.let(audioPlayer::stop)
         _isLoadingAudio.value = false
-        audioPlayer.stop()
         // 混合读音下发声可能来自 TTS 而非 MediaPlayer，两者都要停，
         // 否则关闭弹窗后机器音仍会继续读完。
         if (preserveTtsPreparation) ttsPlayer.stopBeforeReading() else ttsPlayer.stop()
@@ -1910,12 +1882,7 @@ class ReadingViewModel @Inject constructor(
      * 清除单词定义（关闭 BottomSheet 时调用）
      */
     fun clearWordDefinition() {
-        _isLoadingAudio.value = false
-        wordSelectionGeneration++
-        lookupWordJob?.cancel()
-        _wordDefinition.value = null
-        // 同时清除单词高亮
-        _selectedWord.value = null
+        invalidateWordLookup()
         _vocabularyWords.value = emptySet()
         // 停止播放音频
         stopAudio()

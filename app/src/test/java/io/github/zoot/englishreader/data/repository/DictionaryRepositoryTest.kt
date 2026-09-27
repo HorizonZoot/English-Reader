@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.content.res.AssetManager
 import io.github.zoot.englishreader.data.dao.DictionaryDao
+import io.github.zoot.englishreader.data.dictionary.DictionaryMutationLock
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.remote.dictionary.DictionaryApiService
 import io.mockk.coEvery
@@ -11,6 +12,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
+import io.mockk.verify
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -56,7 +58,7 @@ class DictionaryRepositoryTest {
         every { prefsEditor.putInt(any(), any()) } returns prefsEditor
         // 默认已安装版本 0（模拟全新安装 / 版本落后），使初始化逻辑正常走"需要重建"分支
         every { prefs.getInt(any(), any()) } returns 0
-        repository = DictionaryRepository(context, dao, api)
+        repository = DictionaryRepository(context, dao, api, DictionaryMutationLock())
     }
 
     private fun stubAsset(content: String) {
@@ -103,9 +105,9 @@ class DictionaryRepositoryTest {
 
     @Test
     fun ensureInitialized_versionOutdated_rebuildsEvenIfDbPopulated() = runTest {
-        // 库已有旧数据，但已安装版本落后（0 < 当前版本）→ 应强制重建
+        // v1 的 20 词仍需真正读取 assets 升级，不能只修版本标记。
         coEvery { dao.getCount() } returns 20
-        stubInstalledDictVersion(0)
+        stubInstalledDictVersion(1)
         stubAsset("$TSV_HEADER\nword\t/wɜːrd/\tn. 单词\tword")
         coEvery { dao.replaceAll(any()) } returns Unit
 
@@ -120,6 +122,18 @@ class DictionaryRepositoryTest {
         coVerify(exactly = 1) { dao.replaceAll(any()) }
         assertEquals("dict_version", keySlot.captured)
         assertEquals(EXPECTED_DICT_VERSION, versionSlot.captured)
+    }
+
+    @Test
+    fun ensureInitialized_extendedInventoryWithOldVersion_preservesPackWithoutReadingAssets() = runTest {
+        coEvery { dao.getCount() } returns 50_000
+        stubInstalledDictVersion(1)
+
+        repository.ensureInitialized()
+
+        coVerify(exactly = 0) { dao.replaceAll(any()) }
+        verify(exactly = 0) { assets.open(any()) }
+        verify(exactly = 0) { prefsEditor.putInt(any(), any()) }
     }
 
     @Test

@@ -2,7 +2,7 @@ package io.github.zoot.englishreader.model
 
 import kotlin.math.roundToInt
 
-/** Reading-only preferences; word pronunciation always uses the defaults. */
+/** Voice selection also applies to word TTS fallback; speech rate applies only to reading. */
 data class TtsReadingSettings(
     val voiceId: String? = null,
     val speechRate: Float = DEFAULT_RATE

@@ -3,6 +3,8 @@ package io.github.zoot.englishreader.data.repository
 import android.content.Context
 import android.util.Log
 import io.github.zoot.englishreader.data.dictionary.BuiltInDictionary
+import io.github.zoot.englishreader.data.dictionary.DictionaryMutationLock
+import io.github.zoot.englishreader.data.dictionary.hasExtendedDictionary
 import io.github.zoot.englishreader.data.dao.DictionaryDao
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.remote.dictionary.DictionaryApiService
@@ -10,11 +12,13 @@ import io.github.zoot.englishreader.util.WordLemmatizer
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.coroutineContext
 
 /**
  * 离线查词结果。
@@ -42,7 +46,8 @@ data class OfflineLookupResult(
 class DictionaryRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val dictionaryDao: DictionaryDao,
-    private val dictionaryApiService: DictionaryApiService
+    private val dictionaryApiService: DictionaryApiService,
+    private val mutationLock: DictionaryMutationLock
 ) {
 
     // 互斥锁：防止并发初始化导致 race condition
@@ -157,52 +162,56 @@ class DictionaryRepository @Inject constructor(
         initializationMutex.withLock {
             // 双重检查：等待锁期间可能已被其他协程完成
             if (isInitialized) return@withLock
-            withContext(Dispatchers.IO) {
-                try {
-                    // 按版本号判断是否需要（重新）初始化：词库内容升级（如从 20 词扩到 7005 词）后
-                    // 即使数据库已有旧数据（getCount>0）也要强制重建，与样本文章的版本化刷新同一思路。
-                    val prefs = context.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
-                    val installedVersion = prefs.getInt(KEY_DICT_VERSION, 0)
-                    val count = dictionaryDao.getCount()
-                    if (installedVersion >= DICT_VERSION && count > 0) {
-                        Log.d("DictionaryRepository", "Dictionary up-to-date (v$installedVersion, $count entries)")
-                        repairLiteralEscapesOnce(prefs)
-                        isInitialized = true
-                        return@withContext
+            mutationLock.mutex.withLock {
+                withContext(Dispatchers.IO) {
+                    try {
+                        // 持共享锁重读库存；扩展库提交后的旧版本标记不能触发 assets 覆盖。
+                        val prefs = context.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
+                        val installedVersion = prefs.getInt(KEY_DICT_VERSION, 0)
+                        val count = dictionaryDao.getCount()
+                        if (hasExtendedDictionary(count) || (installedVersion >= DICT_VERSION && count > 0)) {
+                            Log.d("DictionaryRepository", "Dictionary available (v$installedVersion, $count entries)")
+                            repairLiteralEscapesOnce(prefs)
+                            isInitialized = true
+                            return@withContext
+                        }
+
+                        Log.d("DictionaryRepository", "Initializing dictionary from assets (installed v$installedVersion -> v$DICT_VERSION)...")
+
+                        // 读取 TSV 文件
+                        val entries = parseAssetTsv()
+
+                        if (entries.isEmpty()) {
+                            // 解析为空可能是瞬时读取失败（parseAssetTsv 吞异常返回空）或资源缺失。一律不写版本号。
+                            // - DB 已有旧词库：标记已初始化，沿用旧数据、避免每次查词重复空解析。
+                            // - DB 也空：允许有限次重试（应对瞬时失败），达上限后仍标记已初始化，
+                            //   避免每次查词都重复解析 1.4MB 词库文件空转。
+                            emptyInitAttempts++
+                            val giveUp = count == 0 && emptyInitAttempts >= MAX_EMPTY_INIT_ATTEMPTS
+                            Log.w(
+                                "DictionaryRepository",
+                                "No dictionary data parsed (db=$count, attempt=$emptyInitAttempts); " +
+                                    if (count > 0 || giveUp) "marking initialized" else "will retry"
+                            )
+                            if (count > 0 || giveUp) isInitialized = true
+                            return@withContext
+                        }
+                        // 成功解析后重置失败计数
+                        emptyInitAttempts = 0
+
+                        // 原子性替换：@Transaction 保证 deleteAll + 分批插入要么全成功要么全回滚
+                        dictionaryDao.replaceAll(entries)
+                        prefs.edit().putInt(KEY_DICT_VERSION, DICT_VERSION).apply()
+                        isInitialized = true  // 成功后才标记
+                        Log.d("DictionaryRepository", "Dictionary initialized: ${entries.size} entries (v$DICT_VERSION)")
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (e: Exception) {
+                        coroutineContext.ensureActive()
+                        Log.e("DictionaryRepository", "Failed to initialize dictionary", e)
+                        // 不标记 isInitialized，允许重试；重新抛出以便上层感知
+                        throw e
                     }
-
-                    Log.d("DictionaryRepository", "Initializing dictionary from assets (installed v$installedVersion -> v$DICT_VERSION)...")
-
-                    // 读取 TSV 文件
-                    val entries = parseAssetTsv()
-
-                    if (entries.isEmpty()) {
-                        // 解析为空可能是瞬时读取失败（parseAssetTsv 吞异常返回空）或资源缺失。一律不写版本号。
-                        // - DB 已有旧词库：标记已初始化，沿用旧数据、避免每次查词重复空解析。
-                        // - DB 也空：允许有限次重试（应对瞬时失败），达上限后仍标记已初始化，
-                        //   避免每次查词都重复解析 1.4MB 词库文件空转。
-                        emptyInitAttempts++
-                        val giveUp = count == 0 && emptyInitAttempts >= MAX_EMPTY_INIT_ATTEMPTS
-                        Log.w(
-                            "DictionaryRepository",
-                            "No dictionary data parsed (db=$count, attempt=$emptyInitAttempts); " +
-                                if (count > 0 || giveUp) "marking initialized" else "will retry"
-                        )
-                        if (count > 0 || giveUp) isInitialized = true
-                        return@withContext
-                    }
-                    // 成功解析后重置失败计数
-                    emptyInitAttempts = 0
-
-                    // 原子性替换：@Transaction 保证 deleteAll + 分批插入要么全成功要么全回滚
-                    dictionaryDao.replaceAll(entries)
-                    prefs.edit().putInt(KEY_DICT_VERSION, DICT_VERSION).apply()
-                    isInitialized = true  // 成功后才标记
-                    Log.d("DictionaryRepository", "Dictionary initialized: ${entries.size} entries (v$DICT_VERSION)")
-                } catch (e: Exception) {
-                    Log.e("DictionaryRepository", "Failed to initialize dictionary", e)
-                    // 不标记 isInitialized，允许重试；重新抛出以便上层感知
-                    throw e
                 }
             }
         }

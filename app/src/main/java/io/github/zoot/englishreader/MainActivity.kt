@@ -118,6 +118,8 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             try {
                 dictionaryPackInstaller.refreshState()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
             } catch (e: Exception) {
                 // 刷新失败不阻塞启动，下次打开设置页会再刷新
                 Log.w("MainActivity", "Dictionary pack state refresh failed", e)

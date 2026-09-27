@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.importer.ImportBudgetValidator
 import io.github.zoot.englishreader.data.importer.ImportException
@@ -17,7 +18,7 @@ import io.github.zoot.englishreader.data.repository.BookImporter
 import io.github.zoot.englishreader.data.repository.BookRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,6 +28,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -66,32 +68,20 @@ class ArticleListViewModel @Inject constructor(
     private val _uiEvent = Channel<ArticleListUiEvent>(Channel.BUFFERED)
     val uiEvent = _uiEvent.receiveAsFlow()
 
-    /**
-     * 导入进行中。
-     *
-     * EPUB 的复制与解析明显耗时，须有加载态；界面据此禁止重复导入——
-     * 连点两次会写入两篇重复文章。
-     *
-     * 这只是**给界面看的状态**，不承担并发闸门职责：闸门是 [importJob]，
-     * 因为「读 value → launch → 在协程里置 true」之间存在窗口。
-     */
-    private val _isImporting = MutableStateFlow(false)
-    val isImporting: StateFlow<Boolean> = _isImporting.asStateFlow()
+    private val _importState = MutableStateFlow<ImportState>(ImportState.Idle)
+    val importState: StateFlow<ImportState> = _importState.asStateFlow()
 
-    /**
-     * 当前导入任务，兼作 single-flight 闸门。
-     *
-     * 不能用 `if (_isImporting.value) return` 把关：该标志直到协程体内才被置 true，
-     * 两次同步调用可能都看到 false，于是启动两个导入协程——重复解析、重复写库、
-     * 甚至文件导入与粘贴导入并发。而 `viewModelScope.launch` 返回的 Job 在**launch
-     * 返回时**就已存在，赋值发生在调用方线程上，故检查 `isActive` 才是可靠的门禁。
-     */
-    private var importJob: Job? = null
+    fun acknowledgeImport(importId: String) {
+        val completed = _importState.value
+        if (completed is ImportState.Finished && completed.importId == importId) {
+            _importState.compareAndSet(completed, ImportState.Idle)
+        }
+    }
 
-    fun deleteArticle(article: ArticleEntity) {
+    fun deleteArticle(article: ArticleSummary) {
         viewModelScope.launch {
             try {
-                articleRepository.deleteArticle(article)
+                articleRepository.deleteArticleById(article.id)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -108,37 +98,16 @@ class ArticleListViewModel @Inject constructor(
      * ViewModel 只负责协调、状态与事件分发。
      */
     fun importFromFile(uri: Uri) {
-        // 导入期间拒绝新请求：EPUB 解析耗时长，用户很容易连点
-        if (importJob?.isActive == true) return
-
-        importJob = viewModelScope.launch {
-            _isImporting.value = true
-            try {
-                // 先探测格式再分流：EPUB 走整本书（多章），TXT/Markdown 走单篇。
-                //
-                // EPUB 不再合成一篇文章：合并后正文可达单篇上限的十几倍，要么被
-                // MAX_IMPORT_CHARS 直接拒掉，要么变成一个无法导航的巨大页面。
-                when (formatProbe.detect(uri)) {
-                    ImportFormat.EPUB -> importBook(uri)
-                    ImportFormat.MARKDOWN, ImportFormat.PLAIN_TEXT -> importArticle(uri)
-                }
-            } catch (e: CancellationException) {
-                // 协程取消（用户退出页面）：不写半成品，临时文件由 importer 的 finally 删除
-                throw e
-            } catch (e: ImportException) {
-                _uiEvent.trySend(ArticleListUiEvent.ImportFailed(e.failure))
-            } catch (e: Exception) {
-                // 导入异常里可能嵌着 content URI，不要把来源标识写进 Logcat。
-                Log.e(TAG, "Failed to import selected document")
-                _uiEvent.trySend(ArticleListUiEvent.ImportFailed(ImportFailure.SourceUnreadable))
-            } finally {
-                _isImporting.value = false
+        launchImport {
+            when (formatProbe.detect(uri)) {
+                ImportFormat.EPUB -> importBook(uri)
+                ImportFormat.MARKDOWN, ImportFormat.PLAIN_TEXT -> importArticle(uri)
             }
         }
     }
 
     /** 单篇导入（TXT / Markdown）。 */
-    private suspend fun importArticle(uri: Uri) {
+    private suspend fun importArticle(uri: Uri): ArticleListUiEvent.ImportSucceeded {
         val imported = articleImporter.importFromUri(uri)
         val article = ArticleEntity(
             title = imported.title,
@@ -148,7 +117,7 @@ class ArticleListViewModel @Inject constructor(
             // 应新增类型明确的 importFormat 列并写 Migration。
             source = "file"
         )
-        emitImportSucceeded(article)
+        return persistArticle(article)
     }
 
     /**
@@ -160,7 +129,7 @@ class ArticleListViewModel @Inject constructor(
      * [ImportException] 原样上抛而不降级：查重命中的 [ImportFailure.DuplicateBook]
      * 带着已有书名，是给用户看的有效信息，压成 StorageFailed 就丢了。
      */
-    private suspend fun importBook(uri: Uri) {
+    private suspend fun importBook(uri: Uri): ArticleListUiEvent.BookImportSucceeded {
         val book = bookImporter.importFromUri(uri)
         val bookId = try {
             bookRepository.persist(book)
@@ -172,12 +141,10 @@ class ArticleListViewModel @Inject constructor(
             Log.e(TAG, "Failed to persist imported book")
             throw ImportException(ImportFailure.StorageFailed)
         }
-        _uiEvent.trySend(
-            ArticleListUiEvent.BookImportSucceeded(
-                bookId = bookId,
-                title = book.metadata.title,
-                chapterCount = book.chapters.size
-            )
+        return ArticleListUiEvent.BookImportSucceeded(
+            bookId = bookId,
+            title = book.metadata.title,
+            chapterCount = book.chapters.size
         )
     }
 
@@ -206,31 +173,48 @@ class ArticleListViewModel @Inject constructor(
      * 与文件导入走**同一套预算校验**——改造前粘贴入口完全无上限，是最明显的漏网口。
      */
     fun importFromPaste(title: String, content: String) {
-        if (importJob?.isActive == true) return
+        launchImport {
+            val trimmedContent = content.trim()
+            ImportBudgetValidator.validate(trimmedContent)
 
-        importJob = viewModelScope.launch {
-            _isImporting.value = true
+            val article = ArticleEntity(
+                title = ImportBudgetValidator.normalizeTitle(title, ArticleImporter.DEFAULT_TITLE),
+                content = trimmedContent,
+                source = "paste"
+            )
+            persistArticle(article)
+        }
+    }
+
+    private fun launchImport(importContent: suspend () -> ArticleListUiEvent.ImportResult) {
+        val running = ImportState.Running(UUID.randomUUID().toString())
+        while (true) {
+            val current = _importState.value
+            if (current is ImportState.Running) return
+            if (_importState.compareAndSet(current, running)) break
+        }
+        // 同步进入 try/finally，取消也能清理已经登记的 Running。
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                val trimmedContent = content.trim()
-                ImportBudgetValidator.validate(trimmedContent)
-
-                val article = ArticleEntity(
-                    // 与文件导入共用 normalizeTitle：标题上限原先只在 ArticleImporter 私有
-                    // 方法里，粘贴路径完全绕过它（singleLine 只控制显示，不限制输入长度）
-                    title = ImportBudgetValidator.normalizeTitle(title, ArticleImporter.DEFAULT_TITLE),
-                    content = trimmedContent,
-                    source = "paste"
-                )
-                emitImportSucceeded(article)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: ImportException) {
-                _uiEvent.trySend(ArticleListUiEvent.ImportFailed(e.failure))
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to import pasted text")
-                _uiEvent.trySend(ArticleListUiEvent.ImportFailed(ImportFailure.SourceUnreadable))
+                val event = try {
+                    importContent()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: ImportException) {
+                    ArticleListUiEvent.ImportFailed(failure.failure)
+                } catch (_: Exception) {
+                    Log.e(TAG, "Failed to import content")
+                    ArticleListUiEvent.ImportFailed(ImportFailure.SourceUnreadable)
+                }
+                val outcome = when (event) {
+                    is ArticleListUiEvent.ImportSucceeded,
+                    is ArticleListUiEvent.BookImportSucceeded -> ImportOutcome.SUCCESS
+                    is ArticleListUiEvent.ImportFailed -> ImportOutcome.FAILURE
+                }
+                _importState.compareAndSet(running, ImportState.Finished(running.importId, outcome))
+                _uiEvent.trySend(event)
             } finally {
-                _isImporting.value = false
+                _importState.compareAndSet(running, ImportState.Idle)
             }
         }
     }
@@ -244,7 +228,7 @@ class ArticleListViewModel @Inject constructor(
      * 「源文件无法读取」，而此刻源文件早已读完解析完，失败在存储侧。用户按错误提示
      * 去检查文件或换个文件重试都不会有任何效果，真正该做的是清理空间。
      */
-    private suspend fun emitImportSucceeded(article: ArticleEntity) {
+    private suspend fun persistArticle(article: ArticleEntity): ArticleListUiEvent.ImportSucceeded {
         val articleId = try {
             articleRepository.insertArticle(article)
         } catch (e: CancellationException) {
@@ -253,13 +237,11 @@ class ArticleListViewModel @Inject constructor(
             Log.e(TAG, "Failed to persist imported article")
             throw ImportException(ImportFailure.StorageFailed)
         }
-        _uiEvent.trySend(
-            ArticleListUiEvent.ImportSucceeded(
-                articleId = articleId,
-                title = article.title,
-                exceedsFullExplanationLimit =
-                    ImportBudgetValidator.exceedsFullExplanationLimit(article.content)
-            )
+        return ArticleListUiEvent.ImportSucceeded(
+            articleId = articleId,
+            title = article.title,
+            exceedsFullExplanationLimit =
+                ImportBudgetValidator.exceedsFullExplanationLimit(article.content)
         )
     }
 

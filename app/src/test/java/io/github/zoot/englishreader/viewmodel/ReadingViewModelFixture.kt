@@ -44,7 +44,10 @@ internal class ReadingViewModelFixture(
     val articleRepository: ArticleRepository = mockk(relaxed = true),
     val vocabularyRepository: VocabularyRepository = mockk(relaxed = true),
     val dictionaryRepository: DictionaryRepository = mockk(relaxed = true),
-    val audioPlayer: AudioPlayer = mockk(relaxed = true),
+    val audioPlayer: AudioPlayer = mockk(relaxed = true) {
+        every { beginRequest() } answers { AudioPlayer.RequestToken() }
+        every { isCurrent(any()) } returns true
+    },
     val networkChecker: NetworkChecker = mockk(relaxed = true),
     val ttsPlayer: TtsPlayer = mockk(relaxed = true),
     val aiExplanationRepository: AiExplanationRepository = mockk(relaxed = true),

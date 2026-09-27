@@ -37,10 +37,9 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.zoot.englishreader.R
-import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.importer.ImportFormatDetector
-import io.github.zoot.englishreader.ui.component.ImportOutcome
 import io.github.zoot.englishreader.ui.component.ImportStatusOverlay
 import io.github.zoot.englishreader.ui.dialog.ImportDialog
 import io.github.zoot.englishreader.ui.dialog.PasteTextDialog
@@ -48,6 +47,7 @@ import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.util.ErrorMessageMapper
 import io.github.zoot.englishreader.viewmodel.ArticleListUiEvent
 import io.github.zoot.englishreader.viewmodel.ArticleListViewModel
+import io.github.zoot.englishreader.viewmodel.ImportState
 import io.github.zoot.englishreader.viewmodel.LibraryItem
 
 /**
@@ -61,16 +61,14 @@ fun ArticleListScreen(
     onEditArticle: ((Long) -> Unit)? = null
 ) = ArticleUiTheme {
     val libraryItems by viewModel.libraryItems.collectAsStateWithLifecycle()
-    val isImporting by viewModel.isImporting.collectAsStateWithLifecycle()
-    var articleToDelete by remember { mutableStateOf<ArticleEntity?>(null) }
-    var bookToDelete by remember { mutableStateOf<BookEntity?>(null) }
-    var showImportDialog by remember { mutableStateOf(false) }
-    var showPasteDialog by remember { mutableStateOf(false) }
-    val snackbarHostState = remember { SnackbarHostState() }
+    val importState by viewModel.importState.collectAsStateWithLifecycle()
+    val isImporting = importState is ImportState.Running
+    var articleToDelete by remember(viewModel) { mutableStateOf<ArticleSummary?>(null) }
+    var bookToDelete by remember(viewModel) { mutableStateOf<BookEntity?>(null) }
+    var showImportDialog by remember(viewModel) { mutableStateOf(false) }
+    var showPasteDialog by remember(viewModel) { mutableStateOf(false) }
+    val snackbarHostState = remember(viewModel) { SnackbarHostState() }
     val context = LocalContext.current
-    // 导入终态闩锁。由下面那个既有 collector 顺带置位，而不是新起一个 uiEvent collector——
-    // 理由见该 collector 自己的注释（第二个 collector 会放大 Snackbar 的顺序竞争）。
-    var importOutcome by remember { mutableStateOf<ImportOutcome?>(null) }
 
     // 文件选择器：用 OpenDocument 而非 GetContent——前者接受 MIME 数组、明确走系统文档
     // 选择器，适合多格式；GetContent 在部分 ROM 上不走 SAF，可能路由到图库。
@@ -83,18 +81,8 @@ fun ArticleListScreen(
     }
 
     // 单一事件流：不再为「导入成功」加第三个 collector（会放大 Snackbar 顺序竞争）
-    LaunchedEffect(Unit) {
+    LaunchedEffect(viewModel, snackbarHostState, context) {
         viewModel.uiEvent.collect { event ->
-            // 先记终态再弹 Snackbar：showSnackbar 会挂起到 Snackbar 消失，放在它之后
-            // 指示器就得等整条 Snackbar 播完才收尾。删除失败与导入无关，不动闩锁。
-            when (event) {
-                is ArticleListUiEvent.ImportSucceeded,
-                is ArticleListUiEvent.BookImportSucceeded -> importOutcome = ImportOutcome.SUCCESS
-
-                is ArticleListUiEvent.ImportFailed -> importOutcome = ImportOutcome.FAILURE
-
-                is ArticleListUiEvent.DeleteFailed -> Unit
-            }
             val message = when (event) {
                 is ArticleListUiEvent.ImportSucceeded -> ErrorMessageMapper.mapImportSuccess(
                     context,
@@ -292,12 +280,13 @@ fun ArticleListScreen(
             // 覆盖在内容之上、不拦触摸：导入期间用户仍可滚动书库或进入已有书。
             // 放在这个 Box 的最后一个子节点，所以画在列表之上；Center 对齐与本 Box
             // 的 TopCenter 默认值无关。
-            ImportStatusOverlay(
-                isImporting = isImporting,
-                outcome = importOutcome,
-                onOutcomeShown = { importOutcome = null },
-                modifier = Modifier.align(Alignment.Center)
-            )
+            key(viewModel) {
+                ImportStatusOverlay(
+                    state = importState,
+                    onFinishedShown = viewModel::acknowledgeImport,
+                    modifier = Modifier.align(Alignment.Center)
+                )
+            }
         }
     }
 }

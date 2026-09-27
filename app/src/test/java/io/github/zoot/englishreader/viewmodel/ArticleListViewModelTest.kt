@@ -3,6 +3,12 @@ package io.github.zoot.englishreader.viewmodel
 import android.net.Uri
 import app.cash.turbine.test
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
+import io.github.zoot.englishreader.data.entity.BookEntity
+import io.github.zoot.englishreader.data.importer.BookFormat
+import io.github.zoot.englishreader.data.importer.BookMetadata
+import io.github.zoot.englishreader.data.importer.ImportedBook
+import io.github.zoot.englishreader.data.importer.ImportedChapter
 import io.github.zoot.englishreader.data.importer.ImportBudget
 import io.github.zoot.englishreader.data.importer.ImportException
 import io.github.zoot.englishreader.data.importer.ImportFailure
@@ -18,11 +24,17 @@ import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -38,8 +50,9 @@ import java.io.IOException
  * - ImportException 的 failure 原样透传（不再压平成单一「导入失败」）
  * - 非 ImportException 归为 SourceUnreadable
  * - 粘贴导入与文件导入共用同一套预算校验
- * - isImporting 失败后复位，否则用户再也无法导入
+ * - Running 同步拒绝重复导入，Finished 保留到匹配确认
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class ArticleListViewModelTest {
 
     @get:Rule
@@ -150,11 +163,11 @@ class ArticleListViewModelTest {
         viewModel.uiEvent.test {
             viewModel.importFromFile(uri)
             advanceUntilIdle()
-            assertTrue(viewModel.isImporting.value)
+            assertTrue(viewModel.importState.value is ImportState.Running)
             releaseParser.complete(Unit)
             assertEquals(ArticleListUiEvent.ImportFailed(ImportFailure.InvalidEpub), awaitItem())
             advanceUntilIdle()
-            assertFalse(viewModel.isImporting.value)
+            assertTrue(viewModel.importState.value is ImportState.Finished)
             expectNoEvents()
         }
         coVerify(exactly = 0) { bookRepository.persist(any(), any()) }
@@ -192,7 +205,7 @@ class ArticleListViewModelTest {
     }
 
     @Test
-    fun importFromFile_resetsIsImportingAfterFailure() = runTest {
+    fun importFromFile_failure_releasesGateAndRetainsFinishedState() = runTest {
         val uri = mockk<Uri>()
         val releaseImport = CompletableDeferred<Unit>()
         coEvery { articleImporter.importFromUri(uri) } coAnswers {
@@ -203,14 +216,14 @@ class ArticleListViewModelTest {
         try {
             viewModel.importFromFile(uri)
             advanceUntilIdle()
-            assertTrue(viewModel.isImporting.value)
+            assertTrue(viewModel.importState.value is ImportState.Running)
         } finally {
             releaseImport.complete(Unit)
         }
         advanceUntilIdle()
 
-        // 失败后必须复位，否则 isImporting 永久为 true，用户再也无法导入
-        assertFalse(viewModel.isImporting.value)
+        val finished = viewModel.importState.value as ImportState.Finished
+        assertEquals(ImportOutcome.FAILURE, finished.outcome)
     }
 
     @Test
@@ -319,9 +332,7 @@ class ArticleListViewModelTest {
 
     @Test
     fun importFromFile_secondCallWhileFirstInFlight_isRejected() = runTest {
-        // single-flight：`if (_isImporting.value) return` 不足以把关——该标志直到协程体内
-        // 才被置 true，两次同步调用可能都看到 false，于是启动两个导入协程、写入两篇重复
-        // 文章。这里用挂起的 importer 制造「第一次仍在执行」的窗口。
+        // 两个同步意图必须共享闸门，第一次仍在执行时不能再次解析或写入。
         val uri = mockk<Uri>()
         val gate = CompletableDeferred<Unit>()
         coEvery { articleImporter.importFromUri(uri) } coAnswers {
@@ -375,9 +386,159 @@ class ArticleListViewModelTest {
     }
 
     @Test
+    fun importFromFile_synchronousCompletion_registersRunningAndRetainsFinishedUntilAcknowledged() = runTest {
+        val uri = mockk<Uri>()
+        var runningId: String? = null
+        coEvery { formatProbe.detect(uri) } coAnswers {
+            runningId = (viewModel.importState.value as ImportState.Running).importId
+            ImportFormat.PLAIN_TEXT
+        }
+        coEvery { articleImporter.importFromUri(uri) } returns
+            ArticleImporter.ImportedArticle("Imported", "Body.")
+        coEvery { articleRepository.insertArticle(any()) } returns 42L
+
+        viewModel.importFromFile(uri)
+
+        val finished = viewModel.importState.value as ImportState.Finished
+        assertEquals(runningId, finished.importId)
+        assertEquals(ImportOutcome.SUCCESS, finished.outcome)
+        assertEquals(finished, viewModel.importState.first())
+        assertEquals(finished, viewModel.importState.first())
+        viewModel.uiEvent.test {
+            assertEquals(42L, (awaitItem() as ArticleListUiEvent.ImportSucceeded).articleId)
+            expectNoEvents()
+        }
+        viewModel.acknowledgeImport("another-import")
+        assertEquals(finished, viewModel.importState.value)
+        viewModel.acknowledgeImport(finished.importId)
+        assertEquals(ImportState.Idle, viewModel.importState.value)
+        viewModel.uiEvent.test { expectNoEvents() }
+    }
+
+    @Test
+    fun acknowledgeImport_previousId_doesNotClearNextRunningOrFinishedImport() = runTest {
+        coEvery { articleRepository.insertArticle(any()) } returnsMany listOf(1L, 2L)
+        viewModel.importFromPaste("First", "First body.")
+        val first = viewModel.importState.value as ImportState.Finished
+        val uri = mockk<Uri>()
+        val releaseSecond = CompletableDeferred<Unit>()
+        coEvery { articleImporter.importFromUri(uri) } coAnswers {
+            releaseSecond.await()
+            ArticleImporter.ImportedArticle("Second", "Second body.")
+        }
+
+        viewModel.importFromFile(uri)
+        val second = viewModel.importState.value as ImportState.Running
+        assertNotEquals(first.importId, second.importId)
+        viewModel.acknowledgeImport(first.importId)
+        viewModel.acknowledgeImport(second.importId)
+        assertEquals(second, viewModel.importState.value)
+
+        releaseSecond.complete(Unit)
+        advanceUntilIdle()
+        val finished = ImportState.Finished(second.importId, ImportOutcome.SUCCESS)
+        viewModel.acknowledgeImport(first.importId)
+        assertEquals(finished, viewModel.importState.value)
+        viewModel.acknowledgeImport(second.importId)
+        assertEquals(ImportState.Idle, viewModel.importState.value)
+        viewModel.uiEvent.test {
+            assertEquals(1L, (awaitItem() as ArticleListUiEvent.ImportSucceeded).articleId)
+            assertEquals(2L, (awaitItem() as ArticleListUiEvent.ImportSucceeded).articleId)
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun importFromFile_cancellation_clearsRunningWithoutFailureAndAllowsAnotherImport() = runTest {
+        val uri = mockk<Uri>()
+        val releaseImport = CompletableDeferred<Unit>()
+        coEvery { articleImporter.importFromUri(uri) } coAnswers {
+            releaseImport.await()
+            throw CancellationException("cancelled")
+        }
+
+        viewModel.uiEvent.test {
+            viewModel.importFromFile(uri)
+            assertTrue(viewModel.importState.value is ImportState.Running)
+            releaseImport.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(ImportState.Idle, viewModel.importState.value)
+            expectNoEvents()
+
+            coEvery { articleImporter.importFromUri(uri) } returns
+                ArticleImporter.ImportedArticle("Next", "Next body.")
+            coEvery { articleRepository.insertArticle(any()) } returns 9L
+            viewModel.importFromFile(uri)
+            assertEquals(9L, (awaitItem() as ArticleListUiEvent.ImportSucceeded).articleId)
+            assertTrue(viewModel.importState.value is ImportState.Finished)
+        }
+    }
+
+    @Test
+    fun importFromFile_epub_remainsRunningUntilBookPersistenceFinishes() = runTest {
+        val uri = mockk<Uri>()
+        val releasePersist = CompletableDeferred<Unit>()
+        val imported = ImportedBook(
+            metadata = BookMetadata("Book", null, "en", null, "fingerprint", BookFormat.EPUB3),
+            chapters = listOf(
+                ImportedChapter(0, "First", "1.xhtml", null, "First body."),
+                ImportedChapter(1, "Second", "2.xhtml", null, "Second body.")
+            ),
+            toc = emptyList()
+        )
+        coEvery { formatProbe.detect(uri) } returns ImportFormat.EPUB
+        coEvery { bookImporter.importFromUri(uri) } returns imported
+        coEvery { bookRepository.persist(imported, any()) } coAnswers {
+            releasePersist.await()
+            77L
+        }
+
+        viewModel.uiEvent.test {
+            viewModel.importFromFile(uri)
+            val running = viewModel.importState.value as ImportState.Running
+            expectNoEvents()
+            releasePersist.complete(Unit)
+            assertEquals(ArticleListUiEvent.BookImportSucceeded(77L, "Book", 2), awaitItem())
+            assertEquals(
+                ImportState.Finished(running.importId, ImportOutcome.SUCCESS),
+                viewModel.importState.value
+            )
+        }
+        coVerify(exactly = 0) { articleRepository.insertArticle(any()) }
+    }
+
+    @Test
+    fun libraryItems_summaryAndBookUpdates_preserveOrderingWithoutCollectingFullArticles() = runTest {
+        val summaries = MutableStateFlow(listOf(ArticleSummary(3, "Article", 500)))
+        val book = BookEntity(
+            id = 3, title = "Book", contentFingerprint = "fingerprint", sourceFormat = "epub3",
+            chapterCount = 2, totalChars = 100, createdAt = 100
+        )
+        val books = MutableStateFlow(listOf(book))
+        var fullArticleCollections = 0
+        coEvery { articleRepository.getStandaloneArticles() } returns summaries
+        coEvery { articleRepository.getAllArticles() } returns flow {
+            fullArticleCollections++
+            emit(emptyList())
+        }
+        coEvery { bookRepository.getAllBooks() } returns books
+        val model = ArticleListViewModel(articleRepository, articleImporter, bookRepository, bookImporter, formatProbe)
+
+        model.libraryItems.test {
+            val first = awaitItem().ifEmpty { awaitItem() }
+            assertEquals(listOf("article-3", "book-3"), first.map { it.listKey })
+            books.value = listOf(book.copy(lastReadAt = 900))
+            assertEquals(listOf("book-3", "article-3"), awaitItem().map { it.listKey })
+            summaries.value = listOf(ArticleSummary(3, "Renamed article", 500))
+            assertEquals("Renamed article", (awaitItem().last() as LibraryItem.Article).article.title)
+            assertEquals(0, fullArticleCollections)
+        }
+    }
+
+    @Test
     fun deleteArticle_failure_emitsDeleteFailed() = runTest {
-        val article = ArticleEntity(id = 1, title = "t", content = "c")
-        coEvery { articleRepository.deleteArticle(article) } throws RuntimeException("db error")
+        val article = ArticleSummary(id = 1, title = "t", createdAt = 0)
+        coEvery { articleRepository.deleteArticleById(article.id) } throws RuntimeException("db error")
 
         viewModel.uiEvent.test {
             viewModel.deleteArticle(article)

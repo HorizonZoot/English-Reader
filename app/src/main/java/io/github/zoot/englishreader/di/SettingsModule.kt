@@ -13,7 +13,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
-import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.CoroutineScope
 import javax.inject.Singleton
 
 @Module
@@ -43,8 +43,9 @@ object SettingsModule {
     @Singleton
     fun provideAiProfileRepository(
         metadataStore: AiProfileMetadataStore,
-        credentialStorage: AiCredentialStorage
-    ): AiProfileRepository = AiProfileRepository(metadataStore, credentialStorage)
+        credentialStorage: AiCredentialStorage,
+        @ApplicationCoroutineScope applicationScope: CoroutineScope
+    ): AiProfileRepository = AiProfileRepository(metadataStore, credentialStorage, applicationScope)
 
     @Provides
     @Singleton

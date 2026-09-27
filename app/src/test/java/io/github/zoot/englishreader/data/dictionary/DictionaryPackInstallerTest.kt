@@ -4,6 +4,9 @@ import android.app.Application
 import android.content.Context
 import android.database.sqlite.SQLiteFullException
 import java.io.IOException
+import java.io.File
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
@@ -13,15 +16,26 @@ import io.github.zoot.englishreader.data.dao.DictionaryDao
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.ResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import okio.Buffer
+import okio.ForwardingSource
+import okio.buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -60,6 +74,7 @@ class DictionaryPackInstallerTest {
     private lateinit var db: EnglishReaderDatabase
     private lateinit var server: MockWebServer
     private lateinit var installer: DictionaryPackInstaller
+    private val mutationLock = DictionaryMutationLock()
 
     @Before
     fun setUp() {
@@ -71,7 +86,7 @@ class DictionaryPackInstallerTest {
             .setTransactionExecutor(Runnable::run)
             .build()
         server = MockWebServer().apply { start() }
-        installer = DictionaryPackInstaller(context, db.dictionaryDao()).apply {
+        installer = DictionaryPackInstaller(context, db.dictionaryDao(), mutationLock).apply {
             packUrl = server.url("/ecdict.csv").toString()
         }
         clearDictVersion()
@@ -177,6 +192,101 @@ class DictionaryPackInstallerTest {
         )
     }
 
+    @Test
+    fun install_cancelledWhileHeadersBlocked_closesCallAndReleasesOperation() = runBlocking {
+        assertBlockedDownloadCancellation(waitForBody = false)
+    }
+
+    @Test
+    fun install_cancelledWhileBodyReadBlocked_closesCallAndDeletesPartialFile() = runBlocking {
+        assertBlockedDownloadCancellation(waitForBody = true)
+    }
+
+    private suspend fun CoroutineScope.assertBlockedDownloadCancellation(waitForBody: Boolean) {
+        seedBuiltInDictionary()
+        val count = db.dictionaryDao().getCount()
+        val prefixBytes = 512 * 1024
+        val enteredBlockedRead = CompletableDeferred<Unit>()
+        val cancelledCall = CompletableDeferred<Unit>()
+        val actualCall = AtomicReference<Call>()
+        val client = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .addNetworkInterceptor { chain ->
+                val response = chain.proceed(chain.request())
+                val body = response.body
+                if (!waitForBody || body == null) response else {
+                    val observed = object : ForwardingSource(body.source()) {
+                        var readBytes = 0L
+                        override fun read(sink: Buffer, byteCount: Long): Long {
+                            // The app has passed ensureActive; this read now waits for bytes the server never sends.
+                            if (readBytes >= prefixBytes) enteredBlockedRead.complete(Unit)
+                            return super.read(sink, byteCount).also { if (it > 0) readBytes += it }
+                        }
+                    }.buffer()
+                    response.newBuilder().body(object : ResponseBody() {
+                        override fun contentType() = body.contentType()
+                        override fun contentLength() = body.contentLength()
+                        override fun source() = observed
+                    }).build()
+                }
+            }
+            .build()
+        val factory = object : Call.Factory {
+            override fun newCall(request: Request): Call {
+                val delegate = client.newCall(request)
+                actualCall.set(delegate)
+                return object : Call by delegate {
+                    override fun cancel() {
+                        cancelledCall.complete(Unit)
+                        delegate.cancel()
+                    }
+                }
+            }
+        }
+        val cancellingInstaller = DictionaryPackInstaller(context, db.dictionaryDao(), mutationLock, factory)
+            .apply { packUrl = server.url("/blocked.csv").toString() }
+        server.enqueue(if (waitForBody) {
+            MockResponse().setBody(Buffer().write(ByteArray(prefixBytes)))
+                .setHeader("Content-Length", prefixBytes * 4)
+        } else {
+            MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+        })
+        var propagatedCancellation = false
+        val download = launch(Dispatchers.IO) {
+            try {
+                cancellingInstaller.install()
+            } catch (cancellation: CancellationException) {
+                propagatedCancellation = true
+                throw cancellation
+            }
+        }
+        try {
+            assertNotNull(withContext(Dispatchers.IO) { server.takeRequest(5, TimeUnit.SECONDS) })
+            if (waitForBody) withTimeout(5_000) { enteredBlockedRead.await() }
+            assertFalse(cancelledCall.isCompleted)
+            download.cancel()
+            withTimeout(5_000) { download.join() }
+
+            assertTrue(cancelledCall.isCompleted)
+            assertTrue(propagatedCancellation)
+            assertEquals(DictionaryPackState.Failed(DictionaryPackFailure.CANCELLED), cancellingInstaller.state.value)
+            assertFalse(File(context.cacheDir, "ecdict-pack.csv").exists())
+            assertEquals(count, db.dictionaryDao().getCount())
+            assertNotNull(db.dictionaryDao().lookup("seed-1"))
+
+            server.enqueue(MockResponse().setResponseCode(503))
+            cancellingInstaller.install()
+            assertEquals(2, server.requestCount)
+            assertEquals(DictionaryPackState.Failed(DictionaryPackFailure.NETWORK), cancellingInstaller.state.value)
+        } finally {
+            actualCall.get()?.cancel()
+            download.cancelAndJoin()
+            client.connectionPool.evictAll()
+            client.dispatcher.executorService.shutdownNow()
+        }
+    }
+
     /**
      * 词条足够的好包：真的装上，且版本号落盘。
      *
@@ -238,7 +348,7 @@ class DictionaryPackInstallerTest {
             }
         }
 
-        val gatedInstaller = DictionaryPackInstaller(context, gatedDao)
+        val gatedInstaller = DictionaryPackInstaller(context, gatedDao, mutationLock)
         val refreshJob = launch { gatedInstaller.refreshState() }
 
         // 查询已挂起：此刻模拟「用户点了下载」，让状态进入在途。
@@ -294,7 +404,7 @@ class DictionaryPackInstallerTest {
             }
         }
 
-        val gatedInstaller = DictionaryPackInstaller(context, gatedDao).apply {
+        val gatedInstaller = DictionaryPackInstaller(context, gatedDao, mutationLock).apply {
             packUrl = server.url("/ecdict.csv").toString()
         }
         val refreshJob = launch { gatedInstaller.refreshState() }
@@ -400,7 +510,7 @@ class DictionaryPackInstallerTest {
                     return 0
                 }
             }
-            val idleInstaller = DictionaryPackInstaller(context, gatedDao)
+            val idleInstaller = DictionaryPackInstaller(context, gatedDao, mutationLock)
             val expected = DictionaryPackState.Installing(it * 100)
 
             val refreshJob = launch(Dispatchers.Default) { idleInstaller.refreshState() }
@@ -426,7 +536,7 @@ class DictionaryPackInstallerTest {
         val cancellingDao = object : DictionaryDao by db.dictionaryDao() {
             override suspend fun getCount(): Int = throw cancellation
         }
-        val cancellingInstaller = DictionaryPackInstaller(context, cancellingDao)
+        val cancellingInstaller = DictionaryPackInstaller(context, cancellingDao, mutationLock)
 
         val failure = runCatching { cancellingInstaller.refreshState() }.exceptionOrNull()
 
@@ -470,7 +580,7 @@ class DictionaryPackInstallerTest {
             ),
             Triple("plain IO error", IOException("socket closed"), DictionaryPackFailure.NETWORK)
         ).forEach { (case, error, expected) ->
-            val failingInstaller = DictionaryPackInstaller(context, daoThrowing(error)).apply {
+            val failingInstaller = DictionaryPackInstaller(context, daoThrowing(error), mutationLock).apply {
                 packUrl = server.url("/ecdict.csv").toString()
             }
             server.enqueue(csvResponse(uniqueWords = 60_000))
@@ -545,7 +655,7 @@ class DictionaryPackInstallerTest {
                 real.replaceAll(entries)
             }
         }
-        val guardedInstaller = DictionaryPackInstaller(context, gated).apply {
+        val guardedInstaller = DictionaryPackInstaller(context, gated, mutationLock).apply {
             packUrl = server.url("/pack.csv").toString()
         }
         guardedInstaller.refreshState()

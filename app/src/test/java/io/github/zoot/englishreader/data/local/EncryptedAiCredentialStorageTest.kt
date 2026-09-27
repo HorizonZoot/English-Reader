@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.data.local
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -104,7 +105,7 @@ class EncryptedAiCredentialStorageTest {
     }
 
     @Test
-    fun delete_commitReturnsFalse_preservesCredential() = runTest {
+    fun delete_commitReturnsFalse_reportsFailure() = runTest {
         val key = credentialKey("profile-1")
         val preferences = FakeCredentialPreferences(
             values = mutableMapOf(key to "secret-key"),
@@ -113,8 +114,6 @@ class EncryptedAiCredentialStorageTest {
         val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
 
         assertFalse(storage.delete("profile-1"))
-
-        assertEquals("secret-key", preferences.values[key])
     }
 
     @Test
@@ -131,7 +130,9 @@ class EncryptedAiCredentialStorageTest {
 
         assertTrue(storage.clearAllCredentials())
 
-        assertTrue(preferences.values.isEmpty())
+        assertEquals(CredentialReadResult.Missing, storage.read("profile-1"))
+        assertEquals(CredentialReadResult.Missing, storage.read("profile-2"))
+        assertFalse(preferences.values.containsKey(LEGACY_KEY))
         assertEquals(1, preferences.clearCalls)
         assertEquals(1, factory.createCount)
     }
@@ -165,6 +166,252 @@ class EncryptedAiCredentialStorageTest {
         assertEquals(CredentialReadResult.Available("secret-key"), storage.read("profile-1"))
         assertEquals(2, factory.createCount)
         assertEquals("secret-key", values[credentialKey("profile-1")])
+    }
+
+    @Test
+    fun writeReadDelete_allSlotsAndProfiles_remainIndependentAcrossInstances() = runTest {
+        val preferences = FakeCredentialPreferences()
+        val first = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+        val addresses = listOf("profile-1", "profile-2").flatMap { profileId ->
+            AiCredentialSlot.entries.map { AiCredentialAddress(profileId, it) }
+        }
+        addresses.forEachIndexed { index, address -> assertTrue(first.write(address, "  key-$index  ")) }
+        val reopenedPreferences = FakeCredentialPreferences(preferences.values.toMutableMap())
+        val reopened = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(reopenedPreferences))
+        addresses.forEachIndexed { index, address ->
+            assertEquals(CredentialReadResult.Available("key-$index"), reopened.read(address))
+        }
+
+        val removed = AiCredentialAddress("profile-1", AiCredentialSlot.A)
+        assertTrue(reopened.delete(removed))
+        addresses.forEachIndexed { index, address ->
+            val expected = if (address == removed) CredentialReadResult.Missing else CredentialReadResult.Available("key-$index")
+            assertEquals(expected, reopened.read(address))
+        }
+        assertEquals(6, preferences.values.size)
+    }
+
+    @Test
+    fun stringOverloads_targetOnlyLegacySlot() = runTest {
+        val preferences = FakeCredentialPreferences()
+        val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+        val a = AiCredentialAddress("profile-1", AiCredentialSlot.A)
+        val b = AiCredentialAddress("profile-1", AiCredentialSlot.B)
+        assertTrue(storage.write(a, "key-a"))
+        assertTrue(storage.write(b, "key-b"))
+        assertEquals(CredentialReadResult.Missing, storage.read("profile-1"))
+        assertTrue(storage.write("profile-1", "legacy-key"))
+        assertEquals(CredentialReadResult.Available("legacy-key"), storage.read(" profile-1 "))
+        assertEquals(CredentialReadResult.Available("legacy-key"), storage.read(AiCredentialAddress("profile-1", AiCredentialSlot.LEGACY)))
+        assertEquals("legacy-key", preferences.values[credentialKey("profile-1")])
+
+        assertTrue(storage.delete("profile-1"))
+
+        assertEquals(CredentialReadResult.Missing, storage.read("profile-1"))
+        assertEquals(CredentialReadResult.Available("key-a"), storage.read(a))
+        assertEquals(CredentialReadResult.Available("key-b"), storage.read(b))
+    }
+
+    @Test
+    fun read_missingSlot_doesNotFallBackToAnotherSlotOrGlobalCredential() = runTest {
+        val preferences = FakeCredentialPreferences(mutableMapOf(LEGACY_KEY to "global-secret"))
+        val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+        val address = AiCredentialAddress("profile-1", AiCredentialSlot.A)
+        assertEquals(CredentialReadResult.Missing, storage.read(address))
+        assertTrue(storage.write("profile-1", "legacy-key"))
+        assertTrue(storage.write(AiCredentialAddress("profile-1", AiCredentialSlot.B), "key-b"))
+
+        assertEquals(CredentialReadResult.Missing, storage.read(address))
+        assertFalse(preferences.values.containsKey(LEGACY_KEY))
+        assertFalse(address.toString().contains("profile-1"))
+    }
+
+    @Test
+    fun write_profileIdsContainingSeparatorsAndUnicode_doNotCollide() = runTest {
+        val preferences = FakeCredentialPreferences()
+        val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+        val ids = listOf("a", "a:a", "1:a", "api_key:a", "api_key_slot_v1:1:a:a", "配置:😀")
+        val addresses = ids.flatMap { id -> AiCredentialSlot.entries.map { AiCredentialAddress(id, it) } }
+        addresses.forEachIndexed { index, address -> assertTrue(storage.write(address, "key-$index")) }
+
+        assertEquals(addresses.size, preferences.values.size)
+        addresses.forEachIndexed { index, address ->
+            assertEquals(CredentialReadResult.Available("key-$index"), storage.read(address))
+        }
+    }
+
+    @Test
+    fun write_versionedPaddedProfileIds_remainDistinctAfterReopen() = runTest {
+        val preferences = FakeCredentialPreferences()
+        val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+        val ids = listOf("p", " p ", "p ", " p", "1:p", "p:a")
+        val addresses = ids.flatMap { id -> listOf(AiCredentialSlot.A, AiCredentialSlot.B).map { AiCredentialAddress(id, it) } }
+        addresses.forEachIndexed { index, address -> assertTrue(storage.write(address, "key-$index")) }
+        val reopened = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(
+            FakeCredentialPreferences(preferences.values.toMutableMap())
+        ))
+
+        assertEquals(addresses.size, preferences.values.size)
+        addresses.forEachIndexed { index, address ->
+            assertEquals(CredentialReadResult.Available("key-$index"), reopened.read(address))
+        }
+        assertTrue(reopened.delete(AiCredentialAddress("p", AiCredentialSlot.A)))
+        assertEquals(CredentialReadResult.Available("key-2"), reopened.read(AiCredentialAddress(" p ", AiCredentialSlot.A)))
+    }
+
+    @Test
+    fun copyLegacyToSlot_deleteLegacyAndReopen_preservesCopiedCredential() = runTest {
+        val preferences = FakeCredentialPreferences(mutableMapOf(credentialKey("profile-1") to "old-key"))
+        val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+        val a = AiCredentialAddress("profile-1", AiCredentialSlot.A)
+        val old = storage.read("profile-1") as CredentialReadResult.Available
+        assertTrue(storage.write(a, old.apiKey))
+        assertTrue(storage.delete("profile-1"))
+        val reopened = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(
+            FakeCredentialPreferences(preferences.values.toMutableMap())
+        ))
+
+        assertEquals(CredentialReadResult.Missing, reopened.read("profile-1"))
+        assertEquals(CredentialReadResult.Available("old-key"), reopened.read(a))
+        assertEquals(CredentialReadResult.Missing, reopened.read(AiCredentialAddress("profile-1", AiCredentialSlot.B)))
+    }
+
+    @Test
+    fun clearAllCredentials_fromColdInstance_removesAllSlotsIncludingOrphans() = runTest {
+        val preferences = FakeCredentialPreferences()
+        val first = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+        val addresses = listOf("profile-1", "orphan").flatMap { id ->
+            AiCredentialSlot.entries.map { AiCredentialAddress(id, it) }
+        }
+        addresses.forEachIndexed { index, address -> assertTrue(first.write(address, "key-$index")) }
+        val cold = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences))
+
+        assertTrue(cold.clearAllCredentials())
+
+        val reopened = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(
+            FakeCredentialPreferences(preferences.values.toMutableMap())
+        ))
+        addresses.forEach { assertEquals(CredentialReadResult.Missing, reopened.read(it)) }
+    }
+
+    @Test
+    fun operationFailures_logOnlySafeMessagesAndMarkStorageUnavailable() = runTest {
+        val privateDetail = "secret-key https://private.example/tenant profile-private model-private"
+        for (operation in listOf("read", "write", "delete", "clear")) {
+            val preferences = FakeCredentialPreferences()
+            val messages = mutableListOf<String>()
+            val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences)) { messages += it }
+            assertEquals(CredentialReadResult.Missing, storage.read("profile-1"))
+            val failure = IllegalStateException(privateDetail)
+            when (operation) {
+                "read" -> preferences.getFailure = failure
+                "write" -> preferences.putFailure = failure
+                "delete" -> preferences.removeFailure = failure
+                "clear" -> preferences.clearFailure = failure
+            }
+            val address = AiCredentialAddress("profile-1", AiCredentialSlot.B)
+            when (operation) {
+                "read" -> assertEquals(CredentialReadResult.StorageUnavailable, storage.read(address))
+                "write" -> assertFalse(storage.write(address, "secret-key"))
+                "delete" -> assertFalse(storage.delete(address))
+                else -> assertFalse(storage.clearAllCredentials())
+            }
+            assertEquals(1, messages.size)
+            listOf("secret-key", "private.example", "profile-private", "model-private", "profile-1").forEach { secret ->
+                assertFalse(operation, messages.single().contains(secret))
+            }
+            assertEquals(CredentialReadResult.StorageUnavailable, storage.read(address))
+        }
+    }
+
+    @Test
+    fun initializationFailure_logsSafeMessageWithoutRawThrowable() = runTest {
+        val messages = mutableListOf<String>()
+        val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(
+            IllegalStateException("secret-key https://private.example/profile-private")
+        )) { messages += it }
+
+        assertEquals(CredentialReadResult.StorageUnavailable, storage.read("profile-1"))
+
+        assertEquals(1, messages.size)
+        assertTrue(messages.single().isNotBlank())
+        for (privateDetail in listOf("secret-key", "private.example", "profile-private")) {
+            assertFalse(messages.single().contains(privateDetail))
+        }
+    }
+
+    @Test
+    fun legacyRemoval_exception_logsSafeMessageAndPreservesProfileAccess() = runTest {
+        val preferences = FakeCredentialPreferences(mutableMapOf(credentialKey("profile-1") to "key-one"))
+        preferences.removeFailure = IllegalStateException("secret-key https://private.example/profile-private")
+        val messages = mutableListOf<String>()
+        val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences)) { messages += it }
+
+        assertEquals(CredentialReadResult.Available("key-one"), storage.read("profile-1"))
+
+        assertEquals(1, messages.size)
+        for (privateDetail in listOf("secret-key", "private.example", "profile-private", "key-one")) {
+            assertFalse(messages.single().contains(privateDetail))
+        }
+    }
+
+    @Test
+    fun initializationCancellation_retriesWithoutLoggingOrMarkingStorageFailed() = runTest {
+        for (stage in listOf("factory", "legacy removal")) {
+            val cancellation = CancellationException("cancelled")
+            val preferences = FakeCredentialPreferences()
+            if (stage == "legacy removal") preferences.removeFailure = cancellation
+            val factory = if (stage == "factory") {
+                QueueCredentialPreferencesFactory(cancellation, preferences)
+            } else {
+                QueueCredentialPreferencesFactory(preferences, preferences)
+            }
+            val messages = mutableListOf<String>()
+            val storage = EncryptedAiCredentialStorage(factory) { messages += it }
+            val address = AiCredentialAddress("profile-1", AiCredentialSlot.A)
+
+            assertTrue(stage, runCatching { storage.read(address) }.exceptionOrNull() is CancellationException)
+            preferences.removeFailure = null
+
+            assertEquals(CredentialReadResult.Missing, storage.read(address))
+            assertEquals(2, factory.createCount)
+            assertTrue(messages.isEmpty())
+        }
+    }
+
+    @Test
+    fun operationCancellation_propagatesWithoutLoggingOrPoisoningStorage() = runTest {
+        for (operation in listOf("read", "write", "delete", "clear")) {
+            val preferences = FakeCredentialPreferences()
+            val messages = mutableListOf<String>()
+            val storage = EncryptedAiCredentialStorage(QueueCredentialPreferencesFactory(preferences)) { messages += it }
+            val address = AiCredentialAddress("profile-1", AiCredentialSlot.A)
+            assertTrue(storage.write(address, "key-a"))
+            val cancellation = CancellationException("cancelled")
+            when (operation) {
+                "read" -> preferences.getFailure = cancellation
+                "write" -> preferences.putFailure = cancellation
+                "delete" -> preferences.removeFailure = cancellation
+                "clear" -> preferences.clearFailure = cancellation
+            }
+
+            val failure = runCatching {
+                when (operation) {
+                    "read" -> storage.read(address)
+                    "write" -> storage.write(address, "new-key")
+                    "delete" -> storage.delete(address)
+                    else -> storage.clearAllCredentials()
+                }
+            }.exceptionOrNull()
+
+            assertTrue(operation, failure is CancellationException)
+            assertTrue(messages.isEmpty())
+            preferences.getFailure = null
+            preferences.putFailure = null
+            preferences.removeFailure = null
+            preferences.clearFailure = null
+            assertEquals(CredentialReadResult.Available("key-a"), storage.read(address))
+        }
     }
 
     @Test
@@ -248,6 +495,9 @@ class EncryptedAiCredentialStorageTest {
         var getFailure: RuntimeException? = null,
         private val removeResults: MutableMap<String, Boolean> = mutableMapOf()
     ) : CredentialPreferences {
+        var putFailure: RuntimeException? = null
+        var removeFailure: RuntimeException? = null
+        var clearFailure: RuntimeException? = null
         val removeCalls = mutableListOf<String>()
         var clearCalls: Int = 0
             private set
@@ -258,11 +508,13 @@ class EncryptedAiCredentialStorageTest {
         }
 
         override fun putString(key: String, value: String): Boolean {
+            putFailure?.let { throw it }
             values[key] = value
             return true
         }
 
         override fun remove(key: String): Boolean {
+            removeFailure?.let { throw it }
             removeCalls += key
             val result = removeResults[key] ?: true
             if (result) values.remove(key)
@@ -270,6 +522,7 @@ class EncryptedAiCredentialStorageTest {
         }
 
         override fun clear(): Boolean {
+            clearFailure?.let { throw it }
             clearCalls += 1
             values.clear()
             return true

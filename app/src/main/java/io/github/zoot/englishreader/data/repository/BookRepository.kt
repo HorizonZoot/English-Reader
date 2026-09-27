@@ -46,6 +46,9 @@ class BookRepository @Inject constructor(
 
     suspend fun getProgress(bookId: Long): BookReadingProgressEntity? = bookDao.getProgress(bookId)
 
+    fun observeProgress(bookId: Long): Flow<BookReadingProgressEntity?> =
+        bookDao.observeProgress(bookId)
+
     /**
      * 原子落库。
      *

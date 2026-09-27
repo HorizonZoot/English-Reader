@@ -24,10 +24,8 @@ object ParagraphAligner {
      * 构造处只校验两条：索引从 0 起连续，且每句文本确实落在它声称的偏移上（可捕获
      * 「句子来自另一段文本」与「偏移整体平移」）。
      *
-     * **没有**校验区间重叠与覆盖空洞，而「连续覆盖」才是 InteractiveText 逐句 append 拼出
-     * annotatedText 时真正依赖的不变量（详见 [SentenceRange] 的说明）。SentenceSplitter 会
-     * 跳过纯空白句段，因此空洞在理论上可以出现（如相邻的 U+2028/U+000B 分隔符）。
-     * 这里有意不把连续覆盖写成 require：那会把一个既有的高亮错位问题升级成阅读页崩溃。
+     * 不要求句子区间覆盖纯空白。InteractiveText 直接使用完整 [english] 构造 AnnotatedString，
+     * 分句器跳过的空白不会丢失，也不改变布局与高亮共享的原文坐标。
      */
     data class AlignedParagraph(
         val english: String,

@@ -7,6 +7,7 @@ import android.database.sqlite.SQLiteException
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import io.github.zoot.englishreader.data.dao.DictionaryDao
+import io.github.zoot.englishreader.data.dictionary.DictionaryMutationLock
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.remote.dictionary.DictionaryApiService
@@ -152,7 +153,7 @@ class DictionaryRepositoryEscapeRepairTest {
         assertTrue(prefs.getBoolean(KEY_ESCAPES_REPAIRED, false))
     }
 
-    private fun createRepository(dao: DictionaryDao) = DictionaryRepository(context, dao, api)
+    private fun createRepository(dao: DictionaryDao) = DictionaryRepository(context, dao, api, DictionaryMutationLock())
 
     private suspend fun assertInstalledRows(expected: List<DictionaryEntry>) {
         assertEquals(

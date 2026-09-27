@@ -8,6 +8,7 @@ import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.entity.BookEntity
+import io.github.zoot.englishreader.data.entity.TranslationProgressRow
 import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
 import com.squareup.moshi.Moshi
@@ -19,7 +20,11 @@ import io.github.zoot.englishreader.model.TranslationPlannerVersion
 import io.github.zoot.englishreader.model.TranslationSegmentStatus
 import io.github.zoot.englishreader.model.TranslationSegmentationMode
 import io.github.zoot.englishreader.util.ParagraphAligner
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -188,6 +193,62 @@ class WholeTranslationDaoAndroidTest {
     }
 
     // ---- 领取与 lease ----
+
+    @Test
+    fun observeProgressRows_checkpointAndDeletion_invalidateProjection() = runBlocking {
+        val articleId = insertArticle(ONE_PARAGRAPH)
+        val taskId = createTask(articleId)
+        val rows = Channel<List<TranslationProgressRow>>(Channel.UNLIMITED)
+        val collector = launch {
+            dao.observeProgressRows(taskId).collect { rows.send(it) }
+        }
+        try {
+            val initial = withTimeout(5_000) { rows.receive() }.single()
+            assertEquals(articleId, initial.articleId)
+            assertEquals(0, initial.paragraphIndex)
+            assertEquals(0, initial.attemptCount)
+            assertEquals("untranslated", initial.status)
+            assertEquals(false, initial.hasNonBlankTranslation)
+
+            dao.tryClaimSegment(taskId, articleId, 0, NOW + LEASE, NOW, 0)
+            dao.checkpointSuccess(taskId, articleId, 0, fingerprintOf(ONE_PARAGRAPH, 0), "译文", NOW)
+            val completed = withTimeout(5_000) {
+                var next = rows.receive()
+                while (next.single().status != "translated") next = rows.receive()
+                next.single()
+            }
+            assertEquals(1, completed.attemptCount)
+            assertEquals(true, completed.hasNonBlankTranslation)
+            assertNull(completed.leaseExpiresAt)
+
+            dao.deleteTask(taskId)
+            withTimeout(5_000) {
+                while (rows.receive().isNotEmpty()) Unit
+            }
+        } finally {
+            collector.cancel()
+            collector.join()
+            rows.close()
+        }
+    }
+
+    @Test
+    fun getProgressRows_unicodeBlankAndNul_preserveTranslationValidity() = runBlocking {
+        val articleId = insertArticle(ONE_PARAGRAPH)
+        val taskId = createTask(articleId)
+        val whitespace = (Char.MIN_VALUE..Char.MAX_VALUE).filter { it.isWhitespace() }.joinToString("")
+        val values = listOf(null, "", whitespace, "\u0000", " \u0000 ", "\u2003译文\u2003") +
+            whitespace.map { it.toString() }
+        for (value in values) {
+            db.openHelper.writableDatabase.execSQL(
+                "UPDATE translation_segments SET status = 'translated', translatedText = ? WHERE taskId = ?",
+                arrayOf(value, taskId)
+            )
+            val row = dao.getProgressRows(taskId).single()
+            assertEquals("translated", row.status)
+            assertEquals(!value.isNullOrBlank(), row.hasNonBlankTranslation)
+        }
+    }
 
     /**
      * 同一段落只能被领取一次。

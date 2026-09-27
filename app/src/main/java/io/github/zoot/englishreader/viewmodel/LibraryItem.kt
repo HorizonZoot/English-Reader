@@ -1,6 +1,7 @@
 package io.github.zoot.englishreader.viewmodel
 
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 
 /**
@@ -31,7 +32,7 @@ sealed interface LibraryItem {
     val listKey: String
 
     /** 单篇导入或内置样本文章。 */
-    data class Article(val article: ArticleEntity) : LibraryItem {
+    data class Article(val article: ArticleSummary) : LibraryItem {
         override val sortKey: Long get() = article.createdAt
         override val listKey: String get() = "article-${article.id}"
     }

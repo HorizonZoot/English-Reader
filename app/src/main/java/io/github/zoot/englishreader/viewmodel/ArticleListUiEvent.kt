@@ -2,6 +2,23 @@ package io.github.zoot.englishreader.viewmodel
 
 import io.github.zoot.englishreader.data.importer.ImportFailure
 
+enum class ImportOutcome { SUCCESS, FAILURE }
+
+sealed interface ImportState {
+    val importId: String?
+
+    data object Idle : ImportState {
+        override val importId: String? = null
+    }
+
+    data class Running(override val importId: String) : ImportState
+
+    data class Finished(
+        override val importId: String,
+        val outcome: ImportOutcome
+    ) : ImportState
+}
+
 /**
  * 文章列表页的一次性 UI 事件。
  *
@@ -14,6 +31,8 @@ import io.github.zoot.englishreader.data.importer.ImportFailure
  * 界面只留一个 collector，事件类型由 sealed interface 区分。
  */
 sealed interface ArticleListUiEvent {
+
+    sealed interface ImportResult : ArticleListUiEvent
 
     /**
      * 导入成功。
@@ -28,10 +47,10 @@ sealed interface ArticleListUiEvent {
         val articleId: Long,
         val title: String,
         val exceedsFullExplanationLimit: Boolean
-    ) : ArticleListUiEvent
+    ) : ImportResult
 
     /** 导入失败，[failure] 供界面映射为具体原因而非笼统的「导入失败」。 */
-    data class ImportFailed(val failure: ImportFailure) : ArticleListUiEvent
+    data class ImportFailed(val failure: ImportFailure) : ImportResult
 
     /**
      * 整本书导入成功。
@@ -46,7 +65,7 @@ sealed interface ArticleListUiEvent {
         val bookId: Long,
         val title: String,
         val chapterCount: Int
-    ) : ArticleListUiEvent
+    ) : ImportResult
 
     data object DeleteFailed : ArticleListUiEvent
 }

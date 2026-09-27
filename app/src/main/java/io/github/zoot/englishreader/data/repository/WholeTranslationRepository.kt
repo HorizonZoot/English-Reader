@@ -14,6 +14,7 @@ import io.github.zoot.englishreader.data.dao.MaterializationResult
 import io.github.zoot.englishreader.data.dao.TranslationSourceChangedException
 import io.github.zoot.englishreader.data.dao.TranslationTaskConflictException
 import io.github.zoot.englishreader.data.dao.WholeTranslationDao
+import io.github.zoot.englishreader.data.entity.TranslationProgressRow
 import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
 import io.github.zoot.englishreader.di.ApplicationCoroutineScope
@@ -47,8 +48,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -158,23 +161,25 @@ class WholeTranslationRepository internal constructor(
 
     private val mutex = Mutex()
 
-    /** taskId → 处理协程。同一任务同一时刻最多一个 worker。 */
-    private val workers = mutableMapOf<Long, Job>()
+    private data class WorkerEntry(val job: Job, val started: Boolean = false)
+
+    /** 唯一 worker 表；启动标记也发布变化，不能依赖 Job 内部状态触发 Flow。 */
+    private val workers = MutableStateFlow<Map<Long, WorkerEntry>>(emptyMap())
 
     /**
-     * 同时观察任务行与段落行。
+     * 同时观察任务行、轻量进度行与本进程存活 worker。
      *
      * 只订阅段落表会漏掉 COMPLETED：materialize 不改任何段落行。只订阅任务表会漏掉逐段进度。
      * `combine` 让任一表变化都重新发射一份完整视图。
      */
     fun observe(taskId: Long): Flow<WholeTranslationTaskView?> =
-        combine(dao.observeTask(taskId), dao.observeSegments(taskId)) { task, rows ->
-            task?.toView(rows.map { it.toDomain() })
+        combine(dao.observeTask(taskId), dao.observeProgressRows(taskId), workers) { task, rows, running ->
+            task?.toView(rows, running[taskId])
         }
 
     suspend fun findResumable(scope: WholeTranslationScope): WholeTranslationTaskView? {
         val task = dao.findResumableTaskForSources(scope.scopeKey, scope.articleIds, clock()) ?: return null
-        return task.toView(dao.getSegments(task.taskId).map { it.toDomain() })
+        return task.toView(dao.getProgressRows(task.taskId), workers.value[task.taskId])
     }
 
     /**
@@ -346,7 +351,9 @@ class WholeTranslationRepository internal constructor(
             try {
                 dao.updateTaskStatus(taskId, WholeTranslationTaskStatus.CANCELLED.toStableToken(), null, clock())
             } finally {
-                workers.remove(taskId)?.cancel()
+                val worker = workers.value[taskId]
+                workers.update { it - taskId }
+                worker?.job?.cancel()
             }
         }
     }
@@ -357,18 +364,27 @@ class WholeTranslationRepository internal constructor(
             try {
                 dao.updateTaskStatus(taskId, WholeTranslationTaskStatus.PAUSED.toStableToken(), null, clock())
             } finally {
-                workers.remove(taskId)?.cancel()
+                val worker = workers.value[taskId]
+                workers.update { it - taskId }
+                worker?.job?.cancel()
             }
         }
     }
 
     private suspend fun launchWorker(taskId: Long, mode: TranslationProcessingMode) {
         mutex.withLock {
-            if (workers[taskId]?.isActive == true) return
-            val job = applicationScope.launch { runTask(taskId, mode) }
-            workers[taskId] = job
+            if (workers.value[taskId]?.job?.isActive == true) return
+            val job = applicationScope.launch(start = CoroutineStart.LAZY) { runTask(taskId, mode) }
+            workers.update { it + (taskId to WorkerEntry(job)) }
             job.invokeOnCompletion {
-                applicationScope.launch { mutex.withLock { if (workers[taskId] === job) workers.remove(taskId) } }
+                workers.update { current ->
+                    if (current[taskId]?.job === job) current - taskId else current
+                }
+            }
+            job.start()
+            workers.update { current ->
+                val entry = current[taskId]
+                if (entry?.job === job) current + (taskId to entry.copy(started = true)) else current
             }
         }
     }
@@ -534,7 +550,7 @@ class WholeTranslationRepository internal constructor(
         val segments = dao.getSegments(taskId).map { it.toDomain() }
         val progress = WholeTranslationProgress.from(segments)
         if (!progress.isFullyTranslated) {
-            // 有失败项：停在 PAUSED，UI 据 progress.failed 显示「重试失败项」。
+            // 仍有未完成项：由 UI 按失败类别与剩余工作提供可用动作。
             dao.updateTaskStatus(taskId, WholeTranslationTaskStatus.PAUSED.toStableToken(), null, clock())
             return
         }
@@ -555,17 +571,29 @@ class WholeTranslationRepository internal constructor(
         )
     }
 
-    private suspend fun WholeTranslationTaskEntity.toView(segments: List<TranslationSegment>) =
-        WholeTranslationTaskView(
+    private suspend fun WholeTranslationTaskEntity.toView(
+        rows: List<TranslationProgressRow>,
+        worker: WorkerEntry?
+    ): WholeTranslationTaskView {
+        val storedStatus = WholeTranslationTaskStatus.fromStableToken(status)
+        val isRunning = worker?.job?.isActive == true
+        return WholeTranslationTaskView(
             taskId = taskId,
             scopeKey = scopeKey,
-            status = WholeTranslationTaskStatus.fromStableToken(status),
+            status = if (storedStatus == WholeTranslationTaskStatus.RUNNING && !isRunning) {
+                WholeTranslationTaskStatus.PAUSED
+            } else storedStatus,
             failureReason = TranslationFailureReason.fromStableToken(failureReason),
-            progress = WholeTranslationProgress.from(segments),
+            progress = WholeTranslationProgress.summarize(
+                rows,
+                TranslationProgressRow::validatedStatus,
+                { TranslationFailureReason.fromStableToken(it.failureReason) }
+            ),
             segmentationModes = dao.getTaskArticles(taskId).mapNotNull {
                 TranslationSegmentationMode.fromStableToken(it.segmentationMode)
             }.toSet()
         )
+    }
 
     private fun TranslationSegmentEntity.toDomain() = TranslationSegment(
         articleId = articleId,

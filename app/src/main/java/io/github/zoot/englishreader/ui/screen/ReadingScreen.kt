@@ -170,6 +170,7 @@ fun ReadingScreen(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> viewModel.refreshTtsCapability()
+                Lifecycle.Event.ON_PAUSE -> viewModel.stopAudio()
                 Lifecycle.Event.ON_STOP -> viewModel.releaseTts()
                 else -> Unit
             }
@@ -237,6 +238,8 @@ fun ReadingScreen(
                 ReadingError.LOAD -> R.string.reading_load_failed
                 ReadingError.SAVE_POSITION -> R.string.reading_position_save_failed
                 ReadingError.SAVE_PREFERENCE -> R.string.reading_preference_save_failed
+                ReadingError.LOAD_VOCABULARY -> R.string.reading_vocabulary_load_failed
+                ReadingError.CANCEL_TRANSLATION -> R.string.whole_translation_cancel_failed
             }))
         }
     }

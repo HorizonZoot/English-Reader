@@ -32,6 +32,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import java.util.UUID
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -61,6 +62,19 @@ data class ProfileActionEvent(
     val action: ProfileActionResult,
     val profileId: String? = null,
     val failure: ProfileMutationResult? = null
+)
+
+sealed interface ProfileMutationSubmission {
+    data class Accepted(val mutationId: String) : ProfileMutationSubmission
+    data object Busy : ProfileMutationSubmission
+    data object Invalid : ProfileMutationSubmission
+}
+
+data class ProfileMutationState(
+    val mutationId: String,
+    val editorSessionId: String,
+    val draftRevision: Long,
+    val result: ProfileMutationResult? = null
 )
 
 data class ModelDiscoveryState(
@@ -164,6 +178,17 @@ class SettingsViewModel @Inject constructor(
     private val _profileMutationInFlight = MutableStateFlow(false)
     val profileMutationInFlight: StateFlow<Boolean> =
         _profileMutationInFlight.asStateFlow()
+
+    private val _profileMutationState = MutableStateFlow<ProfileMutationState?>(null)
+    val profileMutationState: StateFlow<ProfileMutationState?> =
+        _profileMutationState.asStateFlow()
+
+    fun acknowledgeProfileMutation(mutationId: String) {
+        val completed = _profileMutationState.value ?: return
+        if (completed.mutationId == mutationId && completed.result != null) {
+            _profileMutationState.compareAndSet(completed, null)
+        }
+    }
 
     private val _modelDiscovery = MutableStateFlow(ModelDiscoveryState())
     val modelDiscovery = _modelDiscovery.asStateFlow()
@@ -296,54 +321,47 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun createProfile(
+        editorSessionId: String,
+        draftRevision: Long,
         displayName: String,
         providerTemplate: AiProviderTemplate,
         baseUrl: String,
         modelId: String,
         apiKey: String,
         temperature: Double = DEFAULT_TEMPERATURE
-    ) {
-        viewModelScope.launch {
-            val normalizedName = displayName.trim()
-            val normalizedBaseUrl = baseUrl.trim()
-            val normalizedModelId = modelId.trim()
-            val normalizedApiKey = apiKey.trim()
-            if (normalizedName.isBlank() || normalizedBaseUrl.isBlank() ||
-                normalizedModelId.isBlank() || normalizedApiKey.isBlank() ||
-                !temperature.isFinite()
-            ) {
+    ): ProfileMutationSubmission {
+        val normalizedName = displayName.trim()
+        val normalizedBaseUrl = baseUrl.trim()
+        val normalizedModelId = modelId.trim()
+        val normalizedApiKey = apiKey.trim()
+        if (normalizedName.isBlank() || normalizedBaseUrl.isBlank() ||
+            normalizedModelId.isBlank() || normalizedApiKey.isBlank() ||
+            !temperature.isFinite()
+        ) {
+            viewModelScope.launch {
                 _profileActionEvents.send(ProfileActionEvent(ProfileActionResult.FAILED))
-                return@launch
             }
-
-            if (!_profileMutationInFlight.compareAndSet(expect = false, update = true)) {
-                return@launch
-            }
-            val profileId = UUID.randomUUID().toString()
-            var event: ProfileActionEvent
-            try {
-                val result = profileRepository.createProfile(
-                    profile = AiProviderProfile(
-                        profileId = profileId,
-                        displayName = normalizedName,
-                        providerTemplate = providerTemplate,
-                        baseUrl = normalizedBaseUrl,
-                        modelId = normalizedModelId,
-                        authStrategy = AiAuthStrategy.API_KEY,
-                        temperature = temperature
-                    ),
-                    apiKey = normalizedApiKey
-                )
-                event = result.toActionEvent(ProfileActionResult.CREATED, profileId)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                Log.e(TAG, "Failed to create AI profile")
-                event = ProfileActionEvent(ProfileActionResult.FAILED, profileId)
-            } finally {
-                _profileMutationInFlight.value = false
-            }
-            _profileActionEvents.send(event)
+            return ProfileMutationSubmission.Invalid
+        }
+        val profileId = UUID.randomUUID().toString()
+        return submitProfileMutation(
+            editorSessionId,
+            draftRevision,
+            ProfileActionResult.CREATED,
+            profileId
+        ) {
+            profileRepository.createProfile(
+                profile = AiProviderProfile(
+                    profileId = profileId,
+                    displayName = normalizedName,
+                    providerTemplate = providerTemplate,
+                    baseUrl = normalizedBaseUrl,
+                    modelId = normalizedModelId,
+                    authStrategy = AiAuthStrategy.API_KEY,
+                    temperature = temperature
+                ),
+                apiKey = normalizedApiKey
+            )
         }
     }
 
@@ -382,6 +400,8 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun updateProfile(
+        editorSessionId: String,
+        draftRevision: Long,
         profileId: String,
         displayName: String,
         providerTemplate: AiProviderTemplate,
@@ -389,16 +409,17 @@ class SettingsViewModel @Inject constructor(
         modelId: String,
         replacementApiKey: String,
         temperatureInput: String
-    ) {
-        viewModelScope.launch {
-            val normalizedDisplayName = displayName.trim()
-            val normalizedBaseUrl = baseUrl.trim()
-            val normalizedModelId = modelId.trim()
-            val temperature = temperatureInput.trim().toDoubleOrNull()
-            if (profileId.isBlank() || normalizedDisplayName.isBlank() ||
-                normalizedBaseUrl.isBlank() || normalizedModelId.isBlank() ||
-                temperature == null || !temperature.isFinite()
-            ) {
+    ): ProfileMutationSubmission {
+        val normalizedDisplayName = displayName.trim()
+        val normalizedBaseUrl = baseUrl.trim()
+        val normalizedModelId = modelId.trim()
+        val normalizedApiKey = replacementApiKey.trim().takeIf { it.isNotBlank() }
+        val temperature = temperatureInput.trim().toDoubleOrNull()
+        if (profileId.isBlank() || normalizedDisplayName.isBlank() ||
+            normalizedBaseUrl.isBlank() || normalizedModelId.isBlank() ||
+            temperature == null || !temperature.isFinite()
+        ) {
+            viewModelScope.launch {
                 _profileActionEvents.send(
                     ProfileActionEvent(
                         ProfileActionResult.FAILED,
@@ -406,36 +427,67 @@ class SettingsViewModel @Inject constructor(
                         ProfileMutationResult.InvalidProfile
                     )
                 )
-                return@launch
             }
-            if (!_profileMutationInFlight.compareAndSet(expect = false, update = true)) {
-                return@launch
-            }
-            var event: ProfileActionEvent
+            return ProfileMutationSubmission.Invalid
+        }
+        return submitProfileMutation(
+            editorSessionId,
+            draftRevision,
+            ProfileActionResult.UPDATED,
+            profileId
+        ) {
+            profileRepository.updateProfile(
+                proposedProfile = AiProviderProfile(
+                    profileId = profileId,
+                    displayName = normalizedDisplayName,
+                    providerTemplate = providerTemplate,
+                    baseUrl = normalizedBaseUrl,
+                    modelId = normalizedModelId,
+                    authStrategy = AiAuthStrategy.API_KEY,
+                    temperature = temperature
+                ),
+                replacementApiKey = normalizedApiKey
+            )
+        }
+    }
+
+    private fun submitProfileMutation(
+        editorSessionId: String,
+        draftRevision: Long,
+        action: ProfileActionResult,
+        profileId: String,
+        mutate: suspend () -> ProfileMutationResult
+    ): ProfileMutationSubmission {
+        if (!_profileMutationInFlight.compareAndSet(expect = false, update = true)) {
+            return ProfileMutationSubmission.Busy
+        }
+        val accepted = ProfileMutationState(
+            mutationId = UUID.randomUUID().toString(),
+            editorSessionId = editorSessionId,
+            draftRevision = draftRevision
+        )
+        // 工作可能在 launch 返回前完成，必须先登记已接受的提交。
+        _profileMutationState.value = accepted
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            val result: ProfileMutationResult
             try {
-                val result = profileRepository.updateProfile(
-                    proposedProfile = AiProviderProfile(
-                        profileId = profileId,
-                        displayName = normalizedDisplayName,
-                        providerTemplate = providerTemplate,
-                        baseUrl = normalizedBaseUrl,
-                        modelId = normalizedModelId,
-                        authStrategy = AiAuthStrategy.API_KEY,
-                        temperature = temperature
-                    ),
-                    replacementApiKey = replacementApiKey.trim().takeIf { it.isNotBlank() }
-                )
-                event = result.toActionEvent(ProfileActionResult.UPDATED, profileId)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                Log.e(TAG, "Failed to update AI profile")
-                event = ProfileActionEvent(ProfileActionResult.FAILED, profileId)
+                result = try {
+                    mutate()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    Log.e(TAG, "stage=profile_mutation category=storage_failure")
+                    ProfileMutationResult.MetadataUnavailable
+                }
+                _profileMutationState.compareAndSet(accepted, accepted.copy(result = result))
             } finally {
+                _profileMutationState.compareAndSet(accepted, null)
                 _profileMutationInFlight.value = false
             }
-            _profileActionEvents.send(event)
+            // 业务完成不等待 Snackbar；尚未显示的提示仍归 VM 的 Channel 持有。
+            _profileActionEvents.send(result.toActionEvent(action, profileId))
         }
+        return ProfileMutationSubmission.Accepted(accepted.mutationId)
     }
 
     fun rotateApiKey(profileId: String, apiKey: String) {
@@ -569,8 +621,8 @@ class SettingsViewModel @Inject constructor(
                 _profileActionEvents.send(ProfileActionEvent(ProfileActionResult.CACHE_CLEARED))
             } catch (cancellation: CancellationException) {
                 throw cancellation
-            } catch (error: Exception) {
-                Log.e(TAG, "Failed to clear AI explanation cache", error)
+            } catch (_: Exception) {
+                Log.e(TAG, "stage=ai_cache_clear category=storage_failure")
                 _profileActionEvents.send(ProfileActionEvent(ProfileActionResult.FAILED))
             }
         }

@@ -29,7 +29,7 @@ import org.readium.r2.streamer.parser.DefaultPublicationParser
  * 1. **预算必须前置。** Readium 不执行本项目的 ZIP entry / 解压预算，
  *    [BookArchivePreflight] 必须在 publication 打开之前跑完。
  * 2. **加密正文必须前置拒绝。** Readium 会打开并返回声明了不支持加密算法的 spine 资源的
- *    明文字节，所以 DRM preflight 由现有 [EpubTextExtractor.detectEncryptedPayload] 承担。
+ *    明文字节，所以 DRM preflight 由现有 [EpubTextExtractor.requireNotEncrypted] 承担。
  * 3. **纯图片章节要过滤。** 真实出版物的第一个 reading-order item 常是只含 `<img>` 的封面页，
  *    提取后正文为空。它不是错误，但不能作为可读章节，过滤后必须重新编号。
  */
@@ -50,7 +50,7 @@ class EpubBookParser @Inject constructor(
         val preflight = BookArchivePreflight.inspect(file)
         // 每次新建：EpubTextExtractor 持有可变的 inflatedBytes 计数器，且只有 extract() 会归零。
         // 在 @Singleton 上复用它会让计数跳导入累加，数百本后永久报 InvalidEpub。
-        EpubTextExtractor(context).requireNotEncrypted(file)
+        val spineDocuments = EpubTextExtractor(context).requireNotEncrypted(file)
 
         val httpClient = DefaultHttpClient()
         val assetRetriever = AssetRetriever(
@@ -73,13 +73,16 @@ class EpubBookParser @Inject constructor(
             ?: invalidEpub()
 
         try {
-            publication.toImportedBook(preflight.packageVersion)
+            publication.toImportedBook(preflight.packageVersion, spineDocuments)
         } finally {
             publication.close()
         }
     }
 
-    private suspend fun Publication.toImportedBook(packageVersion: String?): ImportedBook {
+    private suspend fun Publication.toImportedBook(
+        packageVersion: String?,
+        spineDocuments: Map<String, EpubSpineDocumentType>
+    ): ImportedBook {
         val navigationTitles = buildNavigationTitleIndex(tableOfContents)
 
         val chapters = mutableListOf<ImportedChapter>()
@@ -90,6 +93,9 @@ class EpubBookParser @Inject constructor(
         readingOrder.forEach { link ->
             coroutineContext.ensureActive()
 
+            val documentPath = OcfPathNormalizer.resolve("", link.href.toString())
+            val documentType = spineDocuments[documentPath] ?: invalidEpub()
+
             // Readium 3.0.3 的 Resource 不是 Closeable，生命周期随 publication（见 Phase 0 Spike）。
             val bytes = get(link)?.read()?.getOrNull() ?: invalidEpub()
             // 读取或解析失败意味着正文可能丢失，不能与合法的空白封面一并跳过。
@@ -98,6 +104,8 @@ class EpubBookParser @Inject constructor(
 
             // 封面页等纯图片资源提取后为空白。它们合法但不可读，过滤掉。
             if (content.isBlank()) return@forEach
+            // 类型由 OPF 提供；Readium 的 link.mediaType 可能按扩展名推断，不能据此放行 SVG 正文。
+            if (documentType == EpubSpineDocumentType.SVG) invalidEpub()
 
             val path = link.decodedPath()
             val navigationTitle = path?.let { navigationTitles[it] }

@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
 
 internal fun interface CredentialPreferencesFactory {
@@ -24,25 +25,19 @@ internal interface CredentialPreferences {
 
 class EncryptedAiCredentialStorage internal constructor(
     private val preferencesFactory: CredentialPreferencesFactory,
-    private val errorLogger: (message: String, error: Throwable?) -> Unit = { _, _ -> }
+    private val errorLogger: (message: String) -> Unit = {}
 ) : AiCredentialStorage {
 
     constructor(context: Context) : this(
         preferencesFactory = AndroidCredentialPreferencesFactory(context.applicationContext),
-        errorLogger = { message, error ->
-            if (error == null) {
-                Log.e(TAG, message)
-            } else {
-                Log.e(TAG, message, error)
-            }
-        }
+        errorLogger = { message -> Log.e(TAG, message) }
     )
 
     private val stateLock = Any()
     private var state: StorageState = StorageState.Uninitialized
 
-    override suspend fun read(profileId: String): CredentialReadResult = withContext(Dispatchers.IO) {
-        val credentialKey = credentialKey(profileId)
+    override suspend fun read(address: AiCredentialAddress): CredentialReadResult = withContext(Dispatchers.IO) {
+        val credentialKey = credentialKey(address)
         synchronized(stateLock) {
             val preferences = readyPreferencesLocked()
                 ?: return@synchronized CredentialReadResult.StorageUnavailable
@@ -51,36 +46,42 @@ class EncryptedAiCredentialStorage internal constructor(
                     ?.takeIf { it.isNotBlank() }
                     ?.let(CredentialReadResult::Available)
                     ?: CredentialReadResult.Missing
-            } catch (error: Exception) {
-                failStorageLocked("Failed to read an AI credential", error)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                failStorageLocked("Failed to read an AI credential")
                 CredentialReadResult.StorageUnavailable
             }
         }
     }
 
-    override suspend fun write(profileId: String, apiKey: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun write(address: AiCredentialAddress, apiKey: String): Boolean = withContext(Dispatchers.IO) {
         val trimmedApiKey = apiKey.trim()
         if (trimmedApiKey.isEmpty()) return@withContext false
-        val credentialKey = credentialKey(profileId)
+        val credentialKey = credentialKey(address)
         synchronized(stateLock) {
             val preferences = readyPreferencesLocked() ?: return@synchronized false
             try {
                 preferences.putString(credentialKey, trimmedApiKey)
-            } catch (error: Exception) {
-                failStorageLocked("Failed to write an AI credential", error)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                failStorageLocked("Failed to write an AI credential")
                 false
             }
         }
     }
 
-    override suspend fun delete(profileId: String): Boolean = withContext(Dispatchers.IO) {
-        val credentialKey = credentialKey(profileId)
+    override suspend fun delete(address: AiCredentialAddress): Boolean = withContext(Dispatchers.IO) {
+        val credentialKey = credentialKey(address)
         synchronized(stateLock) {
             val preferences = readyPreferencesLocked() ?: return@synchronized false
             try {
                 preferences.remove(credentialKey)
-            } catch (error: Exception) {
-                failStorageLocked("Failed to delete an AI credential", error)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                failStorageLocked("Failed to delete an AI credential")
                 false
             }
         }
@@ -98,8 +99,10 @@ class EncryptedAiCredentialStorage internal constructor(
             val preferences = readyPreferencesLocked() ?: return@synchronized false
             try {
                 preferences.clear()
-            } catch (error: Exception) {
-                failStorageLocked("Failed to clear AI credentials", error)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                failStorageLocked("Failed to clear AI credentials")
                 false
             }
         }
@@ -116,30 +119,34 @@ class EncryptedAiCredentialStorage internal constructor(
             disposeLegacySlot(preferences)
             state = StorageState.Ready(preferences)
         }
-    } catch (error: Exception) {
-        failStorageLocked("Failed to initialize encrypted credential storage", error)
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Exception) {
+        failStorageLocked("Failed to initialize encrypted credential storage")
         null
     }
 
     private fun disposeLegacySlot(preferences: CredentialPreferences) {
         try {
             if (!preferences.remove(LEGACY_API_KEY)) {
-                errorLogger("Failed to remove the legacy AI credential slot", null)
+                errorLogger("Failed to remove the legacy AI credential slot")
             }
-        } catch (error: Exception) {
-            errorLogger("Failed to remove the legacy AI credential slot", error)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            errorLogger("Failed to remove the legacy AI credential slot")
         }
     }
 
-    private fun failStorageLocked(message: String, error: Exception) {
+    private fun failStorageLocked(message: String) {
         state = StorageState.Failed
-        errorLogger(message, error)
+        errorLogger(message)
     }
 
-    private fun credentialKey(profileId: String): String {
-        val normalizedProfileId = profileId.trim()
-        require(normalizedProfileId.isNotEmpty()) { "profileId must not be blank" }
-        return "$PROFILE_API_KEY_PREFIX$normalizedProfileId"
+    private fun credentialKey(address: AiCredentialAddress): String {
+        val id = address.profileId
+        return if (address.slot == AiCredentialSlot.LEGACY) "$PROFILE_API_KEY_PREFIX${id.trim()}"
+        else "$PROFILE_SLOT_PREFIX${id.length}:$id:${address.slot.token}"
     }
 
     private sealed interface StorageState {
@@ -168,17 +175,27 @@ class EncryptedAiCredentialStorage internal constructor(
         }
     }
 
-    private class SharedPreferencesCredentialPreferences(
+    internal class SharedPreferencesCredentialPreferences(
         private val preferences: SharedPreferences
     ) : CredentialPreferences {
         override fun getString(key: String): String? = preferences.getString(key, null)
 
         override fun putString(key: String, value: String): Boolean =
-            preferences.edit().putString(key, value).commit()
+            commit { putString(key, value) }
 
-        override fun remove(key: String): Boolean = preferences.edit().remove(key).commit()
+        override fun remove(key: String): Boolean = commit { remove(key) }
 
-        override fun clear(): Boolean = preferences.edit().clear().commit()
+        override fun clear(): Boolean = commit { clear() }
+
+        private fun commit(change: SharedPreferences.Editor.() -> Unit): Boolean {
+            // API 24 may return true for a no-op retry without flushing a prior failed write.
+            val marker = if (preferences.getString(COMMIT_MARKER, null) == "0") "1" else "0"
+            return preferences.edit().apply(change).putString(COMMIT_MARKER, marker).commit()
+        }
+
+        private companion object {
+            const val COMMIT_MARKER = "credential_commit_marker_v1"
+        }
     }
 
     private companion object {
@@ -186,5 +203,6 @@ class EncryptedAiCredentialStorage internal constructor(
         const val PREFS_FILE_NAME = "secure_api_keys"
         const val LEGACY_API_KEY = "ai_api_key"
         const val PROFILE_API_KEY_PREFIX = "api_key:"
+        const val PROFILE_SLOT_PREFIX = "api_key_slot_v1:"
     }
 }

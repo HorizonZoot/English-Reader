@@ -9,6 +9,7 @@ import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
+import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.local.ReadingMode
 import io.github.zoot.englishreader.data.local.FontSizeOption
 import io.github.zoot.englishreader.data.local.SettingsPreferences
@@ -26,6 +27,7 @@ import io.github.zoot.englishreader.data.repository.DictionaryRepository
 import io.github.zoot.englishreader.data.repository.OfflineLookupResult
 import io.github.zoot.englishreader.data.repository.VocabularyInsertResult
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
+import io.github.zoot.englishreader.data.repository.WholeTranslationTaskView
 import io.github.zoot.englishreader.model.AiExplanationTarget
 import io.github.zoot.englishreader.model.AiOperationHandle
 import io.github.zoot.englishreader.model.AiOperationOutcome
@@ -38,6 +40,9 @@ import io.github.zoot.englishreader.model.ReadingPositionTarget
 import io.github.zoot.englishreader.model.ReadingTextKind
 import io.github.zoot.englishreader.model.SelectedSentence
 import io.github.zoot.englishreader.model.TtsReadingSettings
+import io.github.zoot.englishreader.model.WholeTranslationProgress
+import io.github.zoot.englishreader.model.WholeTranslationSheetState
+import io.github.zoot.englishreader.model.WholeTranslationTaskStatus
 import io.github.zoot.englishreader.util.AudioPlayer
 import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.github.zoot.englishreader.util.NetworkChecker
@@ -372,6 +377,185 @@ class ReadingViewModelTest {
             viewModel.selectedSentence.value
         )
         assertNull(viewModel.selectedWord.value)
+    }
+
+    @Test
+    fun selectSentence_pendingLookupSuccess_cannotReplaceNewSentenceOrPlay() = runTest {
+        coEvery { articleRepository.getArticleById(80) } returns ArticleEntity(80, "t", "First. Second.")
+        viewModel.loadArticle(80)
+        runCurrent()
+        val started = CompletableDeferred<Unit>()
+        val lookup = CompletableDeferred<OfflineLookupResult?>()
+        coEvery { dictionaryRepository.lookupOffline("first") } coAnswers {
+            started.complete(Unit)
+            withContext(NonCancellable) { lookup.await() }
+        }
+        viewModel.beginWordSelection("first")
+        viewModel.lookupWord("first")
+        started.await()
+        assertTrue(viewModel.isLoadingDefinition.value)
+
+        viewModel.selectSentence(80, 1, SentenceRange(1, "Second.", 7, 14))
+        val sentence = viewModel.selectedSentence.value
+        assertNull(viewModel.wordDefinition.value)
+        assertFalse(viewModel.isLoadingDefinition.value)
+        lookup.complete(OfflineLookupResult(DictionaryEntry("first", null, "第一", null)))
+        runCurrent()
+
+        assertSame(sentence, viewModel.selectedSentence.value)
+        assertNull(viewModel.wordDefinition.value)
+        assertNull(viewModel.selectedWord.value)
+        assertFalse(viewModel.isLoadingDefinition.value)
+        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun selectSentence_pendingLookupFailure_doesNotEmitStaleError() = runTest {
+        coEvery { articleRepository.getArticleById(80) } returns ArticleEntity(80, "t", "First. Second.")
+        viewModel.loadArticle(80)
+        runCurrent()
+        val release = CompletableDeferred<Unit>()
+        coEvery { dictionaryRepository.lookupOffline("first") } coAnswers {
+            withContext(NonCancellable) { release.await() }
+            throw IOException("late failure")
+        }
+        viewModel.definitionError.test {
+            viewModel.lookupWord("first")
+            runCurrent()
+            assertTrue(viewModel.isLoadingDefinition.value)
+            viewModel.selectSentence(80, 1, SentenceRange(1, "Second.", 7, 14))
+            release.complete(Unit)
+            runCurrent()
+            expectNoEvents()
+            assertEquals("Second.", viewModel.selectedSentence.value?.rawText)
+            assertFalse(viewModel.isLoadingDefinition.value)
+        }
+    }
+
+    @Test
+    fun lookupWord_vocabularyRefreshFails_keepsPreviousWordsAndReportsError() = runTest {
+        coEvery { articleRepository.getArticleById(81) } returns ArticleEntity(81, "t", "First.")
+        coEvery { dictionaryRepository.lookupOffline("first") } returns
+            OfflineLookupResult(DictionaryEntry("first", null, "第一", null))
+        every { vocabularyRepository.getVocabularyByArticle(81) } returns
+            flowOf(listOf(VocabularyEntity(word = "saved", articleId = 81)))
+        viewModel.loadArticle(81)
+        viewModel.lookupWord("first")
+        runCurrent()
+        assertEquals(setOf("saved"), viewModel.vocabularyWords.value)
+        every { vocabularyRepository.getVocabularyByArticle(81) } returns flow {
+            throw IllegalStateException("database unavailable")
+        }
+
+        viewModel.readingErrors.test {
+            viewModel.lookupWord("first")
+            runCurrent()
+            assertEquals(ReadingError.LOAD_VOCABULARY, awaitItem())
+            assertEquals(setOf("saved"), viewModel.vocabularyWords.value)
+            assertEquals("first", viewModel.wordDefinition.value?.word)
+        }
+    }
+
+    @Test
+    fun lookupWord_oldArticleVocabularyFailure_doesNotReportOnNewArticle() = runTest {
+        coEvery { articleRepository.getArticleById(any()) } coAnswers { ArticleEntity(firstArg(), "t", "First.") }
+        coEvery { dictionaryRepository.lookupOffline("first") } returns
+            OfflineLookupResult(DictionaryEntry("first", null, "第一", null))
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        every { vocabularyRepository.getVocabularyByArticle(81) } returns flow {
+            started.complete(Unit)
+            release.await()
+            throw IllegalStateException("late database failure")
+        }
+        viewModel.loadArticle(81)
+        viewModel.lookupWord("first")
+        started.await()
+
+        viewModel.readingErrors.test {
+            viewModel.loadArticle(82)
+            runCurrent()
+            release.complete(Unit)
+            runCurrent()
+            assertEquals(82L, viewModel.article.value?.id)
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun lookupWord_cancelledVocabularyRefresh_emitsNoFailure() = runTest {
+        coEvery { articleRepository.getArticleById(81) } returns ArticleEntity(81, "t", "First.")
+        coEvery { dictionaryRepository.lookupOffline("first") } returns
+            OfflineLookupResult(DictionaryEntry("first", null, "第一", null))
+        every { vocabularyRepository.getVocabularyByArticle(81) } returns flow {
+            throw CancellationException("cancelled refresh")
+        }
+        viewModel.loadArticle(81)
+        viewModel.readingErrors.test {
+            viewModel.lookupWord("first")
+            runCurrent()
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun cancelWholeTranslation_databaseFailure_keepsTrackingAndReportsError() = runTest {
+        showRunningTranslation()
+        val tracking = viewModel.wholeTranslationState.value
+        coEvery { fixture.wholeTranslationRepository.cancel(8L) } throws IOException("database unavailable")
+        viewModel.readingErrors.test {
+            viewModel.cancelWholeTranslation()
+            runCurrent()
+            assertEquals(ReadingError.CANCEL_TRANSLATION, awaitItem())
+            assertSame(tracking, viewModel.wholeTranslationState.value)
+        }
+    }
+
+    @Test
+    fun cancelWholeTranslation_lateFailureAfterArticleChange_doesNotReport() = runTest {
+        showRunningTranslation()
+        val release = CompletableDeferred<Unit>()
+        coEvery { fixture.wholeTranslationRepository.cancel(8L) } coAnswers {
+            release.await()
+            throw IOException("late cancellation failure")
+        }
+        viewModel.readingErrors.test {
+            viewModel.cancelWholeTranslation()
+            runCurrent()
+            coEvery { articleRepository.getArticleById(84) } returns ArticleEntity(84, "t", "Other.")
+            viewModel.loadArticle(84)
+            runCurrent()
+            release.complete(Unit)
+            runCurrent()
+            expectNoEvents()
+            assertSame(WholeTranslationSheetState.Hidden, viewModel.wholeTranslationState.value)
+        }
+    }
+
+    @Test
+    fun cancelWholeTranslation_cancellation_emitsNoFailureOrSuccessState() = runTest {
+        showRunningTranslation()
+        val tracking = viewModel.wholeTranslationState.value
+        coEvery { fixture.wholeTranslationRepository.cancel(8L) } throws CancellationException("cancelled")
+        viewModel.readingErrors.test {
+            viewModel.cancelWholeTranslation()
+            runCurrent()
+            expectNoEvents()
+            assertSame(tracking, viewModel.wholeTranslationState.value)
+        }
+    }
+
+    private fun showRunningTranslation() {
+        coEvery { articleRepository.getArticleById(83) } returns ArticleEntity(83, "t", "First.")
+        val task = WholeTranslationTaskView(
+            taskId = 8L, scopeKey = "article:83", status = WholeTranslationTaskStatus.RUNNING,
+            failureReason = null, progress = WholeTranslationProgress(1, 0, 0, 0, 1)
+        )
+        coEvery { fixture.wholeTranslationRepository.findResumable(any()) } returns task
+        every { fixture.wholeTranslationRepository.observe(8L) } returns MutableStateFlow(task)
+        viewModel.loadArticle(83)
+        viewModel.openWholeTranslation()
+        assertTrue(viewModel.wholeTranslationState.value is WholeTranslationSheetState.Tracking)
     }
 
     @Test
@@ -1028,6 +1212,7 @@ class ReadingViewModelTest {
         // 有网 + 离线命中：自动播有道真人音，恰好一次
         coVerify(exactly = 1) {
             audioPlayer.play(
+                token = any(),
                 url = "https://dict.youdao.com/dictvoice?audio=success&type=2",
                 onComplete = any(),
                 onError = any()
@@ -1044,7 +1229,7 @@ class ReadingViewModelTest {
 
         viewModel.lookupWord("success")
 
-        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
+        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any(), any()) }
         verify(exactly = 0) { ttsPlayer.speakWord(any(), any(), any(), any()) }
     }
 
@@ -1067,7 +1252,7 @@ class ReadingViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 1) {
-            audioPlayer.play(url = local.absolutePath, onComplete = any(), onError = any())
+            audioPlayer.play(any(), url = local.absolutePath, onComplete = any(), onError = any())
         }
         verify(exactly = 0) { ttsPlayer.speakWord(any(), any(), any(), any()) }
     }
@@ -1087,7 +1272,7 @@ class ReadingViewModelTest {
         advanceUntilIdle()
 
         verify(exactly = 1) { ttsPlayer.speakWord(eq("lives"), any(), any(), any()) }
-        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
+        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any(), any()) }
         coVerify(exactly = 0) { pronunciationAudioCache.download(any(), any()) }
     }
 
@@ -1105,10 +1290,10 @@ class ReadingViewModelTest {
         viewModel.playWordAudio("lives", "https://dict.youdao.com/dictvoice?audio=lives&type=2")
 
         coVerify(exactly = 1) {
-            audioPlayer.play(url = local.absolutePath, onComplete = any(), onError = any())
+            audioPlayer.play(any(), url = local.absolutePath, onComplete = any(), onError = any())
         }
         coVerify(exactly = 0) {
-            audioPlayer.play(url = match<String> { it.startsWith("https://") }, onComplete = any(), onError = any())
+            audioPlayer.play(any(), url = match<String> { it.startsWith("https://") }, onComplete = any(), onError = any())
         }
     }
 
@@ -1137,7 +1322,7 @@ class ReadingViewModelTest {
         val playStarted = CompletableDeferred<Unit>()
         val releasePlay = CompletableDeferred<Unit>()
         coEvery { pronunciationAudioCache.get("lives") } returns local
-        coEvery { audioPlayer.play(any(), any(), any()) } coAnswers {
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers {
             playStarted.complete(Unit)
             releasePlay.await()
         }
@@ -1157,7 +1342,7 @@ class ReadingViewModelTest {
 
         // 确认走的确实是命中路径 —— 否则上面的断言可能因为根本没播而空过。
         coVerify(exactly = 1) {
-            audioPlayer.play(url = local.absolutePath, onComplete = any(), onError = any())
+            audioPlayer.play(any(), url = local.absolutePath, onComplete = any(), onError = any())
         }
     }
 
@@ -1175,7 +1360,7 @@ class ReadingViewModelTest {
     fun playWordAudio_clearsLoadingOncePlaybackStarts() = runTest {
         val releasePlay = CompletableDeferred<Unit>()
         coEvery { pronunciationAudioCache.get("success") } returns null
-        coEvery { audioPlayer.play(any(), any(), any()) } coAnswers { releasePlay.await() }
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers { releasePlay.await() }
 
         try {
             viewModel.playWordAudio("success", "https://dict.youdao.com/dictvoice?audio=success&type=2")
@@ -1224,7 +1409,7 @@ class ReadingViewModelTest {
         }
         coEvery { pronunciationAudioCache.get("second") } returns null
         // play 挂住：B 会停在「转圈已置起」的状态，中间态因此可观察。
-        coEvery { audioPlayer.play(any(), any(), any()) } coAnswers {
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers {
             playStarted.complete(Unit)
             releasePlay.await()
         }
@@ -1250,7 +1435,7 @@ class ReadingViewModelTest {
 
         // 只有 B 到达 player —— A 播放会让用户听到自己已经放弃的那个词。
         val playedUrls = mutableListOf<String>()
-        coVerify(exactly = 1) { audioPlayer.play(capture(playedUrls), any(), any()) }
+        coVerify(exactly = 1) { audioPlayer.play(any(), capture(playedUrls), any(), any()) }
         assertTrue(
             "only the newest request may reach the player; played=$playedUrls",
             playedUrls.single().contains("second")
@@ -1283,11 +1468,11 @@ class ReadingViewModelTest {
         val releaseSecondPlay = CompletableDeferred<Unit>()
 
         coEvery { pronunciationAudioCache.get(any()) } returns null
-        coEvery { audioPlayer.play(any(), any(), any()) } coAnswers {
-            val url = firstArg<String>()
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers {
+            val url = secondArg<String>()
             if (url.contains("first")) {
                 // A：把 onError 交出来后立刻返回，模拟「播放已启动、失败稍后才回来」。
-                staleOnError.complete(thirdArg())
+                staleOnError.complete(arg(3))
             } else {
                 // B：停在准备中，转圈保持置起，这样 A 的晚到回调有东西可破坏。
                 secondPlayStarted.complete(Unit)
@@ -1325,10 +1510,10 @@ class ReadingViewModelTest {
         val secondPreparing = CompletableDeferred<Unit>()
         val finishSecondPreparation = CompletableDeferred<Unit>()
 
-        coEvery { audioPlayer.play(firstUrl, any(), any()) } coAnswers {
-            staleOnComplete.complete(secondArg())
+        coEvery { audioPlayer.play(any(), firstUrl, any(), any()) } coAnswers {
+            staleOnComplete.complete(thirdArg())
         }
-        coEvery { audioPlayer.play(secondUrl, any(), any()) } coAnswers {
+        coEvery { audioPlayer.play(any(), secondUrl, any(), any()) } coAnswers {
             secondPreparing.complete(Unit)
             finishSecondPreparation.await()
         }
@@ -1363,8 +1548,8 @@ class ReadingViewModelTest {
             }
         }
 
-        coVerify(exactly = 1) { audioPlayer.play(firstUrl, any(), any()) }
-        coVerify(exactly = 1) { audioPlayer.play(secondUrl, any(), any()) }
+        coVerify(exactly = 1) { audioPlayer.play(any(), firstUrl, any(), any()) }
+        coVerify(exactly = 1) { audioPlayer.play(any(), secondUrl, any(), any()) }
     }
 
     /**
@@ -1394,7 +1579,7 @@ class ReadingViewModelTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) {
-            audioPlayer.play(any(), any(), any())
+            audioPlayer.play(any(), any(), any(), any())
         }
         assertFalse("an invalidated request must not leave the spinner on", viewModel.isLoadingAudio.value)
     }
@@ -1422,7 +1607,7 @@ class ReadingViewModelTest {
         gate.complete(Unit)
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
+        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any(), any()) }
         assertFalse("spinner must not survive a dismiss", viewModel.isLoadingAudio.value)
     }
 
@@ -1440,7 +1625,7 @@ class ReadingViewModelTest {
         viewModel.playWordAudio("success", url)
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { audioPlayer.play(url = url, onComplete = any(), onError = any()) }
+        coVerify(exactly = 1) { audioPlayer.play(any(), url = url, onComplete = any(), onError = any()) }
         coVerify(exactly = 1) { pronunciationAudioCache.download("success", url) }
     }
 
@@ -1456,8 +1641,8 @@ class ReadingViewModelTest {
     fun playWordAudio_localFileFailsToPlay_invalidatesThatCacheEntry() = runTest {
         val local = java.io.File("cache/pron.mp3")
         coEvery { pronunciationAudioCache.get("lives") } returns local
-        coEvery { audioPlayer.play(any(), any(), any()) } answers {
-            thirdArg<(Exception) -> Unit>().invoke(java.io.IOException("unplayable"))
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } answers {
+            arg<(Exception) -> Unit>(3).invoke(java.io.IOException("unplayable"))
         }
 
         viewModel.playWordAudio("lives", "https://dict.youdao.com/dictvoice?audio=lives&type=2")
@@ -1475,8 +1660,8 @@ class ReadingViewModelTest {
     @Test
     fun playWordAudio_remoteFailure_doesNotInvalidateCache() = runTest {
         coEvery { pronunciationAudioCache.get("lives") } returns null
-        coEvery { audioPlayer.play(any(), any(), any()) } answers {
-            thirdArg<(Exception) -> Unit>().invoke(java.io.IOException("rate limited"))
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } answers {
+            arg<(Exception) -> Unit>(3).invoke(java.io.IOException("rate limited"))
         }
 
         viewModel.playWordAudio("lives", "https://dict.youdao.com/dictvoice?audio=lives&type=2")
@@ -1500,7 +1685,7 @@ class ReadingViewModelTest {
         viewModel.playWordAudio("success", url)
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { audioPlayer.play(url = url, onComplete = any(), onError = any()) }
+        coVerify(exactly = 1) { audioPlayer.play(any(), url = url, onComplete = any(), onError = any()) }
     }
 
     /**
@@ -1512,8 +1697,8 @@ class ReadingViewModelTest {
     @Test
     fun playWordAudio_playbackError_clearsLoadingAndFallsBackToTts() = runTest {
         coEvery { pronunciationAudioCache.get("lives") } returns null
-        coEvery { audioPlayer.play(any(), any(), any()) } answers {
-            thirdArg<(Exception) -> Unit>().invoke(java.io.IOException("boom"))
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } answers {
+            arg<(Exception) -> Unit>(3).invoke(java.io.IOException("boom"))
         }
 
         viewModel.playWordAudio("lives", "https://dict.youdao.com/dictvoice?audio=lives&type=2", silent = false)
@@ -1527,10 +1712,12 @@ class ReadingViewModelTest {
     fun clearWordDefinition_stopsTtsNotOnlyMediaPlayer() = runTest {
         // 关闭 BottomSheet 时必须同时停 TTS：混合读音引入 TtsPlayer 后，若只停 audioPlayer，
         // 离线手动播放的机器音会在弹窗关闭后继续朗读。
+        viewModel.playWordAudio("lives", audioUrl = null)
+        clearMocks(ttsPlayer, audioPlayer, answers = false)
         viewModel.clearWordDefinition()
 
         verify(exactly = 1) { ttsPlayer.stop() }
-        verify(atLeast = 1) { audioPlayer.stop() }
+        verify(exactly = 1) { audioPlayer.stop(any()) }
     }
 
     @Test
@@ -1555,6 +1742,7 @@ class ReadingViewModelTest {
         // 在线命中且有音频时同样自动播放（协议相对 URL 已补全为 https）
         coVerify(exactly = 1) {
             audioPlayer.play(
+                token = any(),
                 url = "https://audio.mp3",
                 onComplete = any(),
                 onError = any()
@@ -2013,6 +2201,7 @@ class ReadingViewModelTest {
         viewModel.openReadingSession(7L)
 
         val anchor = requireNotNull(viewModel.pendingPositionTarget.value).position.anchor
+        assertEquals(ReadingEntry.RESUME, viewModel.pendingPositionTarget.value?.entry)
         assertEquals("noticing 在第三段", 2, anchor.paragraphIndex)
         assertEquals(ReadingTextKind.ORIGINAL, anchor.textKind)
         assertEquals(

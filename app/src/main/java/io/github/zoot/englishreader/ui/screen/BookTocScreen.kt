@@ -1,6 +1,5 @@
 package io.github.zoot.englishreader.ui.screen
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -69,7 +68,7 @@ fun BookTocScreen(
             )
         },
         floatingActionButton = {
-            if (state.chapters.isNotEmpty()) {
+            if (!state.isLoading && state.chapters.isNotEmpty()) {
                 ExtendedFloatingActionButton(
                     onClick = { viewModel.resumeTargetArticleId()?.let(onChapterClick) },
                     icon = {
@@ -83,65 +82,79 @@ fun BookTocScreen(
             }
         }
     ) { padding ->
-        when {
-            state.isLoading -> Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator()
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            if (state.loadFailed) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringResource(R.string.book_toc_load_failed),
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = viewModel::retryLoading) {
+                        Text(stringResource(R.string.action_retry))
+                    }
+                }
             }
+            when {
+                state.isLoading && state.chapters.isEmpty() -> Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
 
-            state.chapters.isEmpty() -> Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(stringResource(R.string.book_toc_empty))
-            }
+                state.chapters.isEmpty() -> Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (!state.loadFailed) Text(stringResource(R.string.book_toc_empty))
+                }
 
-            else -> LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                items(state.chapters, key = { it.id }) { chapter ->
-                    val isLastRead = chapter.articleId == state.lastReadArticleId
-                    ListItem(
-                        headlineContent = {
-                            Text(
-                                // navigationTitle 为 null 时用序号兜底：无 NAV/NCX 的书
-                                // 所有章节都没有标题，此时「第 N 章」比空白有用。
-                                text = chapter.navigationTitle
-                                    ?: stringResource(
+                else -> LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    items(state.chapters, key = { it.id }) { chapter ->
+                        val isLastRead = chapter.articleId == state.lastReadArticleId
+                        ListItem(
+                            headlineContent = {
+                                Text(
+                                    // navigationTitle 为 null 时用序号兜底：无 NAV/NCX 的书
+                                    // 所有章节都没有标题，此时「第 N 章」比空白有用。
+                                    text = chapter.navigationTitle
+                                        ?: stringResource(
+                                            R.string.chapter_position,
+                                            chapter.chapterIndex + 1,
+                                            state.chapters.size
+                                        ),
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                            },
+                            supportingContent = {
+                                Text(
+                                    text = stringResource(
                                         R.string.chapter_position,
                                         chapter.chapterIndex + 1,
                                         state.chapters.size
                                     ),
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                        },
-                        supportingContent = {
-                            Text(
-                                text = stringResource(
-                                    R.string.chapter_position,
-                                    chapter.chapterIndex + 1,
-                                    state.chapters.size
-                                ),
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            // 高亮上次读到的章节。背景色而非选中状态：ListItem 的
-                            // selected 语义会让 TalkBack 播报「已选中」，而这里不是选择。
-                            .background(
-                                if (isLastRead) {
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            },
+                            colors = ListItemDefaults.colors(
+                                containerColor = if (isLastRead) {
                                     MaterialTheme.colorScheme.secondaryContainer
                                 } else {
                                     MaterialTheme.colorScheme.surface
                                 }
-                            )
-                            .clickable { onChapterClick(chapter.articleId) }
-                    )
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onChapterClick(chapter.articleId) }
+                        )
+                    }
                 }
             }
         }

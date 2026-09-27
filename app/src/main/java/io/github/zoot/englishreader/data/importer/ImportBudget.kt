@@ -42,10 +42,9 @@ object ImportBudget {
     /**
      * 段落数上限（1200）。
      *
-     * ⚠️ 待真机基准测试校准。每段在阅读页都要独立跑 SentenceSplitter、
-     * extractAccessibilityWords、构造 accessibilityActions 与 AnnotatedString、
-     * 并由 BasicText 测量取 TextLayoutResult；ParagraphAligner 还会为 sentenceOffset
-     * 再分句一遍，即每段至少被分句两次。段落数是比字符数更贴近渲染成本的指标。
+     * ⚠️ 待真机基准测试校准。ParagraphAligner 每段只分句一次，InteractiveText 复用结果；
+     * 可见段落仍需提取无障碍单词、构造 accessibilityActions 与 AnnotatedString，
+     * 并由 BasicText 测量取 TextLayoutResult。段落数是独立于字符数的渲染成本指标。
      */
     const val MAX_IMPORT_PARAGRAPHS: Int = 1200
 
@@ -111,13 +110,9 @@ object ImportBudget {
     // ---- 整本书上限 ----
     // 与上面的单页/单档上限分开：一本书是「多个可独立阅读的章节」，
     // 每章各自受 MAX_CHAPTER_CHARS 约束，全书另有独立的总量上限。
-    // 把两者混成一个数字必然出错——实测一本公版长篇的正文约 74 万字符，
-    // 是 MAX_IMPORT_CHARS 的 18 倍以上，但其中任何**单章**都远低于该值。
-    //
-    // ⚠️ 「单章远低于全书上限」这句话只对**切分够细**的书成立。32 本语料实测：真实章节有
-    // 8.7% 越过 40,000，而一本书要求每章都过，所以只有 34% 的书能导入。Standard Ebooks
-    // 一章一文件仍有 5/10 被章节闸门拒——那些超限资源就是单个真实章节，没有东西可切。
-    // 详见 ADR-013 与 `CorpusImportSurveyTest`。
+    // 2026-08-30 的固定32本语料中，按资源直接当章时仅11本（34%）通过全部预算。
+    // ChapterSplitter 后来在资源内按段落/句子切分，2026-09-15生产解析调查记录为31/32（97%）；
+    // 这些是历史固定语料结果，不是真机性能或任意EPUB的覆盖率承诺。详见ADR-013。
 
     /**
      * 单章字符上限（40000）。
@@ -135,10 +130,9 @@ object ImportBudget {
      * - 本项管的是**出版方切好的章节**。用户对章节边界无从干预，超限时唯一可行动作是
      *   换一个版本的书。
      *
-     * 写成别名时，这个差异被抹掉了：32 本公版语料实测只有 11 本（34%）能导入，而抬高本项
-     * 需要连带抬高单篇上限，后者被 `AGENTS.md` 的不变量锁住（真机长文章基准未完成前不得
-     * 超过 40,000）。于是「章节覆盖率」被一个与它无关的约束挡着。解耦后两者可以分别校准，
-     * 单篇路径（已冻结）完全不受影响。
+     * 写成别名会让提高章节预算连带改变单篇预算，后者被 `AGENTS.md` 的不变量锁住：
+     * 真机长文章基准未完成前不得超过 40,000。ChapterSplitter 已通过资源内切分改善导入，
+     * 无需提高任何上限。独立常量保留未来分别校准的边界。
      *
      * 解耦本身不改变任何行为——两者当前都是 40,000。见 ADR-013。
      */
@@ -147,8 +141,7 @@ object ImportBudget {
     /**
      * 单本书章节数上限。
      *
-     * 与 [MAX_SPINE_ITEMS] 取同值：章节由 linear reading-order item 派生，
-     * 两个数字若不一致，先触发的那个会让另一个永远不可达，等于埋一个死限制。
+     * 当前与 [MAX_SPINE_ITEMS] 取同值；切分后一个资源可产生多章，因此这是独立的输出数量闸门。
      */
     const val MAX_BOOK_CHAPTERS: Int = MAX_SPINE_ITEMS
 

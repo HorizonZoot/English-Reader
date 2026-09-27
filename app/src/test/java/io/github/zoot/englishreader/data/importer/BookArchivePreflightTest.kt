@@ -40,6 +40,63 @@ class BookArchivePreflightTest {
     }
 
     @Test
+    fun inspect_bufferGrowthBoundaries_preservesExactByteCounts() {
+        val entries = baseEntries().toMutableMap()
+        listOf(0, 1, 8_191, 8_192, 8_193, 16_384).forEachIndexed { index, size ->
+            entries["OEBPS/padding$index.xml"] = " ".repeat(size)
+        }
+        val file = temporaryFolder.newFile("growth.epub").also { it.writeBytes(EpubFixtures.zip(entries)) }
+
+        val report = BookArchivePreflight.inspect(file)
+
+        assertEquals(entries.size, report.inspectedTextEntries)
+        assertEquals(entries.values.sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }, report.inflatedTextBytes)
+    }
+
+    @Test
+    fun inspect_exactEntryLimitAndNextByte_preservesBudgetBoundary() {
+        for (extra in 0..1) {
+            val entries = baseEntries() + ("OEBPS/padding.xml" to " ".repeat(ImportBudget.MAX_XML_ENTRY_BYTES + extra))
+            val file = temporaryFolder.newFile("entry-limit-$extra.epub").also { it.writeBytes(EpubFixtures.zip(entries)) }
+            if (extra == 0) {
+                assertEquals(entries.values.sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() },
+                    BookArchivePreflight.inspect(file).inflatedTextBytes)
+            } else {
+                assertFailure(ImportFailure.BookArchiveTooLarge(ImportBudget.MAX_XML_ENTRY_BYTES)) {
+                    BookArchivePreflight.inspect(file)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun inspect_manyTinyTextResources_reportsAllocationAndExactBytes() {
+        val entries = baseEntries().toMutableMap()
+        repeat(128) { entries["OEBPS/tiny$it.xml"] = "<x/>" }
+        val file = temporaryFolder.newFile("tiny-resources.epub").also { it.writeBytes(EpubFixtures.zip(entries)) }
+        BookArchivePreflight.inspect(file)
+        // These host-JVM diagnostics are absent from Android's compile-time API surface.
+        val factory = Class.forName("java.lang.management.ManagementFactory")
+        val bean = factory.getMethod("getThreadMXBean").invoke(null)
+        val allocationType = Class.forName("com.sun.management.ThreadMXBean")
+        val threadId = Thread.currentThread().id
+        fun allocatedBytes(): Long = if (allocationType.isInstance(bean) &&
+            allocationType.getMethod("isThreadAllocatedMemoryEnabled").invoke(bean) == true
+        ) {
+            allocationType.getMethod("getThreadAllocatedBytes", Long::class.javaPrimitiveType)
+                .invoke(bean, threadId) as Long
+        } else -1L
+        val before = allocatedBytes()
+
+        val report = BookArchivePreflight.inspect(file)
+
+        val allocated = if (before >= 0) allocatedBytes() - before else -1
+        assertEquals(entries.size, report.inspectedTextEntries)
+        assertEquals(entries.values.sumOf { it.toByteArray(Charsets.UTF_8).size.toLong() }, report.inflatedTextBytes)
+        println("EPUB-PREFLIGHT entries=${report.inspectedTextEntries} inflatedBytes=${report.inflatedTextBytes} allocatedBytes=$allocated")
+    }
+
+    @Test
     fun inspect_entryCountAboveLimit_rejectsAsTooManyEntriesNotCorrupt() {
         val file = epub(chapters = 1, extraEntries = ImportBudget.MAX_ZIP_ENTRIES + 10)
 
@@ -153,6 +210,14 @@ class BookArchivePreflightTest {
     }
 
     // ---- fixtures ----
+
+    private fun baseEntries(): Map<String, String> = mapOf(
+        "META-INF/container.xml" to EpubFixtures.containerXml("OEBPS/content.opf"),
+        "OEBPS/content.opf" to EpubFixtures.opf("Budget", listOf(
+            """<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>"""
+        ), listOf("""<itemref idref="chapter"/>""")),
+        "OEBPS/chapter.xhtml" to EpubFixtures.xhtml("Body.")
+    )
 
     private fun assertFailure(expected: ImportFailure, block: () -> Unit) {
         try {

@@ -68,6 +68,27 @@ class ReadingWordSelectionAndroidTest {
     }
 
     @Test
+    fun longPress_trimmedAndCompoundWords_preservesExactRangesInBothReadingModes() {
+        val paragraph = "'Alpha' --can't-- well-known. Alpha again."
+        val mode = mutableStateOf(ReadingMode.SCROLL)
+        renderReading(listOf(paragraph), showSheetOnRelease = false, readingMode = mode)
+        ReadingMode.entries.forEach { readingMode ->
+            composeRule.runOnIdle { mode.value = readingMode }
+            composeRule.waitForIdle()
+            listOf("Alpha", "can't", "well-known").forEach { word ->
+                val start = paragraph.indexOf(word)
+                val node = composeRule.onNodeWithText(paragraph)
+                node.longClickGlyph(start + 1)
+                val text = node.textLayoutResult().layoutInput.text
+                val ranges = text.spanStyles.filter { it.item.background != Color.Unspecified }
+                    .map { it.start to it.end }
+                assertEquals("$readingMode / $word", listOf(start to start + word.length), ranges)
+                assertEquals(word, text.text.substring(ranges.single().first, ranges.single().second))
+            }
+        }
+    }
+
+    @Test
     fun partiallyExpandedWordSheet_visibleWord_keepsReadingPosition() {
         val first = "Alpha is already above the word details."
         renderReading(listOf(first, ("More reading continues below. ").repeat(30).trim()))
@@ -237,8 +258,10 @@ class ReadingWordSelectionAndroidTest {
         return glyph.translate(fetchSemanticsNode().positionOnScreen())
     }
 
-    private fun SemanticsNodeInteraction.longClickFirstGlyph() {
-        val glyph = textLayoutResult().getBoundingBox(0)
+    private fun SemanticsNodeInteraction.longClickFirstGlyph() = longClickGlyph(0)
+
+    private fun SemanticsNodeInteraction.longClickGlyph(offset: Int) {
+        val glyph = textLayoutResult().getBoundingBox(offset)
         val node = fetchSemanticsNode()
         val glyphInRoot = node.positionInRoot + glyph.center
         assertTrue("The long press must hit a visible glyph", node.boundsInRoot.contains(glyphInRoot))

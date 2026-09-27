@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.click
@@ -184,6 +185,62 @@ class InteractiveTextAndroidTest {
             assertTrue(requireNotNull(heldTarget).anchorBounds.height > 0f)
             assertTrue(requireNotNull(heldTarget).sentenceBounds.contains(heldTarget!!.anchorBounds.center))
         }
+    }
+
+    @Test
+    fun longPress_quotedWordFragment_reportsAndHighlightsOnlyTheTrimmedSourceRange() {
+        val original = "Prefix. 'Alpha' and Alpha."
+        val sourceStart = original.indexOf("'Alpha'")
+        val fragment = original.substring(sourceStart)
+        val selected = mutableStateOf<InteractiveTextLongPressTarget?>(null)
+        var released: InteractiveTextLongPressTarget? = null
+        composeRule.setContent {
+            InteractiveText(
+                text = fragment,
+                fontSize = 16.sp,
+                modifier = Modifier.width(300.dp),
+                precomputedSentences = listOf(SentenceRange(0, original, 0, original.length)),
+                sourceStartOffset = sourceStart,
+                selectedWord = selected.value?.word,
+                selectedWordStartOffset = selected.value?.wordStartOffset,
+                selectedWordEndOffset = selected.value?.wordEndOffset,
+                onSentenceClick = { _, _ -> },
+                onWordLongPress = {},
+                onWordPressStart = { selected.value = it },
+                onWordPressRelease = { released = it }
+            )
+        }
+        val node = composeRule.onNodeWithContentDescription("Interactive reading text")
+        val glyph = node.textLayoutResult().getBoundingBox(2).center
+        node.performTouchInput { longClick(glyph) }
+        composeRule.runOnIdle {
+            assertEquals("Alpha", released?.word)
+            assertEquals(sourceStart + 1, released?.wordStartOffset)
+            assertEquals(sourceStart + 6, released?.wordEndOffset)
+            assertEquals(selected.value, released)
+        }
+        val highlighted = node.textLayoutResult().layoutInput.text.spanStyles
+            .filter { it.item.background != Color.Unspecified }.map { it.start to it.end }
+        assertEquals(listOf(1 to 6), highlighted)
+    }
+
+    @Test
+    fun longPress_edgeApostrophe_doesNotSelectAdjacentWord() {
+        val targets = mutableListOf<InteractiveTextLongPressTarget>()
+        composeRule.setContent {
+            InteractiveText(
+                text = "'Alpha'",
+                fontSize = 16.sp,
+                modifier = Modifier.width(300.dp),
+                onSentenceClick = { _, _ -> },
+                onWordLongPress = {},
+                onWordPressStart = { targets += it }
+            )
+        }
+        val node = composeRule.onNodeWithContentDescription("Interactive reading text")
+        val glyph = node.textLayoutResult().getBoundingBox(0).center
+        node.performTouchInput { longClick(glyph) }
+        composeRule.runOnIdle { assertTrue(targets.isEmpty()) }
     }
 
     @Test

@@ -9,6 +9,7 @@ import io.github.zoot.englishreader.model.ReadingTtsPhase
 import io.github.zoot.englishreader.model.TtsReadingSettings
 import io.github.zoot.englishreader.model.TtsSystemAction
 import io.github.zoot.englishreader.util.MainDispatcherRule
+import io.github.zoot.englishreader.util.AudioPlayer
 import io.github.zoot.englishreader.util.ParagraphAligner.AlignedParagraph
 import io.github.zoot.englishreader.util.TtsCapability
 import io.github.zoot.englishreader.util.TtsFailureReason
@@ -435,7 +436,7 @@ class ReadingTtsViewModelTest {
     fun continuousReading_oldWordAudioFailure_cannotStartWordFallback() = runTest {
         val vm = loadedViewModel()
         lateinit var oldError: (Exception) -> Unit
-        coEvery { audioPlayer.play(any(), any(), any()) } coAnswers { oldError = thirdArg() }
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers { oldError = arg(3) }
         vm.playWordAudio("old", "https://example.com/word.mp3")
         runCurrent()
 
@@ -556,5 +557,108 @@ class ReadingTtsViewModelTest {
         runCurrent()
 
         verify(exactly = 1) { player.speakWord("lives", eq("engine/neural"), any(), any()) }
+    }
+
+    @Test
+    fun wordPlayback_offlineTtsThenSameWordMedia_stopsAcceptedSpeechWhileReadingStateIsIdle() = runTest {
+        val vm = loadedViewModel()
+        val events = mutableListOf<String>()
+        var pendingSynthesis = false
+        every { fixture.networkChecker.isOnline() } returns false
+        every { player.speakWord(any(), any(), any(), any()) } answers {
+            pendingSynthesis = true
+            events += "word-tts"
+        }
+        every { player.stopBeforeReading() } answers {
+            pendingSynthesis = false
+            events += "stop-tts"
+        }
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers {
+            assertFalse("Old synthesis must be stopped before MediaPlayer receives the word", pendingSynthesis)
+            events += "media"
+        }
+        vm.playWordAudio("same", "same.mp3")
+        runCurrent()
+        assertTrue(pendingSynthesis)
+        assertEquals(ReadingTtsPhase.IDLE, vm.readingTtsState.value.phase)
+        events.clear()
+        every { fixture.networkChecker.isOnline() } returns true
+
+        vm.playWordAudio("same", "same.mp3")
+        runCurrent()
+
+        assertEquals(listOf("stop-tts", "media"), events)
+        assertFalse(pendingSynthesis)
+    }
+
+    @Test
+    fun wordPlayback_mediaThenMissingUrl_stopsMediaBeforeSubmittingTts() = runTest {
+        val vm = loadedViewModel()
+        var activeMedia: AudioPlayer.RequestToken? = null
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers { activeMedia = firstArg() }
+        every { audioPlayer.stop(any()) } answers {
+            if (activeMedia === firstArg<AudioPlayer.RequestToken>()) activeMedia = null
+        }
+        every { player.speakWord(any(), any(), any(), any()) } answers { assertNull(activeMedia) }
+        vm.playWordAudio("old", "old.mp3")
+        runCurrent()
+        assertTrue(activeMedia != null)
+
+        vm.playWordAudio("next", audioUrl = null)
+        runCurrent()
+
+        assertNull(activeMedia)
+        verify(exactly = 1) { player.speakWord("next", any(), any(), any()) }
+    }
+
+    @Test
+    fun wordPlayback_silentMissingUrl_stillStopsPreviousWordTts() = runTest {
+        val vm = loadedViewModel()
+        vm.playWordAudio("old", audioUrl = null)
+        runCurrent()
+        verify(exactly = 1) { player.speakWord("old", any(), any(), any()) }
+        clearMocks(player, answers = false)
+
+        vm.playWordAudio("next", audioUrl = null, silent = true)
+        runCurrent()
+
+        verify(exactly = 1) { player.stopBeforeReading() }
+        verify(exactly = 0) { player.speakWord(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun wordPlayback_oldFallbackSuspendedAfterError_doesNotInterruptPendingMedia() = runTest {
+        val vm = loadedViewModel()
+        val oldFallbackStarted = CompletableDeferred<Job>()
+        val releaseOld = CompletableDeferred<Boolean>()
+        val nextPreparing = CompletableDeferred<Unit>()
+        val releaseNext = CompletableDeferred<Unit>()
+        lateinit var oldError: (Exception) -> Unit
+        coEvery { audioPlayer.play(any(), "old.mp3", any(), any()) } coAnswers { oldError = arg(3) }
+        coEvery { audioPlayer.play(any(), "next.mp3", any(), any()) } coAnswers {
+            nextPreparing.complete(Unit)
+            releaseNext.await()
+        }
+        every { preferences.allowNetworkTts } returns flow {
+            oldFallbackStarted.complete(currentCoroutineContext().job)
+            emit(releaseOld.await())
+        }
+        try {
+            vm.playWordAudio("old", "old.mp3")
+            runCurrent()
+            oldError(IllegalStateException())
+            val oldFallback = oldFallbackStarted.await()
+            vm.playWordAudio("next", "next.mp3")
+            nextPreparing.await()
+            assertTrue(oldFallback.isCancelled)
+            releaseOld.complete(false)
+            runCurrent()
+
+            verify(exactly = 0) { player.speakWord("old", any(), any(), any()) }
+            assertTrue(vm.isLoadingAudio.value)
+        } finally {
+            releaseOld.complete(false)
+            releaseNext.complete(Unit)
+        }
     }
 }

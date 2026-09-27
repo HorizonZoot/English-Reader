@@ -43,7 +43,7 @@ import org.junit.Test
  * [ReadingViewModel] 的全文翻译 intent：范围快照、状态推导、代际守卫与 observer 脱离。
  *
  * 不重复 [io.github.zoot.englishreader.data.repository.WholeTranslationRepositoryTest] 的
- * 协调语义——那里已用真实 Room 证明了不重跑、三分法与取消。这里只断言 ViewModel 把用户意图
+ * 协调语义——那里在 Robolectric 中用 Room 与受控协程验证不重跑、三分法与取消。这里只断言 ViewModel 把用户意图
  * 正确翻译成 repository 调用，以及 sheet 状态对用户可见的部分。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -513,6 +513,30 @@ class ReadingWholeTranslationViewModelTest {
     // ---- 跟踪态推导 ----
 
     @Test
+    fun tracking_interruptedTask_onlyExplicitResumeDispatchesToRepository() = runTest {
+        stubStandalone(ARTICLE_ID, "One.")
+        val paused = view(taskId = 5L, status = WholeTranslationTaskStatus.PAUSED, translated = 1, total = 3)
+        coEvery { fixture.wholeTranslationRepository.findResumable(any()) } returns paused
+        every { fixture.wholeTranslationRepository.observe(5L) } returns MutableStateFlow(paused)
+        viewModel.loadArticle(ARTICLE_ID)
+        advanceUntilIdle()
+        viewModel.openWholeTranslation()
+        advanceUntilIdle()
+
+        val state = viewModel.wholeTranslationState.value as WholeTranslationSheetState.Tracking
+        assertEquals(WholeTranslationPrimaryAction.RESUME, state.primaryAction)
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.resume(any()) }
+
+        viewModel.resumeWholeTranslation()
+        advanceUntilIdle()
+
+        coVerify(exactly = 1) { fixture.wholeTranslationRepository.resume(5L) }
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.retryFailed(any()) }
+        coVerify(exactly = 0) { fixture.wholeTranslationRepository.cancel(any()) }
+        assertEquals(state, viewModel.wholeTranslationState.value)
+    }
+
+    @Test
     fun tracking_pausedWithFailures_offersRetryFailed() = runTest {
         stubStandalone(ARTICLE_ID, "One.")
         val paused = view(taskId = 5L, status = WholeTranslationTaskStatus.PAUSED, translated = 2, total = 3, failed = 1)
@@ -668,7 +692,8 @@ class ReadingWholeTranslationViewModelTest {
                 translated = translated,
                 translating = 0,
                 failed = failed,
-                untranslated = total - translated - failed
+                untranslated = total - translated - failed,
+                retryableFailures = failed
             )
         )
 

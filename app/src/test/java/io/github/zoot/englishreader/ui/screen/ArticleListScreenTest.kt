@@ -4,17 +4,23 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -25,20 +31,27 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.zoot.englishreader.R
-import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.importer.ImportFailure
 import io.github.zoot.englishreader.ui.component.IMPORT_STATUS_TEST_TAG
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
 import io.github.zoot.englishreader.viewmodel.ArticleListUiEvent
 import io.github.zoot.englishreader.viewmodel.ArticleListViewModel
+import io.github.zoot.englishreader.viewmodel.ImportOutcome
+import io.github.zoot.englishreader.viewmodel.ImportState
 import io.github.zoot.englishreader.viewmodel.LibraryItem
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.receiveAsFlow
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -53,10 +66,10 @@ class ArticleListScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
 
-    private val article = ArticleEntity(
+    private val article = ArticleSummary(
         id = 7L,
         title = "The Art of Noticing",
-        content = "Small details reward a slower look."
+        createdAt = 0
     )
     private val book = BookEntity(
         id = 7L,
@@ -67,19 +80,28 @@ class ArticleListScreenTest {
         totalChars = 5_000
     )
     private val libraryItemsState = MutableStateFlow<List<LibraryItem>>(emptyList())
-    private val importingState = MutableStateFlow(false)
-    /**
-     * 可控的事件流。共享装置原来给的是 `emptyFlow()`，无法承载「导入终态到达」这件事，
-     * 而导入指示器的收尾恰恰由它驱动。`extraBufferCapacity` 让 `tryEmit` 在没有挂起的
-     * 收集者时也能成功。
-     */
-    private val uiEvents = MutableSharedFlow<ArticleListUiEvent>(extraBufferCapacity = 4)
+    private val importState = MutableStateFlow<ImportState>(ImportState.Idle)
+    private val uiEvents = Channel<ArticleListUiEvent>(Channel.BUFFERED)
+    private val activeEventCollectors = AtomicInteger()
+    private val acknowledgedImports = mutableListOf<String>()
+    private var screenVisible by mutableStateOf(true)
     private val openedArticles = mutableListOf<Long>()
     private val openedBooks = mutableListOf<Long>()
     private val viewModel = mockk<ArticleListViewModel>(relaxed = true).also { model ->
         every { model.libraryItems } returns libraryItemsState
-        every { model.isImporting } returns importingState
-        every { model.uiEvent } returns uiEvents
+        every { model.importState } returns importState
+        every { model.uiEvent } returns uiEvents.receiveAsFlow()
+            .onStart { activeEventCollectors.incrementAndGet() }
+            .onCompletion { activeEventCollectors.decrementAndGet() }
+        every { model.acknowledgeImport(any()) } answers {
+            val id = firstArg<String>()
+            acknowledgedImports += id
+            val current = importState.value
+            if (current is ImportState.Finished && current.importId == id) {
+                importState.compareAndSet(current, ImportState.Idle)
+            }
+            Unit
+        }
     }
 
     @Test
@@ -169,7 +191,7 @@ class ArticleListScreenTest {
             .performClick()
         composeRule.onNodeWithText(string(R.string.import_choose_method)).assertDoesNotExist()
 
-        composeRule.runOnIdle { importingState.value = false }
+        composeRule.runOnIdle { importState.value = ImportState.Idle }
         composeRule.onNodeWithContentDescription(string(R.string.import_article))
             .assertIsEnabled()
             .performClick()
@@ -221,7 +243,7 @@ class ArticleListScreenTest {
             composeRule.mainClock.advanceTimeBy(FRAME_MS)
             composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
         }
-        importingState.value = false
+        importState.value = ImportState.Finished("import-a", ImportOutcome.SUCCESS)
         composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + FRAME_MS)
 
         composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
@@ -252,8 +274,8 @@ class ArticleListScreenTest {
         composeRule.onNodeWithText(string(R.string.import_status_importing)).assertExists()
 
         val completedAt = composeRule.mainClock.currentTime
-        importingState.value = false
-        uiEvents.tryEmit(ArticleListUiEvent.BookImportSucceeded(book.id, book.title, 12))
+        importState.value = ImportState.Finished("import-a", ImportOutcome.SUCCESS)
+        uiEvents.trySend(ArticleListUiEvent.BookImportSucceeded(book.id, book.title, 12))
         composeRule.mainClock.advanceTimeBy(GLYPH_SETTLE_MS)
 
         composeRule.onNodeWithText(string(R.string.import_status_succeeded)).assertExists()
@@ -279,8 +301,8 @@ class ArticleListScreenTest {
         render(items = emptyList(), isImporting = true)
         composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + FRAME_MS)
 
-        importingState.value = false
-        uiEvents.tryEmit(ArticleListUiEvent.ImportFailed(ImportFailure.InvalidEpub))
+        importState.value = ImportState.Finished("import-a", ImportOutcome.FAILURE)
+        uiEvents.trySend(ArticleListUiEvent.ImportFailed(ImportFailure.InvalidEpub))
         composeRule.mainClock.advanceTimeBy(GLYPH_SETTLE_MS)
 
         composeRule.onNodeWithText(string(R.string.import_status_failed)).assertExists()
@@ -300,7 +322,7 @@ class ArticleListScreenTest {
         composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertExists()
 
         // 不发任何 uiEvent，只让导入态落下。
-        importingState.value = false
+        importState.value = ImportState.Idle
         composeRule.mainClock.advanceTimeBy(TERMINAL_TOTAL_MS)
 
         composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
@@ -308,24 +330,13 @@ class ArticleListScreenTest {
         composeRule.onNodeWithText(string(R.string.import_status_failed)).assertDoesNotExist()
     }
 
-    /**
-     * 终态先到、`isImporting` 还没落下时，✓ 之后**不得**再闪一次 loading。
-     *
-     * `importBook` 先 `trySend` 终态事件、再在 `finally` 里落下 `isImporting`，所以这个窗口
-     * 真实存在。没有 settled 闩锁时：播完 ✓ → `onOutcomeShown` 清空 outcome → effect 以
-     * 「仍在导入」重启 → 250ms 后又淡入一个转圈。
-     *
-     * 本用例刻意**不**先把 `importingState` 置 false，正是为了复现那个窗口；上面那几条
-     * 成功/失败用例都先落下了导入态，所以它们在有 bug 的实现下照样绿。
-     */
     @Test
-    fun importStatus_outcomeBeforeImportingClears_doesNotFlashLoadingAgain() {
+    fun importStatus_finishedWithoutNotification_doesNotFlashLoadingAgain() {
         composeRule.mainClock.autoAdvance = false
         render(items = emptyList(), isImporting = true)
         composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + FRAME_MS)
 
-        // 只发终态，导入态仍为 true——这就是 trySend 与 finally 之间的那一瞬。
-        uiEvents.tryEmit(ArticleListUiEvent.BookImportSucceeded(book.id, book.title, 12))
+        importState.value = ImportState.Finished("import-a", ImportOutcome.SUCCESS)
         composeRule.mainClock.advanceTimeBy(GLYPH_SETTLE_MS)
         composeRule.onNodeWithText(string(R.string.import_status_succeeded)).assertExists()
 
@@ -333,6 +344,158 @@ class ArticleListScreenTest {
         composeRule.mainClock.advanceTimeBy(TERMINAL_TOTAL_MS + APPEAR_THRESHOLD_MS + FRAME_MS)
         composeRule.onNodeWithText(string(R.string.import_status_importing)).assertDoesNotExist()
         composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun importStatus_oldSnackbarArrivesWhileNextImportRuns_keepsNextSpinner() {
+        composeRule.mainClock.autoAdvance = false
+        render(items = emptyList(), isImporting = true)
+        uiEvents.trySend(ArticleListUiEvent.DeleteFailed)
+        val firstMessage = string(R.string.error_delete_article_failed)
+        advanceUiUntil { composeRule.onAllNodesWithText(firstMessage).fetchSemanticsNodes().size == 1 }
+        advanceUiUntil {
+            composeRule.onAllNodesWithText(string(R.string.import_status_importing)).fetchSemanticsNodes().size == 1
+        }
+        composeRule.onNodeWithText(firstMessage).assertExists()
+        composeRule.onNodeWithText(string(R.string.import_status_importing)).assertExists()
+
+        composeRule.runOnIdle {
+            importState.value = ImportState.Finished("import-a", ImportOutcome.SUCCESS)
+            importState.value = ImportState.Running("import-b")
+            uiEvents.trySend(ArticleListUiEvent.BookImportSucceeded(book.id, book.title, 12))
+        }
+        advanceUiUntil { composeRule.onAllNodesWithTag(IMPORT_STATUS_TEST_TAG).fetchSemanticsNodes().isEmpty() }
+        advanceUiUntil {
+            composeRule.onAllNodesWithText(string(R.string.import_status_importing)).fetchSemanticsNodes().size == 1
+        }
+        composeRule.onNodeWithText(string(R.string.import_status_importing)).assertExists()
+        dismissSnackbar(firstMessage)
+        val completedMessage = string(R.string.book_import_succeeded, book.title, 12)
+        advanceUiUntil { composeRule.onAllNodesWithText(completedMessage).fetchSemanticsNodes().size == 1 }
+
+        composeRule.onNodeWithText(completedMessage).assertExists()
+        composeRule.onNodeWithText(string(R.string.import_status_importing)).assertExists()
+        composeRule.onNodeWithText(string(R.string.import_status_succeeded)).assertDoesNotExist()
+        composeRule.onNodeWithContentDescription(string(R.string.library_importing)).assertIsNotEnabled()
+        assertEquals(ImportState.Running("import-b"), importState.value)
+    }
+
+    @Test
+    fun importStatus_nextImportFinishesBeforeCollection_doesNotBorrowPreviousVisibility() {
+        composeRule.mainClock.autoAdvance = false
+        render(items = emptyList(), isImporting = true)
+        composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + FRAME_MS)
+        composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertExists()
+
+        composeRule.runOnIdle {
+            importState.value = ImportState.Finished("import-a", ImportOutcome.SUCCESS)
+            importState.value = ImportState.Running("import-b")
+            importState.value = ImportState.Finished("import-b", ImportOutcome.SUCCESS)
+        }
+        repeat(8) {
+            composeRule.mainClock.advanceTimeByFrame()
+            composeRule.onNodeWithText(string(R.string.import_status_succeeded)).assertDoesNotExist()
+        }
+
+        composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
+        assertEquals(listOf("import-b"), acknowledgedImports)
+        assertEquals(ImportState.Idle, importState.value)
+    }
+
+    @Test
+    fun importStatus_firstCollectionIsFinished_acknowledgesWithoutAnimationOrNotification() {
+        composeRule.mainClock.autoAdvance = false
+        render(
+            items = emptyList(),
+            initialImportState = ImportState.Finished("already-finished", ImportOutcome.SUCCESS)
+        )
+        composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + TERMINAL_TOTAL_MS)
+
+        composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
+        composeRule.onNodeWithText(string(R.string.book_import_succeeded, book.title, 12)).assertDoesNotExist()
+        assertEquals(listOf("already-finished"), acknowledgedImports)
+        assertEquals(ImportState.Idle, importState.value)
+    }
+
+    @Test
+    fun importStatus_recreatedDuringTerminalAnimation_doesNotReplayAnimationOrSnackbar() {
+        composeRule.mainClock.autoAdvance = false
+        render(items = emptyList(), isImporting = true)
+        advanceUiUntil {
+            composeRule.onAllNodesWithText(string(R.string.import_status_importing)).fetchSemanticsNodes().size == 1
+        }
+        composeRule.runOnIdle {
+            importState.value = ImportState.Finished("import-a", ImportOutcome.SUCCESS)
+            uiEvents.trySend(ArticleListUiEvent.BookImportSucceeded(book.id, book.title, 12))
+        }
+        val message = string(R.string.book_import_succeeded, book.title, 12)
+        advanceUiUntil { composeRule.onAllNodesWithText(message).fetchSemanticsNodes().size == 1 }
+        advanceUiUntil {
+            composeRule.onAllNodesWithText(string(R.string.import_status_succeeded)).fetchSemanticsNodes().size == 1
+        }
+        composeRule.onNodeWithText(message).assertExists()
+        assertEquals(emptyList<String>(), acknowledgedImports)
+
+        recreateScreen()
+        advanceUiUntil { acknowledgedImports == listOf("import-a") }
+        composeRule.mainClock.advanceTimeBy(APPEAR_THRESHOLD_MS + FRAME_MS)
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag(IMPORT_STATUS_TEST_TAG).assertDoesNotExist()
+        composeRule.onNodeWithText(message).assertDoesNotExist()
+        assertEquals(listOf("import-a"), acknowledgedImports)
+    }
+
+    @Test
+    fun uiEvents_queuedBehindSnackbar_remainInViewModelAcrossCollectorGaps() {
+        composeRule.mainClock.autoAdvance = false
+        render(items = emptyList())
+        uiEvents.trySend(ArticleListUiEvent.DeleteFailed)
+        advanceUiUntil {
+            composeRule.onAllNodesWithText(string(R.string.error_delete_article_failed)).fetchSemanticsNodes().size == 1
+        }
+        composeRule.onNodeWithText(string(R.string.error_delete_article_failed)).assertExists()
+        uiEvents.trySend(ArticleListUiEvent.BookImportSucceeded(1, "First queued book", 2))
+        uiEvents.trySend(ArticleListUiEvent.BookImportSucceeded(2, "Second queued book", 3))
+
+        recreateScreen()
+        advanceUiUntil {
+            composeRule.onAllNodesWithText(string(R.string.book_import_succeeded, "First queued book", 2)).fetchSemanticsNodes().size == 1
+        }
+        composeRule.onNodeWithText(string(R.string.book_import_succeeded, "First queued book", 2)).assertExists()
+        recreateScreen()
+        advanceUiUntil {
+            composeRule.onAllNodesWithText(string(R.string.book_import_succeeded, "Second queued book", 3)).fetchSemanticsNodes().size == 1
+        }
+        composeRule.onNodeWithText(string(R.string.book_import_succeeded, "Second queued book", 3)).assertExists()
+        recreateScreen()
+        composeRule.onNodeWithText(string(R.string.book_import_succeeded, "Second queued book", 3)).assertDoesNotExist()
+    }
+
+    private fun recreateScreen() {
+        composeRule.runOnIdle { screenVisible = false }
+        advanceUiUntil { activeEventCollectors.get() == 0 }
+        composeRule.runOnIdle { screenVisible = true }
+        advanceUiUntil { activeEventCollectors.get() == 1 }
+        composeRule.mainClock.advanceTimeByFrame()
+        composeRule.waitForIdle()
+    }
+
+    private fun advanceUiUntil(condition: () -> Boolean) {
+        val deadline = composeRule.mainClock.currentTime + 1_000
+        while (true) {
+            composeRule.waitForIdle()
+            if (condition()) return
+            assertTrue("UI condition did not settle within 1s of virtual time", composeRule.mainClock.currentTime < deadline)
+            composeRule.mainClock.advanceTimeByFrame()
+        }
+    }
+
+    private fun dismissSnackbar(message: String) {
+        composeRule.onNode(
+            SemanticsMatcher.keyIsDefined(SemanticsActions.Dismiss) and
+                (hasText(message) or hasAnyDescendant(hasText(message)))
+        ).performSemanticsAction(SemanticsActions.Dismiss) { dismiss -> assertTrue(dismiss()) }
     }
 
     private fun openTitle(title: String) {
@@ -371,20 +534,23 @@ class ArticleListScreenTest {
         isImporting: Boolean = false,
         darkTheme: Boolean = false,
         width: Dp = 360.dp,
-        fontScale: Float = 1f
+        fontScale: Float = 1f,
+        initialImportState: ImportState = if (isImporting) ImportState.Running("import-a") else ImportState.Idle
     ) {
         libraryItemsState.value = items
-        importingState.value = isImporting
+        importState.value = initialImportState
         composeRule.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
                 EnglishReaderTheme(darkTheme = darkTheme) {
                     Box(modifier = Modifier.width(width).fillMaxHeight()) {
-                        ArticleListScreen(
-                            onArticleClick = { openedArticles += it },
-                            onBookClick = { openedBooks += it },
-                            viewModel = viewModel
-                        )
+                        if (screenVisible) {
+                            ArticleListScreen(
+                                onArticleClick = { openedArticles += it },
+                                onBookClick = { openedBooks += it },
+                                viewModel = viewModel
+                            )
+                        }
                     }
                 }
             }

@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.data.dao
 
 import androidx.room.*
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
 import io.github.zoot.englishreader.data.entity.ReadingPositionEntity
 import io.github.zoot.englishreader.model.ArticleEditResult
@@ -38,11 +39,11 @@ interface ArticleDao {
      * 索引，子查询走索引扫描；且语义更直白——这里要表达的就是「不属于任何一本书」。
      */
     @Query(
-        "SELECT * FROM articles " +
+        "SELECT id, title, createdAt FROM articles " +
             "WHERE id NOT IN (SELECT articleId FROM book_chapters) " +
-            "ORDER BY createdAt DESC"
+            "ORDER BY createdAt DESC, id DESC"
     )
-    fun getStandaloneArticles(): Flow<List<ArticleEntity>>
+    fun getStandaloneArticles(): Flow<List<ArticleSummary>>
 
     @Query("SELECT * FROM articles WHERE id = :id")
     suspend fun getArticleById(id: Long): ArticleEntity?
@@ -188,7 +189,12 @@ interface ArticleDao {
     /** 与删书一致：先去重、解绑生词，再删除文章，任一步失败均回滚。 */
     @Transaction
     suspend fun deleteArticle(article: ArticleEntity) {
-        val articleIds = listOf(article.id)
+        deleteArticleById(article.id)
+    }
+
+    @Transaction
+    suspend fun deleteArticleById(articleId: Long) {
+        val articleIds = listOf(articleId)
         deleteRedundantVocabularyForArticles(articleIds)
         unbindVocabularyFromArticles(articleIds)
         deleteArticlesByIds(articleIds)

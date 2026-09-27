@@ -21,6 +21,9 @@ import io.github.zoot.englishreader.util.NetworkChecker
 import io.github.zoot.englishreader.util.TtsPlayer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
@@ -191,103 +194,112 @@ class VocabularyViewModel @Inject constructor(
     val loadingAudioWordId: StateFlow<Long?> = _loadingAudioWordId.asStateFlow()
 
     private var playAudioJob: Job? = null
-    private var audioGeneration = 0
+    private var fallbackJob: Job? = null
+    private var audioGeneration = 0L
+    private var audioRequestToken: AudioPlayer.RequestToken? = null
 
-    /**
-     * 播放生词读音。
-     *
-     * 顺序沿用阅读页的查词发音：**先查本地缓存，再判网络**。反过来的话，离线时明明
-     * 缓存里已经有的词也用不上——而缓存存在的全部意义就是让这些词离线可用。
-     *
-     * 比阅读页那份简单的地方：这里没有「弹窗中途被关掉」这种失效场景，所以一个代次
-     * 就够——连点两个词时，前一个的结果不得覆盖后一个的状态。
-     */
+    /** 缓存优先；每个新意图都停止旧的媒体与 TTS，包括同词重播和离线兜底。 */
     fun playWordAudio(vocabulary: VocabularyEntity) {
         val word = vocabulary.word.trim()
         if (word.isEmpty()) return
         val key = word.lowercase()
-        val generation = ++audioGeneration
-        playAudioJob?.cancel()
-        playAudioJob = viewModelScope.launch {
+        stopAudio(preserveTtsPreparation = true)
+        val generation = audioGeneration
+        val token = audioPlayer.beginRequest()
+        audioRequestToken = token
+        playAudioJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val cached = pronunciationAudioCache.get(key)
-                if (generation != audioGeneration) return@launch
-
+                if (!isCurrentAudioRequest(generation, token)) return@launch
                 if (cached == null && !networkChecker.isOnline()) {
-                    speakViaTts(word)
+                    speakViaTts(word, generation, token)
                     return@launch
                 }
-
                 if (cached == null) _loadingAudioWordId.value = vocabulary.id
-
                 val url = cached?.absolutePath ?: WordAudioUrl.forWord(word)
                 audioPlayer.play(
+                    token = token,
                     url = url,
                     onError = { exception ->
-                        // 回到主线程后再检查代次，旧回调不能打断后来开始的那次播放。
                         viewModelScope.launch playbackFailure@ {
-                            if (generation != audioGeneration) return@playbackFailure
+                            if (!isCurrentAudioRequest(generation, token)) return@playbackFailure
+                            fallbackJob?.cancel()
+                            fallbackJob = currentCoroutineContext().job
                             _loadingAudioWordId.value = null
-                            // 只记类名：异常信息可能回显带单词的 URL。
-                            Log.e(
-                                "VocabularyViewModel",
-                                "Audio playback failed: ${exception.javaClass.simpleName}"
-                            )
-                            // 本地文件不可播时失效它，让下次重走远端；远端失败不动缓存。
-                            if (cached != null) pronunciationAudioCache.invalidate(key)
-                            speakViaTts(word)
+                            Log.e("VocabularyViewModel", "Audio playback failed: ${exception.javaClass.simpleName}")
+                            if (cached != null) {
+                                try {
+                                    pronunciationAudioCache.invalidate(key)
+                                } catch (cancellation: CancellationException) {
+                                    throw cancellation
+                                } catch (_: Exception) {
+                                    Log.w("VocabularyViewModel", "Failed to invalidate pronunciation audio")
+                                }
+                            }
+                            if (isCurrentAudioRequest(generation, token)) speakViaTts(word, generation, token)
                         }
                     }
                 )
-                if (generation == audioGeneration) _loadingAudioWordId.value = null
-
-                // 播放已经启动，另起协程把音频存入缓存，不阻塞本次播放。
-                // 与阅读页同一取舍：首次发两个请求，换后续每次为零。
+                if (!isCurrentAudioRequest(generation, token)) return@launch
+                _loadingAudioWordId.value = null
+                // 播放启动后独立填充缓存，不阻塞本次发声。
                 if (cached == null && networkChecker.isOnline()) {
                     viewModelScope.launch {
                         runCatching { pronunciationAudioCache.download(key, url) }
                             .onFailure { if (it is CancellationException) throw it }
                     }
                 }
-            } catch (e: CancellationException) {
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (exception: Exception) {
+                if (!isCurrentAudioRequest(generation, token)) return@launch
+                Log.e("VocabularyViewModel", "Failed to start audio playback: ${exception.javaClass.simpleName}")
+                speakViaTts(word, generation, token)
+            } finally {
                 if (generation == audioGeneration) _loadingAudioWordId.value = null
-                throw e
-            } catch (e: Exception) {
-                if (generation != audioGeneration) return@launch
-                _loadingAudioWordId.value = null
-                Log.e(
-                    "VocabularyViewModel",
-                    "Failed to start audio playback: ${e.javaClass.simpleName}"
-                )
-                speakViaTts(word)
             }
+        }
+        playAudioJob?.start()
+    }
+
+    private fun isCurrentAudioRequest(generation: Long, token: AudioPlayer.RequestToken): Boolean =
+        generation == audioGeneration && audioRequestToken === token && audioPlayer.isCurrent(token)
+
+    /** 联网同意与所选音色每次现读，单词语速保持 1 倍。 */
+    private suspend fun speakViaTts(word: String, generation: Long, token: AudioPlayer.RequestToken) {
+        try {
+            val allowNetwork = settingsPreferences.allowNetworkTts.first()
+            val voiceId = settingsPreferences.ttsReadingSettings.first().voiceId
+            if (!isCurrentAudioRequest(generation, token)) return
+            ttsPlayer.speakWord(word, voiceId, allowNetwork) {
+                if (isCurrentAudioRequest(generation, token)) _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable)
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            if (isCurrentAudioRequest(generation, token)) _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable)
         }
     }
 
-    /**
-     * 用系统 TTS 兜底朗读。
-     *
-     * 联网语音的授权**每次现读**，不缓存：用户可能刚在设置里关掉它，而缓存值会让这一次朗读
-     * 仍然走网络——那是把「已撤销的同意」当成有效同意。`allowNetworkTts` 默认 false，
-     * 所以未表态的用户仍然只用本地语音。
-     *
-     * 语音也现读，理由见 [TtsPlayer.speakWord]：设置页挑的语音原先对单词发音完全无效，
-     * 与自动选择的「离线优先」叠加后，已授权并挑了网络神经语音的用户会在生词本里听到
-     * 本地拼接音。语速不跟随——那个滑杆是为连续阅读调的。
-     */
-    private suspend fun speakViaTts(word: String) {
-        val allowNetwork = settingsPreferences.allowNetworkTts.first()
-        val voiceId = settingsPreferences.ttsReadingSettings.first().voiceId
-        // trySend：Channel 有缓冲、永不阻塞，回调可能同步触发，无需起协程。
-        ttsPlayer.speakWord(word, voiceId, allowNetwork) {
-            _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable)
-        }
+    fun stopAudio() = stopAudio(preserveTtsPreparation = false)
+
+    private fun stopAudio(preserveTtsPreparation: Boolean) {
+        audioGeneration++
+        playAudioJob?.cancel()
+        playAudioJob = null
+        fallbackJob?.cancel()
+        fallbackJob = null
+        val token = audioRequestToken
+        audioRequestToken = null
+        token?.let(audioPlayer::stop)
+        _loadingAudioWordId.value = null
+        if (preserveTtsPreparation) ttsPlayer.stopBeforeReading() else ttsPlayer.stop()
     }
 
     override fun onCleared() {
+        stopAudio()
+        ttsPlayer.shutdown()
         super.onCleared()
-        // AudioPlayer 是 @Singleton：离开生词本后不该继续出声。
-        audioPlayer.stop()
     }
 
     /**

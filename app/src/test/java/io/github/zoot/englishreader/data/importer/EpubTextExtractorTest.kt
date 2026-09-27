@@ -61,6 +61,59 @@ class EpubTextExtractorTest {
     // ---- 正常路径 ----
 
     @Test
+    fun extract_linearSvgImageCover_skipsCoverAndPreservesBody() {
+        val result = extractor.extract(uriFor(EpubFixtures.svgCoverBook()))
+
+        assertEquals("SVG Cover Book", result.declaredTitle)
+        assertEquals("First chapter body.\n\nSecond chapter body.", result.text)
+    }
+
+    @Test
+    fun extract_svgTitleAndWhitespace_skipWithoutChangingExtractionRules() {
+        for (body in listOf("<title>Cover title</title>", "<desc> \t </desc><metadata> </metadata>")) {
+            val cover = """<svg xmlns="http://www.w3.org/2000/svg">$body</svg>"""
+            val result = extractor.extract(uriFor(EpubFixtures.svgCoverBook(cover)))
+            assertEquals("First chapter body.\n\nSecond chapter body.", result.text)
+        }
+    }
+
+    @Test
+    fun extract_svgRetainedText_rejectsInsteadOfDroppingIt() {
+        for (tag in listOf("text", "desc", "metadata")) {
+            val cover = """<svg xmlns="http://www.w3.org/2000/svg"><$tag>Retained text.</$tag></svg>"""
+            assertEquals(tag, ImportFailure.InvalidEpub, failureOf(EpubFixtures.svgCoverBook(cover)))
+        }
+    }
+
+    @Test
+    fun extract_svgOnlyBook_reportsEmptyContent() {
+        assertEquals(ImportFailure.EmptyContent, failureOf(EpubFixtures.svgCoverBook(chapters = emptyList())))
+    }
+
+    @Test
+    fun extract_svgInvalidMissingOrEncrypted_preservesFailureKinds() {
+        val cases = listOf(
+            EpubFixtures.svgCoverBook(coverContent = "<svg><image></svg>") to ImportFailure.InvalidEpub,
+            EpubFixtures.svgCoverBook(omitCover = true) to ImportFailure.InvalidEpub,
+            EpubFixtures.svgCoverBook(encryptedCover = true) to ImportFailure.EncryptedEpub
+        )
+        for ((bytes, expected) in cases) assertEquals(expected, failureOf(bytes))
+    }
+
+    @Test
+    fun extract_svgEncodedMisleadingHref_classifiesByOpf() {
+        val bytes = EpubFixtures.svgCoverBook(
+            coverPath = "images/front matter.xhtml", coverHref = "images/./front%20matter.xhtml"
+        )
+        assertEquals("First chapter body.\n\nSecond chapter body.", extractor.extract(uriFor(bytes)).text)
+        val nonBlank = EpubFixtures.svgCoverBook(
+            coverContent = """<svg xmlns="http://www.w3.org/2000/svg"><desc>Retained text.</desc></svg>""",
+            coverPath = "front.xhtml"
+        )
+        assertEquals(ImportFailure.InvalidEpub, failureOf(nonBlank))
+    }
+
+    @Test
     fun extract_chapters_preservesSpineOrderAndParagraphBoundaries() {
         val cases = listOf(
             listOf("First chapter body.", "Second chapter body.") to

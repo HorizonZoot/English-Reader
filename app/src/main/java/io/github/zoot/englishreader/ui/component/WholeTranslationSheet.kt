@@ -414,6 +414,14 @@ private fun TaskTracker(
         color = if (state.status == WholeTranslationTaskStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.testTag("whole-translation-status")
     )
+    if (state.isBlocked) {
+        Text(
+            stringResource(R.string.whole_translation_status_blocked),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.testTag("whole-translation-blocked")
+        )
+    }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         if (state.status != WholeTranslationTaskStatus.COMPLETED && state.status != WholeTranslationTaskStatus.CANCELLED) {

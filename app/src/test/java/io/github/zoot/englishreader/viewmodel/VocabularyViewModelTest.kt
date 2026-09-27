@@ -1,6 +1,7 @@
 package io.github.zoot.englishreader.viewmodel
 
 import app.cash.turbine.test
+import androidx.lifecycle.ViewModelStore
 import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
 import io.github.zoot.englishreader.data.audio.WordAudioUrl
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
@@ -21,15 +22,24 @@ import io.github.zoot.englishreader.util.NetworkChecker
 import io.github.zoot.englishreader.util.TtsPlayer
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.clearMocks
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -46,6 +56,7 @@ import java.io.File
  * - 卡片补充信息：释义、音标、词形还原标注、来源文章标题
  * - 删除与撤销删除（撤销必须把 id 归零，见 restoreVocabulary 的注释）
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class VocabularyViewModelTest {
 
     @get:Rule
@@ -92,7 +103,10 @@ class VocabularyViewModelTest {
     fun setup() {
         vocabularyRepository = mockk(relaxed = true)
         dictionaryRepository = mockk(relaxed = true)
-        audioPlayer = mockk(relaxed = true)
+        audioPlayer = mockk(relaxed = true) {
+            every { beginRequest() } answers { AudioPlayer.RequestToken() }
+            every { isCurrent(any()) } returns true
+        }
         networkChecker = mockk(relaxed = true)
         ttsPlayer = mockk(relaxed = true)
         pronunciationAudioCache = mockk(relaxed = true)
@@ -349,9 +363,9 @@ class VocabularyViewModelTest {
         // 命中缓存必须走本地文件：远端 URL 在离线时根本播不出来，而缓存存在的
         // 全部意义就是让这些词离线可用。
         coVerify(exactly = 1) {
-            audioPlayer.play(url = cached.absolutePath, onComplete = any(), onError = any())
+            audioPlayer.play(any(), url = cached.absolutePath, onComplete = any(), onError = any())
         }
-        coVerify(exactly = 0) { audioPlayer.play(url = WordAudioUrl.forWord("noticing"), any(), any()) }
+        coVerify(exactly = 0) { audioPlayer.play(any(), url = WordAudioUrl.forWord("noticing"), any(), any()) }
     }
 
     @Test
@@ -364,6 +378,7 @@ class VocabularyViewModelTest {
 
         coVerify(exactly = 1) {
             audioPlayer.play(
+                token = any(),
                 url = WordAudioUrl.forWord("noticing"),
                 onComplete = any(),
                 onError = any()
@@ -379,7 +394,7 @@ class VocabularyViewModelTest {
 
         viewModel.playWordAudio(entity)
 
-        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any()) }
+        coVerify(exactly = 0) { audioPlayer.play(any(), any(), any(), any()) }
         verify(exactly = 1) { ttsPlayer.speakWord("noticing", any(), any(), any()) }
     }
 
@@ -446,5 +461,153 @@ class VocabularyViewModelTest {
         viewModel.playWordAudio(vocab("noticing", 1L))
 
         verify(exactly = 1) { ttsPlayer.speakWord("noticing", eq("engine/neural"), any(), any()) }
+    }
+
+    @Test
+    fun playWordAudio_lateCurrentErrorAfterPreparation_stillFallsBack() = runTest {
+        lateinit var onError: (Exception) -> Unit
+        coEvery { pronunciationAudioCache.get(any()) } returns null
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers { onError = arg(3) }
+        viewModel.playWordAudio(vocab("first", 1))
+        assertNull(viewModel.loadingAudioWordId.value)
+        verify(exactly = 0) { ttsPlayer.speakWord(any(), any(), any(), any()) }
+
+        onError(IllegalStateException("late playback failure"))
+        runCurrent()
+
+        verify(exactly = 1) { ttsPlayer.speakWord("first", any(), any(), any()) }
+    }
+
+    @Test
+    fun playWordAudio_oldFallbackSuspendedDuringInvalidation_cannotReplacePendingWord() = runTest {
+        val fallbackStarted = CompletableDeferred<Job>()
+        val releaseFallback = CompletableDeferred<Unit>()
+        val nextStarted = CompletableDeferred<Unit>()
+        val releaseNext = CompletableDeferred<Unit>()
+        lateinit var onError: (Exception) -> Unit
+        val cached = File("old.mp3")
+        coEvery { pronunciationAudioCache.get("old") } returns cached
+        coEvery { pronunciationAudioCache.get("next") } returns null
+        coEvery { pronunciationAudioCache.invalidate("old") } coAnswers {
+            fallbackStarted.complete(currentCoroutineContext().job)
+            withContext(NonCancellable) { releaseFallback.await() }
+        }
+        coEvery { audioPlayer.play(any(), cached.absolutePath, any(), any()) } coAnswers { onError = arg(3) }
+        coEvery { audioPlayer.play(any(), WordAudioUrl.forWord("next"), any(), any()) } coAnswers {
+            nextStarted.complete(Unit)
+            releaseNext.await()
+        }
+        try {
+            viewModel.playWordAudio(vocab("old", 1))
+            onError(IllegalStateException("unplayable"))
+            val fallback = fallbackStarted.await()
+            viewModel.playWordAudio(vocab("next", 2))
+            nextStarted.await()
+            assertTrue(fallback.isCancelled)
+            assertEquals(2L, viewModel.loadingAudioWordId.value)
+
+            releaseFallback.complete(Unit)
+            runCurrent()
+            verify(exactly = 0) { ttsPlayer.speakWord("old", any(), any(), any()) }
+            assertEquals(2L, viewModel.loadingAudioWordId.value)
+        } finally {
+            releaseFallback.complete(Unit)
+            releaseNext.complete(Unit)
+        }
+    }
+
+    @Test
+    fun playWordAudio_oldFallbackReadingPreferences_isCancelledBeforeNextPlayback() = runTest {
+        val preferenceRead = CompletableDeferred<Job>()
+        val preference = CompletableDeferred<Boolean>()
+        val nextPreparing = CompletableDeferred<Unit>()
+        val releaseNext = CompletableDeferred<Unit>()
+        lateinit var oldError: (Exception) -> Unit
+        coEvery { pronunciationAudioCache.get(any()) } returns null
+        every { settingsPreferences.allowNetworkTts } returns flow {
+            preferenceRead.complete(currentCoroutineContext().job)
+            emit(preference.await())
+        }
+        coEvery { audioPlayer.play(any(), WordAudioUrl.forWord("old"), any(), any()) } coAnswers { oldError = arg(3) }
+        coEvery { audioPlayer.play(any(), WordAudioUrl.forWord("next"), any(), any()) } coAnswers {
+            nextPreparing.complete(Unit)
+            releaseNext.await()
+        }
+        try {
+            viewModel.playWordAudio(vocab("old", 1))
+            oldError(IllegalStateException())
+            val oldFallback = preferenceRead.await()
+            viewModel.playWordAudio(vocab("next", 2))
+            nextPreparing.await()
+            assertTrue(oldFallback.isCancelled)
+            preference.complete(false)
+            runCurrent()
+            verify(exactly = 0) { ttsPlayer.speakWord("old", any(), any(), any()) }
+            assertEquals(2L, viewModel.loadingAudioWordId.value)
+        } finally {
+            preference.complete(false)
+            releaseNext.complete(Unit)
+        }
+    }
+
+    @Test
+    fun playWordAudio_stoppedAtPreferenceReturn_neverSubmitsWord() = runTest {
+        coEvery { pronunciationAudioCache.get(any()) } returns null
+        every { networkChecker.isOnline() } returns false
+        every { settingsPreferences.ttsReadingSettings } answers {
+            viewModel.stopAudio()
+            flowOf(TtsReadingSettings())
+        }
+
+        viewModel.playWordAudio(vocab("old", 1))
+        runCurrent()
+
+        verify(exactly = 0) { ttsPlayer.speakWord(any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun playWordAudio_sameWordSwitchesFromTtsToMedia_stopsCommittedSpeechFirst() = runTest {
+        val events = mutableListOf<String>()
+        coEvery { pronunciationAudioCache.get(any()) } returns null
+        every { networkChecker.isOnline() } returns false
+        every { ttsPlayer.stopBeforeReading() } answers { events += "stop-tts" }
+        every { ttsPlayer.speakWord(any(), any(), any(), any()) } answers { events += "speak" }
+        coEvery { audioPlayer.play(any(), any(), any(), any()) } coAnswers { events += "media" }
+        viewModel.playWordAudio(vocab("same", 1))
+        assertEquals(listOf("stop-tts", "speak"), events)
+        events.clear()
+        every { networkChecker.isOnline() } returns true
+
+        viewModel.playWordAudio(vocab("same", 1))
+
+        assertEquals(listOf("stop-tts", "media"), events)
+    }
+
+    @Test
+    fun stopAudio_retainedViewModelCanPlayAgain_clearedViewModelShutsDownItsTts() = runTest {
+        coEvery { pronunciationAudioCache.get(any()) } returns null
+        every { networkChecker.isOnline() } returns false
+        viewModel.playWordAudio(vocab("old", 1))
+        viewModel.stopAudio()
+        verify(exactly = 0) { ttsPlayer.shutdown() }
+
+        viewModel.playWordAudio(vocab("next", 2))
+        verify(exactly = 1) { ttsPlayer.speakWord("next", any(), any(), any()) }
+        clearMocks(ttsPlayer, answers = false)
+        ViewModelStore().apply { put("vocabulary", viewModel); clear() }
+        verify(exactly = 1) { ttsPlayer.stop() }
+        verify(exactly = 1) { ttsPlayer.shutdown() }
+    }
+
+    @Test
+    fun playWordAudio_preferenceCancellation_doesNotReportUnavailable() = runTest {
+        coEvery { pronunciationAudioCache.get(any()) } returns null
+        every { networkChecker.isOnline() } returns false
+        every { settingsPreferences.allowNetworkTts } returns flow { throw CancellationException() }
+        viewModel.uiEvent.test {
+            viewModel.playWordAudio(vocab("old", 1))
+            runCurrent()
+            expectNoEvents()
+        }
     }
 }

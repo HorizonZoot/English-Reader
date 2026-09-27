@@ -579,6 +579,21 @@ class WholeTranslationDomainTest {
     }
 
     @Test
+    fun from_failureReasons_preservesKnownUnknownRetryability() {
+        val reasons = TranslationFailureReason.entries + listOf(null)
+        val progress = WholeTranslationProgress.from(reasons.mapIndexed { index, reason ->
+            segment(paragraphIndex = index, status = TranslationSegmentStatus.FAILED, failureReason = reason)
+        })
+
+        assertEquals(6, progress.failed)
+        assertEquals(3, progress.retryableFailures)
+        assertEquals(1, progress.configurationFailures)
+        assertEquals(1, progress.permanentFailures)
+        assertEquals(1, progress.unclassifiedFailures)
+        assertTrue(progress.canRetryFailures)
+    }
+
+    @Test
     fun isFullyTranslated_allSegmentsSucceeded_isTrue() {
         val progress = WholeTranslationProgress.from(
             listOf(
@@ -636,7 +651,9 @@ class WholeTranslationDomainTest {
                 taskId = 1,
                 scopeKey = "article:1",
                 status = status,
-                progress = WholeTranslationProgress(total, translated, 0, failed, total - translated - failed),
+                progress = WholeTranslationProgress(
+                    total, translated, 0, failed, total - translated - failed, retryableFailures = failed
+                ),
                 failureReason = null
             )
 
@@ -654,6 +671,42 @@ class WholeTranslationDomainTest {
         // RESUME」那条分支，而那正是取消后最常见的形态（用户在处理到一半时取消）。
         assertEquals(WholeTranslationPrimaryAction.CLOSE, tracking(WholeTranslationTaskStatus.CANCELLED, failed = 1).primaryAction)
         assertEquals(WholeTranslationPrimaryAction.CLOSE, tracking(WholeTranslationTaskStatus.CANCELLED, failed = 0).primaryAction)
+    }
+
+    @Test
+    fun primaryAction_failureKindsAndOutstandingWork_offersOnlyUsefulActions() {
+        val permanent = segment(status = TranslationSegmentStatus.FAILED,
+            failureReason = TranslationFailureReason.PARAGRAPH_TOO_LONG)
+        val unclassified = segment(status = TranslationSegmentStatus.FAILED)
+        val retryable = segment(status = TranslationSegmentStatus.FAILED,
+            failureReason = TranslationFailureReason.UNKNOWN)
+        val configuration = segment(status = TranslationSegmentStatus.FAILED,
+            failureReason = TranslationFailureReason.CONFIGURATION)
+        val pending = segment()
+        val leased = segment(status = TranslationSegmentStatus.TRANSLATING, leaseExpiresAt = Long.MAX_VALUE)
+        val translated = segment(status = TranslationSegmentStatus.TRANSLATED, translatedText = "done")
+        val cases = listOf(
+            listOf(permanent) to WholeTranslationPrimaryAction.CLOSE,
+            listOf(unclassified) to WholeTranslationPrimaryAction.CLOSE,
+            listOf(permanent, unclassified) to WholeTranslationPrimaryAction.CLOSE,
+            listOf(permanent, pending) to WholeTranslationPrimaryAction.RESUME,
+            listOf(unclassified, leased) to WholeTranslationPrimaryAction.RESUME,
+            listOf(permanent, retryable) to WholeTranslationPrimaryAction.RETRY_FAILED,
+            listOf(permanent, configuration) to WholeTranslationPrimaryAction.RETRY_FAILED,
+            listOf(translated) to WholeTranslationPrimaryAction.RESUME,
+            emptyList<TranslationSegment>() to WholeTranslationPrimaryAction.RESUME
+        )
+        for ((segments, action) in cases) {
+            val state = WholeTranslationSheetState.Tracking(
+                1, "article:1", WholeTranslationTaskStatus.FAILED,
+                WholeTranslationProgress.from(segments), TranslationFailureReason.CONFIGURATION
+            )
+            assertEquals(segments.toString(), action, state.primaryAction)
+            assertEquals(action == WholeTranslationPrimaryAction.CLOSE, state.isBlocked)
+            assertFalse(state.copy(status = WholeTranslationTaskStatus.RUNNING).isBlocked)
+            assertFalse(state.copy(status = WholeTranslationTaskStatus.COMPLETED).isBlocked)
+            assertFalse(state.copy(status = WholeTranslationTaskStatus.CANCELLED).isBlocked)
+        }
     }
 
     // ---- DAO SQL 字面量锁定 ----

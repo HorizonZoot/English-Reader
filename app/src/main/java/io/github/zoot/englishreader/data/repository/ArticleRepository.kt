@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.data.repository
 
 import io.github.zoot.englishreader.data.dao.ArticleDao
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.ReadingPositionEntity
 import io.github.zoot.englishreader.data.importer.ImportBudgetValidator
 import io.github.zoot.englishreader.data.importer.ImportException
@@ -109,12 +110,12 @@ class ArticleRepository @Inject constructor(
     }
 
     /**
-     * 获取单篇文章（不含书籍章节，响应式）。
+     * 获取单篇文章摘要（不含书籍章节，响应式）。
      *
      * 书架用这个而不是 [getAllArticles]：章节也是 [ArticleEntity]，一本 500 章的书
      * 会把列表冲掉。见 [ArticleDao.getStandaloneArticles]。
      */
-    fun getStandaloneArticles(): Flow<List<ArticleEntity>> {
+    fun getStandaloneArticles(): Flow<List<ArticleSummary>> {
         return articleDao.getStandaloneArticles()
     }
 
@@ -165,7 +166,11 @@ class ArticleRepository @Inject constructor(
      * 删除文章
      */
     suspend fun deleteArticle(article: ArticleEntity) {
-        articleDao.deleteArticle(article)
+        deleteArticleById(article.id)
+    }
+
+    suspend fun deleteArticleById(articleId: Long) {
+        articleDao.deleteArticleById(articleId)
     }
 
     /**

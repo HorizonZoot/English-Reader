@@ -56,9 +56,15 @@ sealed interface WholeTranslationSheetState {
                 status == WholeTranslationTaskStatus.RUNNING -> WholeTranslationPrimaryAction.CONTINUE_IN_BACKGROUND
                 status == WholeTranslationTaskStatus.COMPLETED -> WholeTranslationPrimaryAction.DONE
                 status == WholeTranslationTaskStatus.CANCELLED -> WholeTranslationPrimaryAction.CLOSE
-                progress.hasFailures -> WholeTranslationPrimaryAction.RETRY_FAILED
+                progress.canRetryFailures -> WholeTranslationPrimaryAction.RETRY_FAILED
+                progress.untranslated > 0 || progress.translating > 0 || progress.isFullyTranslated ->
+                    WholeTranslationPrimaryAction.RESUME
+                progress.hasFailures -> WholeTranslationPrimaryAction.CLOSE
                 else -> WholeTranslationPrimaryAction.RESUME
             }
+
+        val isBlocked: Boolean
+            get() = !status.isTerminal && primaryAction == WholeTranslationPrimaryAction.CLOSE
     }
 
     /** 开始前就被拒绝（无 profile、无内容等），不曾创建任务。 */
@@ -126,7 +132,7 @@ enum class WholeTranslationPrimaryAction {
     DONE,
 
     /**
-     * 任务已被用户取消，收起面板。
+     * 任务已被用户取消，或没有可以继续处理的失败项，收起面板。
      *
      * 与 [DONE] 分开只为文案：两者动作相同（收起面板），但取消后显示「完成」会让用户以为
      * 译文已经可用。

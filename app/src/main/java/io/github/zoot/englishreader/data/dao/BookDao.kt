@@ -54,6 +54,9 @@ interface BookDao {
     @Query("SELECT * FROM book_reading_progress WHERE bookId = :bookId")
     suspend fun getProgress(bookId: Long): BookReadingProgressEntity?
 
+    @Query("SELECT * FROM book_reading_progress WHERE bookId = :bookId")
+    fun observeProgress(bookId: Long): Flow<BookReadingProgressEntity?>
+
     // ---- 写入原语 ----
     // 均为 internal 语义：外部只应通过下面两个 @Transaction 方法操作，
     // 单独调用会破坏「书 + 章节 + 进度」的一致性。

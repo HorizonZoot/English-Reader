@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
@@ -18,8 +19,14 @@ import io.github.zoot.englishreader.model.TranslationFingerprint
 import io.github.zoot.englishreader.model.TranslationPlannerVersion
 import io.github.zoot.englishreader.model.TranslationSegmentationMode
 import io.github.zoot.englishreader.util.ParagraphAligner
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -80,7 +87,7 @@ class ArticleDaoAndroidTest {
     )
 
     @Test
-    fun deleteArticle_preservesVocabularyFieldsAndOtherArticleLinks() = runBlocking {
+    fun deleteArticleById_preservesVocabularyFieldsAndOtherArticleLinks() = runBlocking {
         val id = articleDao.insertArticle(ArticleEntity(title = "Delete", content = "Saved word."))
         val otherId = articleDao.insertArticle(ArticleEntity(title = "Keep", content = "Other word."))
         val word = VocabularyEntity(
@@ -92,7 +99,7 @@ class ArticleDaoAndroidTest {
         val otherWordId = vocabularyDao.insertVocabulary(otherWord)
         val otherArticle = articleDao.getArticleById(otherId)
 
-        articleDao.deleteArticle(requireNotNull(articleDao.getArticleById(id)))
+        articleDao.deleteArticleById(id)
 
         assertNull(articleDao.getArticleById(id))
         assertEquals(otherArticle, articleDao.getArticleById(otherId))
@@ -122,7 +129,7 @@ class ArticleDaoAndroidTest {
     }
 
     @Test
-    fun deleteArticle_deleteFails_rollsBackVocabularyDeduplicationAndUnbinding() = runBlocking {
+    fun deleteArticleById_deleteFails_rollsBackVocabularyDeduplicationAndUnbinding() = runBlocking {
         val id = articleDao.insertArticle(ArticleEntity(title = "Keep on failure", content = "Body."))
         vocabularyDao.insertVocabulary(VocabularyEntity(word = "shared"))
         vocabularyDao.insertVocabulary(VocabularyEntity(word = "shared", articleId = id))
@@ -135,7 +142,7 @@ class ArticleDaoAndroidTest {
         )
         var failed = false
         try {
-            articleDao.deleteArticle(article)
+            articleDao.deleteArticleById(id)
         } catch (_: android.database.SQLException) {
             failed = true
         }
@@ -143,6 +150,35 @@ class ArticleDaoAndroidTest {
         assertTrue(failed)
         assertEquals(article, articleDao.getArticleById(id))
         assertEquals(vocabulary, allVocab().sortedBy { it.id })
+    }
+
+    @Test
+    fun getStandaloneArticles_projectsShelfFieldsExcludesChaptersAndObservesTitleChanges() = runBlocking {
+        bookWithTwoChapters()
+        val firstId = articleDao.insertArticle(
+            ArticleEntity(title = "First", content = "Long body. ".repeat(2000),
+                translation = "长译文".repeat(2000), createdAt = 100)
+        )
+        val tiedId = articleDao.insertArticle(ArticleEntity(title = "Tied", content = "Body.", createdAt = 100))
+        val newestId = articleDao.insertArticle(ArticleEntity(title = "Newest", content = "Body.", createdAt = 200))
+        val expected = listOf(
+            ArticleSummary(newestId, "Newest", 200),
+            ArticleSummary(tiedId, "Tied", 100),
+            ArticleSummary(firstId, "First", 100)
+        )
+        val emissions = Channel<List<ArticleSummary>>(Channel.UNLIMITED)
+        val observer = launch { articleDao.getStandaloneArticles().collect { emissions.send(it) } }
+        try {
+            withTimeout(5_000) {
+                assertEquals(expected, emissions.receive())
+                articleDao.updateEditedTitle(tiedId, "Renamed")
+                val updated = emissions.receiveAsFlow().first { rows -> rows.any { it.title == "Renamed" } }
+                assertEquals(expected.map { if (it.id == tiedId) it.copy(title = "Renamed") else it }, updated)
+            }
+        } finally {
+            observer.cancelAndJoin()
+            emissions.close()
+        }
     }
 
     @Test

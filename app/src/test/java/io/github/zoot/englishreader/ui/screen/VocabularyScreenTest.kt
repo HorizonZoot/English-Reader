@@ -3,8 +3,11 @@ package io.github.zoot.englishreader.ui.screen
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
@@ -19,6 +22,9 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
@@ -127,11 +133,17 @@ class VocabularyScreenTest {
     @Test
     fun sourceArticleRow_showsTitleAndOpensThatArticle() {
         val word = word(1L, "noticing", articleId = 42L)
+        val events = mutableListOf<String>()
+        every { viewModel.stopAudio() } answers { events += "stop" }
         render(
             groups = listOf(group(VocabularyGroupId.Today, listOf(word))),
             details = mapOf(
                 word.id to VocabularyWordDetail(sourceTitle = "The Future of AI")
-            )
+            ),
+            onOpenArticle = { articleId, selectedWord ->
+                events += "navigate"
+                openedArticles += articleId to selectedWord
+            }
         )
 
         composeRule.onNodeWithText(
@@ -140,7 +152,35 @@ class VocabularyScreenTest {
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performClick()
 
         // 词一并带过去：阅读页要靠它滚动到并高亮该词所在的段落。
-        composeRule.runOnIdle { assertEquals(listOf(42L to "noticing"), openedArticles) }
+        composeRule.runOnIdle {
+            assertEquals(listOf(42L to "noticing"), openedArticles)
+            assertEquals(listOf("stop", "navigate"), events)
+        }
+    }
+
+    @Test
+    fun lifecycle_leavingResumedAndDisposing_stopsWithoutStartingPlaybackOnReturn() {
+        val owner = object : LifecycleOwner {
+            val registry = LifecycleRegistry.createUnsafe(this)
+            override val lifecycle: Lifecycle = registry
+        }
+        val visible = mutableStateOf(true)
+        composeRule.runOnUiThread { owner.registry.currentState = Lifecycle.State.RESUMED }
+        composeRule.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                if (visible.value) VocabularyScreen(onOpenArticle = { _, _ -> }, viewModel = viewModel)
+            }
+        }
+        composeRule.runOnIdle {
+            owner.registry.currentState = Lifecycle.State.STARTED
+            verify(exactly = 1) { viewModel.stopAudio() }
+            owner.registry.currentState = Lifecycle.State.RESUMED
+        }
+        composeRule.runOnIdle {
+            verify(exactly = 0) { viewModel.playWordAudio(any()) }
+            visible.value = false
+        }
+        composeRule.runOnIdle { verify(exactly = 2) { viewModel.stopAudio() } }
     }
 
     @Test
@@ -306,7 +346,8 @@ class VocabularyScreenTest {
 
     private fun render(
         groups: List<VocabularyGroup>,
-        details: Map<Long, VocabularyWordDetail> = emptyMap()
+        details: Map<Long, VocabularyWordDetail> = emptyMap(),
+        onOpenArticle: (Long, String) -> Unit = { articleId, word -> openedArticles += articleId to word }
     ) {
         groupsState.value = groups
         detailsState.value = details
@@ -314,7 +355,7 @@ class VocabularyScreenTest {
         composeRule.setContent {
             Box(modifier = Modifier.width(360.dp).fillMaxHeight()) {
                 VocabularyScreen(
-                    onOpenArticle = { articleId, word -> openedArticles += articleId to word },
+                    onOpenArticle = onOpenArticle,
                     viewModel = viewModel
                 )
             }

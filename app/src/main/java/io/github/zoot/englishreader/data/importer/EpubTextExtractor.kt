@@ -11,6 +11,8 @@ import java.io.InputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
+internal enum class EpubSpineDocumentType { XHTML, SVG }
+
 /**
  * 短篇 EPUB 自解析导入。
  *
@@ -51,8 +53,7 @@ class EpubTextExtractor(private val context: Context) {
      * 每次 [extract] 开始时归零。[EpubTextExtractor] 由 ArticleImporter 每次导入新建实例，
      * 实例不跨导入复用，故无需并发保护。
      *
-     * 注意：并发闸门是 ArticleListViewModel 的 importJob，不是 isImporting——后者只是
-     * 给界面看的状态，本身存在「读 value → launch → 置 true」的窗口。
+     * 并发入口由 ArticleListViewModel 协调；提取器实例只服务一次导入。
      */
     private var inflatedBytes = 0L
 
@@ -139,7 +140,7 @@ class EpubTextExtractor(private val context: Context) {
     // ---- 主解析流程 ----
 
     /**
-     * 只做 DRM 前置检查，不提取正文。
+     * 做 DRM 前置检查，并返回按规范化 href 关联的 OPF 文档类型，不提取正文。
      *
      * 供整本书导入路径（[EpubBookParser]）在交给 Readium 之前调用。Phase 0 Spike 实测：
      * Readium 3.0.3 会打开并返回声明了不支持加密算法的 spine 资源的**明文字节**，
@@ -150,7 +151,7 @@ class EpubTextExtractor(private val context: Context) {
      *
      * @throws ImportException [ImportFailure.EncryptedEpub] 或 [ImportFailure.InvalidEpub]
      */
-    fun requireNotEncrypted(file: File) {
+    internal fun requireNotEncrypted(file: File): Map<String, EpubSpineDocumentType> {
         val zip = try {
             ZipFile(file)
         } catch (e: Exception) {
@@ -159,15 +160,12 @@ class EpubTextExtractor(private val context: Context) {
         zip.use { z ->
             val opfPath = readRootfilePath(z)
             val opf = readOpf(z, opfPath)
-            val spinePaths = opf.spine.map { idref ->
-                val href = opf.manifest[idref] ?: throw ImportException(ImportFailure.InvalidEpub)
-                resolvePath(opf.opfDir, href)
-            }
-            if (spinePaths.isEmpty()) throw ImportException(ImportFailure.InvalidEpub)
+            val documents = resolveSpine(opf)
             val encrypted = readEncryptedPaths(z)
-            if (spinePaths.any { it in encrypted }) {
+            if (documents.any { it.path in encrypted }) {
                 throw ImportException(ImportFailure.EncryptedEpub)
             }
+            return documents.associate { it.path to it.type }
         }
     }
 
@@ -189,20 +187,16 @@ class EpubTextExtractor(private val context: Context) {
             // manifest href 相对 OPF 所在目录，须并入路径后才能在 ZIP 里查到。
             // 任一 spine 条目解析不出 manifest document 就是结构损坏——静默丢弃它会
             // 导入一篇残缺文章并报告成功，用户不知道正文已被截断，比直接拒绝更糟。
-            val spinePaths = opf.spine.map { idref ->
-                val href = opf.manifest[idref] ?: throw ImportException(ImportFailure.InvalidEpub)
-                resolvePath(opf.opfDir, href)
-            }
-            if (spinePaths.isEmpty()) throw ImportException(ImportFailure.InvalidEpub)
+            val documents = resolveSpine(opf)
 
             // DRM：只有 spine 正文被加密才拒绝；字体混淆不影响阅读，忽略。
             // 两侧路径都经 OcfPathNormalizer 归一，否则 ./ 之类差异会让比对漏判。
             val encrypted = readEncryptedPaths(z)
-            if (spinePaths.any { it in encrypted }) {
+            if (documents.any { it.path in encrypted }) {
                 throw ImportException(ImportFailure.EncryptedEpub)
             }
 
-            val text = concatChapters(z, spinePaths)
+            val text = concatChapters(z, documents)
             if (text.isEmpty()) throw ImportException(ImportFailure.EmptyContent)
 
             return EpubContent(text, opf.declaredTitle)
@@ -217,15 +211,18 @@ class EpubTextExtractor(private val context: Context) {
      *
      * 提取过程中累计字符数，超预算立即停止，不先构造超大 String 再判断。
      */
-    private fun concatChapters(zip: ZipFile, paths: List<String>): String {
+    private fun concatChapters(zip: ZipFile, documents: List<SpineDocument>): String {
         val sb = StringBuilder()
-        for (path in paths) {
+        for (document in documents) {
             // entry 缺失同样是结构损坏，不能跳过：静默少一章会让用户读到残缺全文
             // 却看到「导入成功」
-            val entry = zip.getEntry(path) ?: throw ImportException(ImportFailure.InvalidEpub)
+            val entry = zip.getEntry(document.path) ?: throw ImportException(ImportFailure.InvalidEpub)
             val chapter = XhtmlTextExtractor.extract(readEntryXml(zip, entry))
             // 章节本身可能只有图片或空 body，那是合法的，跳过不拼即可
             if (chapter.isEmpty()) continue
+            if (document.type == EpubSpineDocumentType.SVG) {
+                throw ImportException(ImportFailure.InvalidEpub)
+            }
 
             if (sb.isNotEmpty()) sb.append("\n\n")
             sb.append(chapter)
@@ -275,12 +272,35 @@ class EpubTextExtractor(private val context: Context) {
 
     private data class Opf(
         val opfDir: String,
-        /** id → href（相对 opfDir），只含 XHTML/HTML 条目 */
-        val manifest: Map<String, String>,
+        /** id → 资源声明；资源存在性与正文支持类型分别判断。 */
+        val manifest: Map<String, ManifestItem>,
         /** 有序 idref 列表 */
         val spine: List<String>,
         val declaredTitle: String?
     )
+
+    private data class ManifestItem(val href: String, val documentType: EpubSpineDocumentType?)
+
+    private data class SpineDocument(val path: String, val type: EpubSpineDocumentType)
+
+    private fun resolveSpine(opf: Opf): List<SpineDocument> {
+        val documents = opf.spine.map { idref ->
+            val item = opf.manifest[idref] ?: throw ImportException(ImportFailure.InvalidEpub)
+            SpineDocument(
+                resolvePath(opf.opfDir, item.href),
+                item.documentType ?: throw ImportException(ImportFailure.InvalidEpub)
+            )
+        }
+        if (documents.isEmpty()) throw ImportException(ImportFailure.InvalidEpub)
+        val types = mutableMapOf<String, EpubSpineDocumentType>()
+        for (document in documents) {
+            val previous = types.put(document.path, document.type)
+            if (previous != null && previous != document.type) {
+                throw ImportException(ImportFailure.InvalidEpub)
+            }
+        }
+        return documents
+    }
 
     private fun readOpf(zip: ZipFile, opfPath: String): Opf {
         val entry = zip.getEntry(opfPath) ?: throw ImportException(ImportFailure.InvalidEpub)
@@ -288,7 +308,7 @@ class EpubTextExtractor(private val context: Context) {
         // OPF 所在目录：manifest href 都相对它
         val opfDir = opfPath.substringBeforeLast('/', "")
 
-        val manifest = mutableMapOf<String, String>()
+        val manifest = mutableMapOf<String, ManifestItem>()
         val spine = mutableListOf<String>()
         var title: String? = null
         // dc:title 只在 <metadata> 内有效。不限定作用域会把 <reference title="..."> 之类
@@ -303,8 +323,8 @@ class EpubTextExtractor(private val context: Context) {
                     when (parser.name) {
                         "metadata" -> inMetadata = true
 
-                        "item" -> readManifestItem(parser)?.let { (id, href) ->
-                            manifest[id] = href
+                        "item" -> readManifestItem(parser)?.let { (id, item) ->
+                            manifest[id] = item
                         }
 
                         "itemref" -> readSpineItemRef(parser)?.let { idref ->
@@ -335,13 +355,16 @@ class EpubTextExtractor(private val context: Context) {
         return Opf(opfDir, manifest, spine, title)
     }
 
-    /** @return id to href，非 XHTML/HTML 条目返回 null（图片/CSS/字体不是正文） */
-    private fun readManifestItem(parser: XmlPullParser): Pair<String, String>? {
+    private fun readManifestItem(parser: XmlPullParser): Pair<String, ManifestItem>? {
         val id = parser.getAttributeValue(null, "id") ?: return null
         val href = parser.getAttributeValue(null, "href") ?: return null
         val mediaType = parser.getAttributeValue(null, "media-type").orEmpty()
-        val isDocument = mediaType.contains("xhtml") || mediaType.contains("html")
-        return if (isDocument) id to href else null
+        val documentType = when {
+            mediaType.contains("xhtml") || mediaType.contains("html") -> EpubSpineDocumentType.XHTML
+            mediaType == "image/svg+xml" -> EpubSpineDocumentType.SVG
+            else -> null
+        }
+        return id to ManifestItem(href, documentType)
     }
 
     /**

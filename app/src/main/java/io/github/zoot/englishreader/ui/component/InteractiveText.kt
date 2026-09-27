@@ -276,12 +276,32 @@ fun InteractiveText(
         }
     }
 
+    val selectedWordRanges = remember(
+        text, selectedWord, selectedWordStartOffset, selectedWordEndOffset, sourceStartOffset
+    ) {
+        buildList {
+            val word = selectedWord?.takeIf { it.isNotEmpty() } ?: return@buildList
+            var from = 0
+            while (from < text.length) {
+                val start = text.indexOf(word, from, ignoreCase = true)
+                if (start < 0) break
+                val range = WordBoundaryDetector.getWordRangeAtOffset(text, start)
+                if (range != null && range.word.equals(word, ignoreCase = true) &&
+                    (selectedWordStartOffset == null ||
+                        (selectedWordStartOffset == range.startOffset + sourceStartOffset &&
+                            selectedWordEndOffset == range.endOffset + sourceStartOffset))
+                ) add(range)
+                from = range?.endOffset ?: (start + 1)
+            }
+        }
+    }
+
     // 构建带高亮的 AnnotatedString
     // sentences 必须入 key：它不再是 text 的纯函数（precomputedSentences 可让同一 text
     // 配不同列表），只键 text 会用旧列表拼出与当前句子不一致的 annotatedText。
     val annotatedText = remember(
-        text, sentences, highlightedSentenceIndex, selectedWord, selectedWordStartOffset,
-        selectedWordEndOffset, sentenceIndexOffset, sourceStartOffset, highlightColor
+        text, sentences, highlightedSentenceIndex, selectedWordRanges,
+        sentenceIndexOffset, sourceStartOffset, highlightColor
     ) {
         buildAnnotatedString {
             append(text)
@@ -292,19 +312,8 @@ fun InteractiveText(
                     if (end > start) addStyle(SpanStyle(background = highlightColor), start, end)
                 }
             }
-            selectedWord?.let { word ->
-                var from = 0
-                while (word.isNotEmpty() && from < text.length) {
-                    val start = text.indexOf(word, from, ignoreCase = true)
-                    if (start < 0) break
-                    val end = start + word.length
-                    val wordBoundary = (start == 0 || !WordBoundaryDetector.isWordCharacter(text[start - 1])) &&
-                        (end == text.length || !WordBoundaryDetector.isWordCharacter(text[end]))
-                    val exact = selectedWordStartOffset == null ||
-                        (selectedWordStartOffset == start + sourceStartOffset && selectedWordEndOffset == end + sourceStartOffset)
-                    if (wordBoundary && exact) addStyle(SpanStyle(background = highlightColor), start, end)
-                    from = start + 1
-                }
+            selectedWordRanges.forEach { range ->
+                addStyle(SpanStyle(background = highlightColor), range.startOffset, range.endOffset)
             }
         }
     }
@@ -364,14 +373,11 @@ fun InteractiveText(
                     )
                 }
 
-                val start = selectedWordStartOffset?.minus(sourceStartOffset)
-                val end = selectedWordEndOffset?.minus(sourceStartOffset)
-                val layout = textLayoutResult
-                if (start != null && end != null && layout != null && end > start) {
+                selectedWordRanges.forEach { range ->
                     drawDashedTextRange(
-                        layout = layout,
-                        startOffset = start,
-                        endOffset = end,
+                        layout = textLayoutResult,
+                        startOffset = range.startOffset,
+                        endOffset = range.endOffset,
                         color = underlineColor
                     )
                 }
@@ -434,19 +440,19 @@ fun InteractiveText(
                         waitForUpOrCancellation()
                         return@awaitEachGesture
                     }
-                    val word = WordBoundaryDetector.getWordAtOffset(text, charOffset)
-                    if (word == null) {
+                    val wordRange = WordBoundaryDetector.getWordRangeAtOffset(text, charOffset)
+                    if (wordRange == null) {
                         waitForUpOrCancellation()
                         return@awaitEachGesture
                     }
                     val target = InteractiveTextLongPressTarget(
                         sentenceIndex = sentence.index + sentenceIndexOffset,
                         sentenceRange = sentence,
-                        word = word,
+                        word = wordRange.word,
                         anchorBounds = layout.getBoundingBox(charOffset).inViewport(visibleViewport),
                         sentenceBounds = layout.sentenceBounds(sentence, visibleViewport, sourceStartOffset),
-                        wordStartOffset = findWordStart(text, charOffset) + sourceStartOffset,
-                        wordEndOffset = findWordEnd(text, charOffset) + sourceStartOffset,
+                        wordStartOffset = wordRange.startOffset + sourceStartOffset,
+                        wordEndOffset = wordRange.endOffset + sourceStartOffset,
                         glyphOffset = charOffset + sourceStartOffset
                     )
                     currentEvent.changes.firstOrNull { it.id == down.id }?.consume()
@@ -466,7 +472,7 @@ fun InteractiveText(
                         change.consume()
                         if (!change.pressed) {
                             val onRelease = currentOnWordPressRelease
-                            if (onRelease != null) onRelease(target) else currentOnWordLongPress(word)
+                            if (onRelease != null) onRelease(target) else currentOnWordLongPress(wordRange.word)
                             break
                         }
                     }
@@ -501,23 +507,6 @@ private fun createAccessibilityTarget(
         sentenceBounds = layoutResult.sentenceBounds(sentence, viewport, sourceStartOffset),
         glyphOffset = glyphOffset + sourceStartOffset
     )
-}
-
-// 空串必须提前返回：`coerceIn(0, text.lastIndex)` 在空串上是 coerceIn(0, -1)，区间非法会抛
-// IllegalArgumentException。当前调用点只在 word != null 时才进来，空串到不了这里，但 helper
-// 自身不该依赖调用方的前置条件。
-private fun findWordStart(text: String, offset: Int): Int {
-    if (text.isEmpty()) return 0
-    var start = offset.coerceIn(0, text.lastIndex)
-    while (start > 0 && WordBoundaryDetector.isWordCharacter(text[start - 1])) start--
-    return start
-}
-
-private fun findWordEnd(text: String, offset: Int): Int {
-    if (text.isEmpty()) return 0
-    var end = offset.coerceIn(0, text.lastIndex)
-    while (end + 1 < text.length && WordBoundaryDetector.isWordCharacter(text[end + 1])) end++
-    return end + 1
 }
 
 /**
@@ -582,33 +571,21 @@ internal fun extractAccessibilityWords(
     var offset = startOffset
 
     while (offset < endOffset && words.size < maxWords) {
-        val word = WordBoundaryDetector.getWordAtOffset(text, offset)
-        if (word == null) {
+        val range = WordBoundaryDetector.getWordRangeAtOffset(text, offset)
+        if (range == null) {
             offset++
             continue
         }
 
-        val normalizedWord = word.lowercase(Locale.US)
+        val normalizedWord = range.word.lowercase(Locale.US)
         if (seenWords.add(normalizedWord)) {
-            words += word
+            words += range.word
         }
 
-        offset = advancePastWordRun(text, offset)
+        offset = range.endOffset
     }
 
     return words
-}
-
-private fun advancePastWordRun(text: String, startOffset: Int): Int {
-    var offset = startOffset
-    while (offset < text.length && isAccessibilityWordChar(text[offset])) {
-        offset++
-    }
-    return offset.coerceAtLeast(startOffset + 1)
-}
-
-private fun isAccessibilityWordChar(char: Char): Boolean {
-    return char.isLetterOrDigit() || char == '\'' || char == '-'
 }
 
 /**

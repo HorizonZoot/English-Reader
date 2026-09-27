@@ -58,7 +58,7 @@ class DictionaryPackEscapeTest {
             .setTransactionExecutor(Runnable::run)
             .build()
         server = MockWebServer().apply { start() }
-        installer = DictionaryPackInstaller(context, db.dictionaryDao()).apply {
+        installer = DictionaryPackInstaller(context, db.dictionaryDao(), DictionaryMutationLock()).apply {
             packUrl = server.url("/ecdict.csv").toString()
         }
         context.getSharedPreferences("dictionary_prefs", Context.MODE_PRIVATE).edit().clear().apply()

@@ -100,8 +100,9 @@ import io.github.zoot.englishreader.data.local.AiProviderTemplate
 import io.github.zoot.englishreader.data.repository.ProfileMutationResult
 import io.github.zoot.englishreader.util.toUiMessage
 import io.github.zoot.englishreader.viewmodel.AiProfileValidation
-import io.github.zoot.englishreader.viewmodel.ProfileActionResult
+import io.github.zoot.englishreader.viewmodel.ProfileMutationSubmission
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
+import java.util.UUID
 
 private val ProfileCardShape = RoundedCornerShape(16.dp)
 private val ProfileControlShape = RoundedCornerShape(12.dp)
@@ -117,25 +118,29 @@ fun AiProfileConfigScreen(
     val activeProfileId by viewModel.activeProfileId.collectAsStateWithLifecycle()
     val discovery by viewModel.modelDiscovery.collectAsStateWithLifecycle()
     val profileMutationInFlight by viewModel.profileMutationInFlight.collectAsStateWithLifecycle()
-    val snackbarHostState = remember { SnackbarHostState() }
+    val profileMutationState by viewModel.profileMutationState.collectAsStateWithLifecycle()
+    val snackbarHostState = remember(viewModel) { SnackbarHostState() }
     val context = LocalContext.current
 
-    var editorOpen by remember { mutableStateOf(false) }
-    var editingProfile by remember { mutableStateOf<AiProviderProfile?>(null) }
-    var actionProfile by remember { mutableStateOf<AiProviderProfile?>(null) }
-    var deleteProfile by remember { mutableStateOf<AiProviderProfile?>(null) }
-    var showClearCache by remember { mutableStateOf(false) }
-    var showDeleteAll by remember { mutableStateOf(false) }
+    var editorOpen by remember(viewModel) { mutableStateOf(false) }
+    var editorSessionId by remember(viewModel) { mutableStateOf<String?>(null) }
+    var draftRevision by remember(viewModel) { mutableStateOf(0L) }
+    var latestAcceptedMutationId by remember(viewModel) { mutableStateOf<String?>(null) }
+    var editingProfile by remember(viewModel) { mutableStateOf<AiProviderProfile?>(null) }
+    var actionProfile by remember(viewModel) { mutableStateOf<AiProviderProfile?>(null) }
+    var deleteProfile by remember(viewModel) { mutableStateOf<AiProviderProfile?>(null) }
+    var showClearCache by remember(viewModel) { mutableStateOf(false) }
+    var showDeleteAll by remember(viewModel) { mutableStateOf(false) }
 
-    var displayName by remember { mutableStateOf("") }
-    var providerTemplate by remember { mutableStateOf(AiProviderTemplate.DEEPSEEK) }
-    var baseUrl by remember { mutableStateOf(AiProviderTemplate.DEEPSEEK.defaultBaseUrl.orEmpty()) }
-    var modelId by remember { mutableStateOf(AiProviderTemplate.DEEPSEEK.defaultModelId.orEmpty()) }
-    var apiKey by remember { mutableStateOf("") }
-    var apiKeyVisible by remember { mutableStateOf(false) }
-    var temperature by remember { mutableStateOf("0.2") }
-    var discoveryValidationAttempted by remember { mutableStateOf(false) }
-    var saveValidationAttempted by remember { mutableStateOf(false) }
+    var displayName by remember(viewModel) { mutableStateOf("") }
+    var providerTemplate by remember(viewModel) { mutableStateOf(AiProviderTemplate.DEEPSEEK) }
+    var baseUrl by remember(viewModel) { mutableStateOf(AiProviderTemplate.DEEPSEEK.defaultBaseUrl.orEmpty()) }
+    var modelId by remember(viewModel) { mutableStateOf(AiProviderTemplate.DEEPSEEK.defaultModelId.orEmpty()) }
+    var apiKey by remember(viewModel) { mutableStateOf("") }
+    var apiKeyVisible by remember(viewModel) { mutableStateOf(false) }
+    var temperature by remember(viewModel) { mutableStateOf("0.2") }
+    var discoveryValidationAttempted by remember(viewModel) { mutableStateOf(false) }
+    var saveValidationAttempted by remember(viewModel) { mutableStateOf(false) }
 
     fun invalidateConnectionTestResult() = viewModel.invalidateModelDiscovery()
 
@@ -144,6 +149,9 @@ fun AiProfileConfigScreen(
     }
 
     fun openEditor(profile: AiProviderProfile?) {
+        editorSessionId = UUID.randomUUID().toString()
+        draftRevision = 0L
+        latestAcceptedMutationId = null
         editingProfile = profile
         displayName = profile?.displayName ?: context.getString(R.string.settings_provider_deepseek)
         discoveryValidationAttempted = false
@@ -163,19 +171,29 @@ fun AiProfileConfigScreen(
     fun closeEditor(force: Boolean = false) {
         if (profileMutationInFlight && !force) return
         editorOpen = false
+        editorSessionId = null
+        latestAcceptedMutationId = null
         editingProfile = null
         apiKey = ""
         apiKeyVisible = false
         invalidateConnectionTestResult()
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(viewModel, profileMutationState, editorSessionId, draftRevision, latestAcceptedMutationId) {
+        val completed = profileMutationState ?: return@LaunchedEffect
+        if (completed.result == null) return@LaunchedEffect
+        if (completed.result == ProfileMutationResult.Success && editorOpen &&
+            completed.editorSessionId == editorSessionId &&
+            completed.draftRevision == draftRevision &&
+            completed.mutationId == latestAcceptedMutationId
+        ) {
+            closeEditor(force = true)
+        }
+        viewModel.acknowledgeProfileMutation(completed.mutationId)
+    }
+
+    LaunchedEffect(viewModel, snackbarHostState, context) {
         viewModel.profileActionEvents.collect { event ->
-            if (event.action == ProfileActionResult.CREATED ||
-                event.action == ProfileActionResult.UPDATED
-            ) {
-                closeEditor(force = true)
-            }
             val messageRes = when (event.failure) {
                 ProfileMutationResult.ReplacementCredentialRequired ->
                     R.string.settings_profile_replacement_key_required
@@ -257,31 +275,60 @@ fun AiProfileConfigScreen(
                     ProfileEditor(
                         editing = editingProfile != null,
                         displayName = displayName,
-                        onDisplayNameChange = { displayName = it },
+                        onDisplayNameChange = {
+                            if (displayName != it) {
+                                displayName = it
+                                draftRevision++
+                            }
+                        },
                         providerTemplate = providerTemplate,
                         onProviderChange = { template ->
+                            val nextName = context.getString(profileTemplateLabelRes(template))
+                            val nextBaseUrl = template.defaultBaseUrl.orEmpty()
+                            val nextModelId = template.defaultModelId.orEmpty()
+                            if (providerTemplate != template || displayName != nextName ||
+                                baseUrl != nextBaseUrl || modelId != nextModelId
+                            ) {
+                                draftRevision++
+                            }
                             providerTemplate = template
-                            displayName = context.getString(profileTemplateLabelRes(template))
-                            baseUrl = template.defaultBaseUrl.orEmpty()
-                            modelId = template.defaultModelId.orEmpty()
+                            displayName = nextName
+                            baseUrl = nextBaseUrl
+                            modelId = nextModelId
                             invalidateConnectionTestResult()
                         },
                         baseUrl = baseUrl,
                         onBaseUrlChange = {
-                            baseUrl = it
-                            invalidateConnectionTestResult()
+                            if (baseUrl != it) {
+                                baseUrl = it
+                                draftRevision++
+                                invalidateConnectionTestResult()
+                            }
                         },
                         modelId = modelId,
-                        onModelIdChange = { modelId = it },
+                        onModelIdChange = {
+                            if (modelId != it) {
+                                modelId = it
+                                draftRevision++
+                            }
+                        },
                         apiKey = apiKey,
                         onApiKeyChange = {
-                            apiKey = it
-                            invalidateConnectionTestResult()
+                            if (apiKey != it) {
+                                apiKey = it
+                                draftRevision++
+                                invalidateConnectionTestResult()
+                            }
                         },
                         apiKeyVisible = apiKeyVisible,
                         onToggleApiKeyVisibility = { apiKeyVisible = !apiKeyVisible },
                         temperature = temperature,
-                        onTemperatureChange = { temperature = it },
+                        onTemperatureChange = {
+                            if (temperature != it) {
+                                temperature = it
+                                draftRevision++
+                            }
+                        },
                         identityChanged = identityChanged,
                         testing = testing,
                         connectionResult = discovery.result,
@@ -302,9 +349,12 @@ fun AiProfileConfigScreen(
                         onSave = {
                             saveValidationAttempted = true
                             val value = normalizedTemperature
-                            if (saveValidation.valid && value != null) {
-                                editingProfile?.let { profile ->
+                            val sessionId = editorSessionId
+                            if (saveValidation.valid && value != null && sessionId != null) {
+                                val submission = editingProfile?.let { profile ->
                                     viewModel.updateProfile(
+                                        editorSessionId = sessionId,
+                                        draftRevision = draftRevision,
                                         profileId = profile.profileId,
                                         displayName = displayName,
                                         providerTemplate = providerTemplate,
@@ -314,6 +364,8 @@ fun AiProfileConfigScreen(
                                         temperatureInput = temperature
                                     )
                                 } ?: viewModel.createProfile(
+                                    editorSessionId = sessionId,
+                                    draftRevision = draftRevision,
                                     displayName = displayName,
                                     providerTemplate = providerTemplate,
                                     baseUrl = baseUrl,
@@ -321,6 +373,9 @@ fun AiProfileConfigScreen(
                                     apiKey = apiKey,
                                     temperature = value
                                 )
+                                if (submission is ProfileMutationSubmission.Accepted) {
+                                    latestAcceptedMutationId = submission.mutationId
+                                }
                             }
                         },
                         onDismiss = { closeEditor() }

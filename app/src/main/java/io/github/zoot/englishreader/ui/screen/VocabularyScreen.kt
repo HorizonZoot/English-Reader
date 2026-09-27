@@ -25,6 +25,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -41,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
@@ -79,6 +82,17 @@ fun VocabularyScreen(
 
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) viewModel.stopAudio()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.stopAudio()
+        }
+    }
 
     // 单一 collector 顺序消费所有一次性事件：showSnackbar 挂起到消息消失，
     // 因此连续事件天然串行，不会互相抢占 Snackbar 宿主。
@@ -169,7 +183,10 @@ fun VocabularyScreen(
                                         detail = details[word.id],
                                         isPreparingAudio = loadingAudioWordId == word.id,
                                         onPlayAudio = { viewModel.playWordAudio(word) },
-                                        onOpenArticle = onOpenArticle,
+                                        onOpenArticle = { articleId, selectedWord ->
+                                            viewModel.stopAudio()
+                                            onOpenArticle(articleId, selectedWord)
+                                        },
                                         onDelete = { viewModel.deleteVocabulary(word) }
                                     )
                                 }

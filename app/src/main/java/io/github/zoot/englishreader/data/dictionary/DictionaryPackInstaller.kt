@@ -11,15 +11,21 @@ import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
@@ -45,15 +51,31 @@ import okhttp3.Request
  *
  * ## 失败安全
  *
- * 安装走 `DictionaryDao.replaceAll`（`@Transaction`）。中途失败整体回滚，且版本号只在事务
- * 成功后才写 —— 所以失败的净效果是「扩展词库没装上」，而不是「词库被清空」。下次启动
- * `ensureInitialized` 看到版本号仍是 assets 的值，会重新从 assets 初始化。
+ * 安装走 `DictionaryDao.replaceAllStreaming` 事务，中途失败保留旧词库。初始化、安装和移除
+ * 共用 mutation lock；事务提交后取消按最终库存收尾，旧版本标记不能触发扩展库重建。
  */
 @Singleton
-class DictionaryPackInstaller @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val dictionaryDao: DictionaryDao
+class DictionaryPackInstaller internal constructor(
+    private val context: Context,
+    private val dictionaryDao: DictionaryDao,
+    private val mutationLock: DictionaryMutationLock,
+    private val callFactory: Call.Factory
 ) {
+    @Inject
+    constructor(
+        @ApplicationContext context: Context,
+        dictionaryDao: DictionaryDao,
+        mutationLock: DictionaryMutationLock
+    ) : this(
+        context,
+        dictionaryDao,
+        mutationLock,
+        OkHttpClient.Builder()
+            .connectTimeout(CONNECT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+            // 单次读超时；完整大包下载不设置总 callTimeout。
+            .readTimeout(READ_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    )
 
     /**
      * 下载地址。生产走 [PACK_URL]，测试可覆盖成 MockWebServer 的地址。
@@ -112,7 +134,7 @@ class DictionaryPackInstaller @Inject constructor(
             publish(
                 when {
                     count == null -> DictionaryPackState.NotInstalled
-                    count >= INSTALLED_THRESHOLD -> DictionaryPackState.Installed(count)
+                    hasExtendedDictionary(count) -> DictionaryPackState.Installed(count)
                     else -> DictionaryPackState.NotInstalled
                 }
             )
@@ -144,32 +166,26 @@ class DictionaryPackInstaller @Inject constructor(
     }
 
 
-    /**
-     * 下载并安装扩展词库。调用方必须已取得用户同意。
-     *
-     * 取消由协程取消驱动：调用方 cancel 后临时文件被删除，数据库因事务回滚保持原样。
-     *
-     * ## 脆弱点：DictionaryRepository.ensureInitialized 的 count > 0 守卫
-     *
-     * 本函数的版本号写入（line 198）发生在 `replaceAllStreaming` **之后**。若协程在事务期间
-     * 被取消，`deleteAll()` 已执行但插入未完成，事务回滚后表为空，而版本号未落盘。下次启动
-     * `DictionaryRepository.ensureInitialized` 看到 `installedVersion (旧值) >= DICT_VERSION
-     * && count (0) > 0`——**`count > 0` 守住了这一情况**，让它重新从 assets 初始化。
-     *
-     * **若有人「优化」时把 `count > 0` 删掉、只信版本号，那么取消会让用户落到一张不可恢复的
-     * 空词表。** 这两处的逻辑必须一起改，不能单独动。
-     */
+    /** 下载保持可取消；提交后的取消在持共享锁时按真实库存收尾，再原样传播取消。 */
     suspend fun install() {
         if (!operationMutex.tryLock()) return
         val temp = File(context.cacheDir, TEMP_FILE_NAME)
+        var cancellationSettled = false
         try {
             publish(DictionaryPackState.Downloading(0, null))
             download(temp)
             coroutineContext.ensureActive()
-            val entries = parseAndInstall(temp)
-            publish(DictionaryPackState.Installed(entries))
+            mutationLock.mutex.withLock {
+                try {
+                    val entries = parseAndInstall(temp)
+                    publish(DictionaryPackState.Installed(entries))
+                } catch (cancellation: CancellationException) {
+                    cancellationSettled = true
+                    settleCancelledInstall(cancellation)
+                }
+            }
         } catch (cancellation: CancellationException) {
-            publish(DictionaryPackState.Failed(DictionaryPackFailure.CANCELLED))
+            if (!cancellationSettled) publish(DictionaryPackState.Failed(DictionaryPackFailure.CANCELLED))
             throw cancellation
         } catch (error: Exception) {
             // 一个 catch 处理全部非取消失败，**刻意不分成 IOException / Exception 两支**。
@@ -225,12 +241,15 @@ class DictionaryPackInstaller @Inject constructor(
             val entries = withContext(Dispatchers.IO) { BuiltInDictionary.read(context) }
             if (entries.isEmpty()) throw IOException("built-in dictionary is empty")
             coroutineContext.ensureActive()
-            withContext(Dispatchers.IO + NonCancellable) {
-                dictionaryDao.replaceAll(entries)
-                committed = true
-                context.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
-                    .edit().putInt(KEY_DICT_VERSION, BuiltInDictionary.VERSION).apply()
-                publish(DictionaryPackState.NotInstalled)
+            mutationLock.mutex.withLock {
+                coroutineContext.ensureActive()
+                withContext(Dispatchers.IO + NonCancellable) {
+                    dictionaryDao.replaceAll(entries)
+                    committed = true
+                    context.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
+                        .edit().putInt(KEY_DICT_VERSION, BuiltInDictionary.VERSION).apply()
+                    publish(DictionaryPackState.NotInstalled)
+                }
             }
             return DictionaryPackRemovalResult.REMOVED
         } catch (cancellation: CancellationException) {
@@ -252,44 +271,55 @@ class DictionaryPackInstaller @Inject constructor(
      * 下载仍会跑完。
      */
     private suspend fun download(target: File) = withContext(Dispatchers.IO) {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(CONNECT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-            // 读超时按**单次读**计，不是整体下载时长；大文件不能用 callTimeout 卡死。
-            .readTimeout(READ_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
-            .build()
+        val call = callFactory.newCall(Request.Builder().url(packUrl).build())
+        coroutineScope {
+            val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    awaitCancellation()
+                } finally {
+                    call.cancel()
+                }
+            }
+            try {
+                coroutineContext.ensureActive()
+                call.execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    val body = response.body ?: throw IOException("empty body")
+                    val declaredTotal = body.contentLength().takeIf { it > 0 }
 
-        val request = Request.Builder().url(packUrl).build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-            val body = response.body ?: throw IOException("empty body")
-            val declaredTotal = body.contentLength().takeIf { it > 0 }
-
-            body.byteStream().use { source ->
-                target.outputStream().buffered().use { sink ->
-                    val buffer = ByteArray(COPY_BUFFER_BYTES)
-                    var total = 0L
-                    var lastReported = 0L
-                    while (true) {
-                        coroutineContext.ensureActive()
-                        val read = source.read(buffer)
-                        if (read < 0) break
-                        sink.write(buffer, 0, read)
-                        total += read
-                        // 节流上报：逐块更新 StateFlow 会让 Compose 每几 KB 重组一次。
-                        if (total - lastReported >= PROGRESS_STEP_BYTES) {
-                            lastReported = total
+                    body.byteStream().use { source ->
+                        target.outputStream().buffered().use { sink ->
+                            val buffer = ByteArray(COPY_BUFFER_BYTES)
+                            var total = 0L
+                            var lastReported = 0L
+                            while (true) {
+                                coroutineContext.ensureActive()
+                                val read = source.read(buffer)
+                                if (read < 0) break
+                                sink.write(buffer, 0, read)
+                                total += read
+                                // 节流上报：逐块更新 StateFlow 会让 Compose 每几 KB 重组一次。
+                                if (total - lastReported >= PROGRESS_STEP_BYTES) {
+                                    lastReported = total
+                                    publish(DictionaryPackState.Downloading(total, declaredTotal))
+                                }
+                                if (total > MAX_PACK_BYTES) {
+                                    throw IOException("pack exceeds $MAX_PACK_BYTES bytes")
+                                }
+                            }
                             publish(DictionaryPackState.Downloading(total, declaredTotal))
+                            if (total < MIN_PACK_BYTES) {
+                                // 拿到的太小，几乎肯定是错误页面而不是词库。
+                                throw MalformedPackException("pack too small: $total bytes")
+                            }
                         }
-                        if (total > MAX_PACK_BYTES) {
-                            throw IOException("pack exceeds $MAX_PACK_BYTES bytes")
-                        }
-                    }
-                    publish(DictionaryPackState.Downloading(total, declaredTotal))
-                    if (total < MIN_PACK_BYTES) {
-                        // 拿到的太小，几乎肯定是错误页面而不是词库。
-                        throw MalformedPackException("pack too small: $total bytes")
                     }
                 }
+            } catch (error: IOException) {
+                coroutineContext.ensureActive()
+                throw error
+            } finally {
+                cancellation.cancel()
             }
         }
     }
@@ -357,7 +387,7 @@ class DictionaryPackInstaller @Inject constructor(
                 //
                 // 在这里抛异常会让 `deleteAll` 与已插入的批次一起回滚，用户保有原词库。
                 persisted = dictionaryDao.getCount()
-                if (persisted < INSTALLED_THRESHOLD) {
+                if (!hasExtendedDictionary(persisted)) {
                     throw MalformedPackException(
                         "pack persisted only $persisted entries (parsed $parsed lines); " +
                             "rolling back to keep the existing dictionary"
@@ -365,13 +395,36 @@ class DictionaryPackInstaller @Inject constructor(
                 }
             }
         }
-        // 版本号只在事务成功提交后才写。回滚时它保持旧值，`ensureInitialized` 会照常重建。
-        context.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putInt(KEY_DICT_VERSION, PACK_DICT_VERSION)
-            .apply()
+        coroutineContext.ensureActive()
+        markExtendedDictionaryVersion()
         Log.d(TAG, "Dictionary pack installed: $persisted entries")
         persisted
+    }
+
+    private fun markExtendedDictionaryVersion() {
+        val prefs = context.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
+        if (prefs.getInt(KEY_DICT_VERSION, 0) < PACK_DICT_VERSION) {
+            prefs.edit().putInt(KEY_DICT_VERSION, PACK_DICT_VERSION).apply()
+        }
+    }
+
+    /** 调用方仍持共享锁，parseAndInstall 的结构化事务与清理已经结束。 */
+    private suspend fun settleCancelledInstall(cancellation: CancellationException): Nothing {
+        // 先留在原 dispatcher 建立不可取消的收尾，IO 返回时不会再次投递 caller 的取消。
+        withContext(NonCancellable) {
+            try {
+                val count = withContext(Dispatchers.IO) {
+                    dictionaryDao.getCount().also { if (hasExtendedDictionary(it)) markExtendedDictionaryVersion() }
+                }
+                publish(if (hasExtendedDictionary(count)) DictionaryPackState.Installed(count)
+                    else DictionaryPackState.Failed(DictionaryPackFailure.CANCELLED))
+            } catch (cleanup: Exception) {
+                // 收尾失败不猜库存、不写内置版本；原操作的取消信号优先。
+                if (cleanup !is CancellationException) Log.w(TAG, "Cancelled dictionary inventory unavailable")
+                publish(DictionaryPackState.Failed(DictionaryPackFailure.CANCELLED))
+            }
+        }
+        throw cancellation
     }
 
     /**
@@ -529,9 +582,6 @@ class DictionaryPackInstaller @Inject constructor(
          * 取 100 留出空间给 assets 词库将来的版本递增。
          */
         private const val PACK_DICT_VERSION = 100
-
-        /** 判定「已安装扩展词库」的条数下界。内置词库约 7,005 条，取 5 万足以区分。 */
-        private const val INSTALLED_THRESHOLD = 50_000
 
         /** 小于此值几乎肯定不是词库（比如拿到一个 HTML 错误页）。 */
         private const val MIN_PACK_BYTES = 1_000_000L

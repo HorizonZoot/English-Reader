@@ -3,7 +3,7 @@ package io.github.zoot.englishreader.core
 /**
  * 句子范围数据类
  *
- * 保存句子的原文和由当前段落 `InteractiveText` 计算出的精确位置。
+ * 保存分句器返回的句子原文与段落内精确位置，供 `InteractiveText` 直接使用。
  * 从 PoC 项目迁移，用于 InteractiveText 的句子高亮功能。
  *
  * @property index 句子索引（从 0 开始）
@@ -21,12 +21,8 @@ data class SentenceRange(
     val endOffset: Int
 ) {
     init {
-        // 只校验单个区间自身的长度自洽。注意它**捕获不到**：offset 整体平移、区间重叠、
-        // 以及相邻区间之间的覆盖空洞——而「连续覆盖」恰恰是 InteractiveText 逐句 append
-        // 拼出 annotatedText 时依赖的不变量（一旦有空洞，annotatedText 与原文长度不等，
-        // 布局 offset 与 startOffset 的坐标系就分叉了）。
-        // 分段渲染路径上，`ParagraphAligner.AlignedParagraph` 会在构造时校验每句确实落在
-        // 其声称的偏移上（可捕获整体平移），但重叠与空洞仍无人校验。
+        // 这里只校验区间长度；AlignedParagraph 另行校验原文与偏移的对应。
+        // InteractiveText 直接 append 完整段落，分句忽略的空白仍保留，不能用句子拼接重建坐标。
         require(text.length == endOffset - startOffset) {
             "text length mismatch: expected ${endOffset - startOffset}, got ${text.length}"
         }

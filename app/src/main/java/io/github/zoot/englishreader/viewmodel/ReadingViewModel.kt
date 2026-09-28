@@ -235,7 +235,7 @@ class ReadingViewModel @Inject constructor(
         error: AiError
     ) {
         if (error.isConfigurationError()) {
-            coordinator.invalidate(token)
+            if (!coordinator.invalidate(token)) return
             _aiConfigurationPrompt.value = true
             clearSelection()
         } else {

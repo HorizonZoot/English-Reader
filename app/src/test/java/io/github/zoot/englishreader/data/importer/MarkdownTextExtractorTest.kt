@@ -8,6 +8,37 @@ import org.junit.Test
 
 class MarkdownTextExtractorTest {
 
+    @Test(timeout = 10_000)
+    fun extract_incompleteMarkupWithinBudget_preservesTextWithinTimeGuard() {
+        val patterns = listOf("[", "![", "[a](", "![a](")
+        for (pattern in patterns) {
+            for (size in listOf(5_000, 10_000, 20_000, 40_000)) {
+                val input = pattern.repeat(size / pattern.length)
+                assertEquals(input, MarkdownTextExtractor.extract(input))
+            }
+        }
+        val unmatchedTicks = "prefix " + (1..270).joinToString(" x ") { "`".repeat(it) }
+        assertTrue(unmatchedTicks.length <= ImportBudget.MAX_IMPORT_CHARS)
+        assertEquals(unmatchedTicks, MarkdownTextExtractor.extract(unmatchedTicks))
+    }
+
+    @Test
+    fun extract_linkSubset_preservesEscapesEmptyLabelsAndNestedOpeners() {
+        listOf(
+            "before ![](image) after" to "before  after",
+            "before [](url) after" to "before [](url) after",
+            "[outer [inner](url)" to "outer [inner",
+            "![outer [inner](image)" to "outer [inner",
+            "\\[keep [all](url)" to "[keep [all](url)",
+            "[missing](url [valid](ok)" to "missing",
+            "[first](one) [second](two)" to "first second",
+            "before \\`not code `real` after" to "before `not code real after",
+            "before `code \\` after" to "before code \\ after"
+        ).forEach { (input, expected) ->
+            assertEquals(input, expected, MarkdownTextExtractor.extract(input))
+        }
+    }
+
     @Test
     fun extract_headingMarkers_preservesLiteralHashes() {
         // CommonMark 闭合井号前必须有空白；C# / F# 中的井号曾被 trimEnd('#') 误删。

@@ -2,6 +2,8 @@ package io.github.zoot.englishreader.data.ai
 
 import com.squareup.moshi.JsonDataException
 import com.squareup.moshi.JsonEncodingException
+import io.github.zoot.englishreader.data.remote.ai.AiHttpStatusException
+import io.github.zoot.englishreader.data.remote.ai.AiResponseTooLargeException
 import kotlinx.coroutines.CancellationException
 import retrofit2.HttpException
 import java.io.EOFException
@@ -20,7 +22,8 @@ internal fun Throwable.aiFailureCause(): Throwable {
     }
     return causes.firstOrNull { it is CancellationException }
         ?: causes.firstOrNull {
-            it is HttpException || it is AiTimeoutException || it is InterruptedIOException ||
+            it is HttpException || it is AiHttpStatusException || it is AiResponseTooLargeException ||
+                it is AiTimeoutException || it is InterruptedIOException ||
                 it is UnknownHostException || it is SSLException || it is JsonDataException ||
                 it is JsonEncodingException || it is EOFException
         }

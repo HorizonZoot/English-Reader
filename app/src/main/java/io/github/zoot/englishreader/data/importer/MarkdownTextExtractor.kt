@@ -48,9 +48,6 @@ object MarkdownTextExtractor {
     /** 围栏起始：三个以上反引号或波浪号。 */
     private val FENCE_OPEN = Regex("^ {0,3}(`{3,}|~{3,})")
 
-    private val IMAGE = Regex("!\\[([^\\]]*)]\\([^)]*\\)")
-    private val LINK = Regex("\\[([^\\]]+)]\\([^)]*\\)")
-
     private val THREE_OR_MORE_NEWLINES = Regex("\n{3,}")
 
     /** 围栏（开启与关闭）允许的最大前导空格数。更深的缩进属于代码块内容。 */
@@ -121,6 +118,7 @@ object MarkdownTextExtractor {
      */
     private fun protectInlineCode(text: String, sentinel: Char): Pair<String, List<String>> {
         val spans = mutableListOf<String>()
+        val tickRuns = indexTickRuns(text)
         val out = StringBuilder(text.length)
         var i = 0
 
@@ -145,7 +143,10 @@ object MarkdownTextExtractor {
             val contentStart = i + tickCount
             // 闭合序列必须与开启序列**等长**：indexOf("``") 会命中 "```" 的前两个反引号，
             // 把长序列错当成闭合符，留下一个游离反引号并破坏后续解析。
-            val closeIndex = findClosingTickRun(text, contentStart, tickCount)
+            val closeIndex = tickRuns[tickCount]?.let { starts ->
+                while (starts.isNotEmpty() && starts.first() < contentStart) starts.removeFirst()
+                starts.firstOrNull()
+            } ?: -1
 
             // 未闭合的反引号不是代码，是正文里的普通字符，原样保留
             if (closeIndex < 0) {
@@ -162,28 +163,20 @@ object MarkdownTextExtractor {
         return out.toString() to spans
     }
 
-    /**
-     * 找到与开启序列**等长**的反引号闭合序列。
-     *
-     * 必须扫描完整的 run 再比长度：`` `` `` 开启后遇到 ``` ``` ``` 时，朴素的
-     * `indexOf("``")` 会命中前两个反引号而把第三个留在正文里。CommonMark 的规则是
-     * 只有长度完全相同的序列才能闭合。
-     *
-     * @return 闭合序列的起始下标；找不到返回 -1
-     */
-    private fun findClosingTickRun(text: String, from: Int, tickCount: Int): Int {
-        var i = from
+    /** 按完整 run 的长度索引闭合候选；未匹配 opener 不再重复扫描全文后缀。 */
+    private fun indexTickRuns(text: String): Map<Int, ArrayDeque<Int>> {
+        val runs = mutableMapOf<Int, ArrayDeque<Int>>()
+        var i = 0
         while (i < text.length) {
             if (text[i] != '`') {
                 i++
                 continue
             }
-            var run = 0
-            while (i + run < text.length && text[i + run] == '`') run++
-            if (run == tickCount) return i
-            i += run   // 长度不符：整个 run 都不是闭合符，跳过它继续找
+            val start = i
+            while (i < text.length && text[i] == '`') i++
+            runs.getOrPut(i - start) { ArrayDeque() }.addLast(start)
         }
-        return -1
+        return runs
     }
 
     private fun restoreInlineCode(text: String, spans: List<String>, sentinel: Char): String {
@@ -332,15 +325,43 @@ object MarkdownTextExtractor {
         // 图片保留 alt；无 alt 时整项删除（读出一串文件名对读者无意义）。
         // 被转义的起始标记要原样留下——`\[not a link](url)` 是用户明确要显示的字面文本，
         // 剥掉方括号会连 URL 一起丢失。转义判定必须在这里做：stripEmphasis 的转义处理
-        // 排在其后，救不回已经被正则吃掉的内容。
-        var result = IMAGE.replace(line) { match ->
-            if (isEscapedAt(line, match.range.first)) match.value else match.groupValues[1]
+        // 排在其后，救不回已经被剥掉的内容。
+        val imagesStripped = stripLinks(line, images = true)
+        return stripEmphasis(stripLinks(imagesStripped, images = false))
+    }
+
+    private fun stripLinks(line: String, images: Boolean): String {
+        val out = StringBuilder(line.length)
+        var i = 0
+        var bracket = -1
+        var parenthesis = -1
+        while (i < line.length) {
+            val opens = if (images) line[i] == '!' && line.getOrNull(i + 1) == '[' else line[i] == '['
+            if (!opens) {
+                out.append(line[i++])
+                continue
+            }
+            val labelStart = i + if (images) 2 else 1
+            // 两个闭合位置只向前推进；密集未闭合 opener 不得触发重复后缀扫描。
+            if (bracket < labelStart) bracket = line.indexOf(']', labelStart)
+            if (bracket < 0) {
+                out.append(line, i, line.length)
+                break
+            }
+            if ((!images && bracket == labelStart) || line.getOrNull(bracket + 1) != '(') {
+                out.append(line[i++])
+                continue
+            }
+            if (parenthesis < bracket + 2) parenthesis = line.indexOf(')', bracket + 2)
+            if (parenthesis < 0) {
+                out.append(line, i, line.length)
+                break
+            }
+            if (isEscapedAt(line, i)) out.append(line, i, parenthesis + 1)
+            else out.append(line, labelStart, bracket)
+            i = parenthesis + 1
         }
-        result = LINK.replace(result) { match ->
-            if (isEscapedAt(result, match.range.first)) match.value else match.groupValues[1]
-        }
-        result = stripEmphasis(result)
-        return result
+        return out.toString()
     }
 
     /**

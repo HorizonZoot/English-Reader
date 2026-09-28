@@ -1,6 +1,7 @@
 package io.github.zoot.englishreader.data.importer
 
 import android.content.Context
+import android.content.ContextWrapper
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import io.github.zoot.englishreader.data.repository.BookImporter
@@ -25,6 +26,8 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -73,6 +76,9 @@ import org.robolectric.annotation.Config
 class ConcurrentAndLargeImportTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
+
+    @get:Rule
+    val temporaryFolder = TemporaryFolder()
 
     /** 与生产一致：单例 parser，被多个并发导入共用。 */
     private val parser by lazy { EpubBookParser(context) }
@@ -205,15 +211,19 @@ class ConcurrentAndLargeImportTest {
      *
      * `BookImporter.copyToTempFile` 用 `File.createTempFile` 因此文件名唯一，但清理是在
      * `finally` 里做的 —— 并发下若有一条路径漏了 finally，泄漏会随并发度线性增长。
-     * 这里数导入前后的临时文件数，不看具体文件名。
+     * 使用独占 cacheDir，等待所有 worker 完成后比较文件身份，避免共享目录计数干扰。
      */
     @Test
     fun concurrentImports_leaveNoTempFiles() = runBlocking {
         val books = CONCURRENT_BOOKS.mapNotNull { corpusBook(it) }
         assumeTrue("corpus incomplete", books.size == CONCURRENT_BOOKS.size)
 
-        val importer = BookImporter(context, parser)
-        val before = tempImportFileCount()
+        val cache = temporaryFolder.newFolder("import-cache")
+        val isolatedContext = object : ContextWrapper(context) {
+            override fun getCacheDir(): File = cache
+        }
+        val importer = BookImporter(isolatedContext, EpubBookParser(isolatedContext))
+        val existingFile = File(cache, "book-import-existing.epub").apply { writeText("existing") }
 
         coroutineScope {
             books.map { file ->
@@ -221,12 +231,9 @@ class ConcurrentAndLargeImportTest {
             }.awaitAll()
         }
 
-        assertEquals(
-            "temp files leaked across ${books.size} concurrent imports " +
-                "(before=$before after=${tempImportFileCount()})",
-            before,
-            tempImportFileCount()
-        )
+        val remaining = checkNotNull(cache.listFiles()).map { it.name }.toSet()
+        assertEquals("temp files leaked or an existing file was removed", setOf(existingFile.name), remaining)
+        assertEquals("existing", existingFile.readText())
     }
 
     /**
@@ -414,9 +421,6 @@ class ConcurrentAndLargeImportTest {
                 "parseMs=$elapsed (JVM, not comparable to device)"
         )
     }
-
-    private fun tempImportFileCount(): Int =
-        context.cacheDir.listFiles { f: File -> f.name.startsWith("book-import-") }?.size ?: 0
 
     private data class Fingerprint(
         val chapters: Int,

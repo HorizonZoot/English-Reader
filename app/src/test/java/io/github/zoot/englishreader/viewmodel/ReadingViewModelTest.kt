@@ -673,6 +673,74 @@ class ReadingViewModelTest {
     }
 
     @Test
+    fun explainSelectedSentence_lateConfigurationRejection_keepsNewSelectionPlaybackAndLoading() =
+        assertLateConfigurationRejectionIgnored(translation = false)
+
+    @Test
+    fun translateSelectedSentence_lateConfigurationRejection_keepsNewSelectionPlaybackAndLoading() =
+        assertLateConfigurationRejectionIgnored(translation = true)
+
+    private fun assertLateConfigurationRejectionIgnored(translation: Boolean) = runTest {
+        fun input(text: String): AiExplanationInput = if (translation) {
+            AiExplanationInput.SentenceTranslation(text)
+        } else {
+            AiExplanationInput.Sentence(text)
+        }
+        fun start() {
+            if (translation) viewModel.translateSelectedSentence()
+            else viewModel.explainSelectedSentence()
+        }
+        val state = if (translation) viewModel.sentenceTranslationState else viewModel.aiSheetState
+        coEvery { articleRepository.getArticleById(65) } returns ArticleEntity(65, "t", "First. Second.")
+        viewModel.loadArticle(65)
+        runCurrent()
+        viewModel.selectSentence(65, 0, SentenceRange(0, "First.", 0, 6))
+        val older = CompletableDeferred<Unit>()
+        val newer = CompletableDeferred<AiExplanationStartResult>()
+        var oldRejectionReturned = false
+        coEvery { aiExplanationRepository.start(input("First.")) } coAnswers {
+            withContext(NonCancellable) { older.await() }
+            oldRejectionReturned = true
+            AiExplanationStartResult.Rejected(AiError.CredentialMissing)
+        }
+        coEvery { aiExplanationRepository.start(input("Second.")) } coAnswers { newer.await() }
+        start()
+        runCurrent()
+        assertTrue(state.value is AiSheetState.Loading)
+
+        viewModel.selectSentence(65, 1, SentenceRange(1, "Second.", 7, 14))
+        runCurrent()
+        start()
+        viewModel.playSelectedSentence()
+        runCurrent()
+        val selected = requireNotNull(viewModel.selectedSentence.value)
+        val loading = state.value as AiSheetState.Loading
+        assertEquals(AiExplanationTarget.Sentence(selected), loading.target)
+        verify(exactly = 1) { ttsPlayer.speakReading("Second.", any(), false, any()) }
+        clearMocks(ttsPlayer, audioPlayer, answers = false, recordedCalls = true)
+
+        older.complete(Unit)
+        runCurrent()
+
+        assertTrue(oldRejectionReturned)
+        assertFalse(newer.isCompleted)
+        assertFalse(viewModel.aiConfigurationPrompt.value)
+        assertSame(selected, viewModel.selectedSentence.value)
+        assertSame(loading, state.value)
+        verify(exactly = 0) { ttsPlayer.stop() }
+        verify(exactly = 0) { ttsPlayer.stopBeforeReading() }
+        verify(exactly = 0) { audioPlayer.stop(any()) }
+        coVerify(exactly = 0) { aiOperationRegistry.cancel(any()) }
+
+        newer.complete(AiExplanationStartResult.Rejected(AiError.Offline))
+        runCurrent()
+        assertEquals(
+            AiSheetState.Rejected(AiError.Offline, AiExplanationTarget.Sentence(selected)),
+            state.value
+        )
+    }
+
+    @Test
     fun explainArticle_passesCapturedArticleContent() = runTest {
         coEvery { articleRepository.getArticleById(10) } returns
             io.github.zoot.englishreader.data.entity.ArticleEntity(10, "t", "Article body")

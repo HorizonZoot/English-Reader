@@ -44,7 +44,7 @@ class AiPhaseTrackingCallFactory(
         private val delegate: Call = callFactory.newCall(taggedRequest)
         override fun request(): Request = delegate.request()
         override fun execute(): Response = try {
-            delegate.execute()
+            AiResponseBudget.read(delegate.execute(), delegate)
         } catch (error: IOException) {
             throw classified(error, tracker)
         }
@@ -56,7 +56,13 @@ class AiPhaseTrackingCallFactory(
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    responseCallback.onResponse(this@TrackingCall, response)
+                    val bounded = try {
+                        AiResponseBudget.read(response, delegate)
+                    } catch (error: IOException) {
+                        responseCallback.onFailure(this@TrackingCall, classified(error, tracker))
+                        return
+                    }
+                    responseCallback.onResponse(this@TrackingCall, bounded)
                 }
             })
         }

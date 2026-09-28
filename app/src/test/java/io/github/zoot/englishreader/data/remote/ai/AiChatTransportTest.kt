@@ -11,9 +11,13 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
+import okio.Buffer
+import okio.GzipSink
+import okio.buffer
 import okhttp3.Call
 import okhttp3.EventListener
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
@@ -383,6 +387,66 @@ class AiChatTransportTest {
         assertTrue(cancelled.await(5, TimeUnit.SECONDS))
     }
 
+    @Test
+    fun response_byteBudgets_boundFixedChunkedAndDecompressedJson() = runTest {
+        // Chunked framing is HTTP/1.1-only; the shared TLS fixture otherwise negotiates HTTP/2.
+        val transport = transportFor(fixture.client.newBuilder().protocols(listOf(Protocol.HTTP_1_1)).build())
+        for (catalog in listOf(false, true)) {
+            val limit = if (catalog) AiResponseBudget.MODEL_CATALOG_BYTES else AiResponseBudget.CHAT_BYTES
+            val prefix = if (catalog) """{"data":[{"id":"model-a"}],"padding":"""" else
+                """{"choices":[{"message":{"content":"ok"}}],"padding":""""
+            for (encoding in listOf("fixed", "chunked", "gzip")) {
+                for (extra in listOf(0, 1)) {
+                    val body = prefix + "x".repeat(limit.toInt() + extra - prefix.length - 2) + "\"}"
+                    val response = when (encoding) {
+                        "chunked" -> MockResponse().setChunkedBody(body, 4096)
+                        "gzip" -> {
+                            val compressed = Buffer()
+                            GzipSink(compressed).buffer().use { it.writeUtf8(body) }
+                            MockResponse().setBody(compressed).setHeader("Content-Encoding", "gzip")
+                        }
+                        else -> MockResponse().setBody(body)
+                    }
+                    server.enqueue(response)
+                    val result = runCatching {
+                        if (catalog) {
+                            transport.listModels(AiModelCatalogConfig(serverUrl(""), AiAuthStrategy.API_KEY, "test-key"))
+                        } else {
+                            transport.complete(config(AiProviderTemplate.DEEPSEEK, serverUrl("")), messages())
+                        }
+                    }
+                    val case = "catalog=$catalog encoding=$encoding extra=$extra"
+                    if (extra == 0) {
+                        assertTrue(case, result.isSuccess)
+                        if (catalog) assertEquals(case, listOf("model-a"), result.getOrThrow())
+                        else assertEquals(case, "ok", (result.getOrThrow() as AiChatTransportResult.Content).text)
+                    } else {
+                        assertEquals(case, AiError.MalformedResponse,
+                            AiErrorMapper(isOnline = { true }).map(result.exceptionOrNull() as Exception))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun response_non200LargeBody_preservesStatusAndRetryAfterWithoutDecoding() = runTest {
+        for ((status, expected) in listOf(
+            201 to AiError.UnexpectedHttp(201),
+            401 to AiError.HttpAuth(401),
+            429 to AiError.RateLimited(23),
+            503 to AiError.Server(503)
+        )) {
+            server.enqueue(MockResponse().setResponseCode(status).setHeader("Retry-After", "23")
+                .setChunkedBody("private-error".repeat(100_000), 4096))
+            val error = runCatching {
+                transport.complete(config(AiProviderTemplate.DEEPSEEK, serverUrl("")), messages())
+            }.exceptionOrNull() as Exception
+            assertEquals(expected, AiErrorMapper(isOnline = { true }).map(error))
+            assertFalse(error.toString().contains("private-error"))
+        }
+    }
+
     // ---- 脱敏 ----
 
     @Test
@@ -429,7 +493,7 @@ class AiChatTransportTest {
         val moshi = Moshi.Builder().add(KotlinJsonAdapterFactory()).build()
         val api = Retrofit.Builder()
             .baseUrl("https://localhost/placeholder/")
-            .client(client)
+            .callFactory(AiPhaseTrackingCallFactory(client))
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(AiChatCompletionApi::class.java)

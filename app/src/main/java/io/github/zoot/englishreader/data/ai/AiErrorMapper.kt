@@ -1,6 +1,8 @@
 package io.github.zoot.englishreader.data.ai
 
 import io.github.zoot.englishreader.data.repository.ProfileResolutionResult
+import io.github.zoot.englishreader.data.remote.ai.AiHttpStatusException
+import io.github.zoot.englishreader.data.remote.ai.AiResponseTooLargeException
 import io.github.zoot.englishreader.util.NetworkChecker
 import com.squareup.moshi.JsonDataException
 import com.squareup.moshi.JsonEncodingException
@@ -34,7 +36,9 @@ class AiErrorMapper(
     fun map(exception: Exception): AiError {
         return when (val cause = exception.aiFailureCause()) {
             is CancellationException -> throw cause
-            is HttpException -> mapHttpException(cause)
+            is HttpException -> mapHttp(cause.code(), cause.response()?.headers()?.get("Retry-After"))
+            is AiHttpStatusException -> mapHttp(cause.status, cause.retryAfter)
+            is AiResponseTooLargeException -> AiError.MalformedResponse
             is AiTimeoutException -> AiError.Timeout(cause.phase)
             is SocketTimeoutException -> AiError.Timeout(TimeoutPhase.READ)
             is InterruptedIOException -> AiError.Timeout(TimeoutPhase.CALL)
@@ -52,15 +56,14 @@ class AiErrorMapper(
         }
     }
 
-    private fun mapHttpException(exception: HttpException): AiError {
-        val status = exception.code()
+    private fun mapHttp(status: Int, retryAfter: String?): AiError {
         return when {
             status == 401 || status == 403 -> AiError.HttpAuth(status)
             status == 404 -> AiError.HttpNotFound()
             status == 408 -> AiError.RequestTimeout()
             status == 413 -> AiError.PayloadTooLarge()
             status == 429 -> AiError.RateLimited(
-                retryAfterParser.parse(exception.response()?.headers()?.get("Retry-After"))
+                retryAfterParser.parse(retryAfter)
             )
             status in 500..599 -> AiError.Server(status)
             else -> AiError.UnexpectedHttp(status)

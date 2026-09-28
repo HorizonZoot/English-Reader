@@ -118,6 +118,11 @@ class BookDaoAndroidTest {
         assertEquals("no chapter article may remain", 1, countOf("articles"))
         // 回滚不得波及事务前已存在的数据
         assertNotNull("pre-existing article must survive", articleDao.getArticleById(500))
+
+        val retried = bookDao.insertBookWithChapters(book(chapterCount = 2), chapters(2))
+        assertNotNull("rollback must not reserve the duplicate identity", bookDao.getBookById(retried))
+        assertEquals(1, countOf("books"))
+        assertEquals(2, countOf("book_chapters"))
     }
 
     /**
@@ -300,7 +305,10 @@ class BookDaoAndroidTest {
         val mine = articleDao.insertArticle(article("Survivor"))
         val deletedBookId = bookDao.insertBookWithChapters(book(chapterCount = 2), chapters(2))
         // 第二本书不被删：它的章节 article 必须仍由过滤子挡住。
-        bookDao.insertBookWithChapters(book(chapterCount = 3), chapters(3))
+        bookDao.insertBookWithChapters(
+            book(chapterCount = 3).copy(contentFingerprint = "surviving-book"),
+            chapters(3)
+        )
 
         bookDao.deleteBookCascade(deletedBookId, articleDao)
 

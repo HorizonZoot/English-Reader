@@ -21,7 +21,7 @@ import kotlinx.coroutines.flow.Flow
  * 章节复用 [ArticleEntity]，所以 ReadingScreen / 词典 / TTS / AI 缓存 / 生词全部
  * 沿用 articleId，无需感知书籍概念。
  *
- * 重复检测策略：优先 `dc:identifier`（出版方分配，最可靠），缺失时回退正文指纹。
+ * 重复检测策略：优先 `dc:identifier`（出版方分配，最可靠），缺失或未命中时回退正文指纹。
  * **不自动覆盖**——返回 typed [ImportFailure.DuplicateBook] 让用户决定，
  * 因为覆盖会连带删除该书章节上的生词。
  */
@@ -56,17 +56,6 @@ class BookRepository @Inject constructor(
      * @throws ImportException [ImportFailure.DuplicateBook] 当检测到同一本书且未允许重复
      */
     suspend fun persist(book: ImportedBook, allowDuplicate: Boolean = false): Long {
-        if (!allowDuplicate) {
-            findDuplicate(book)?.let { existing ->
-                throw ImportException(
-                    ImportFailure.DuplicateBook(
-                        existingBookId = existing.id,
-                        existingTitle = existing.title
-                    )
-                )
-            }
-        }
-
         val now = System.currentTimeMillis()
         return bookDao.insertBookWithChapters(
             book = BookEntity(
@@ -99,7 +88,8 @@ class BookRepository @Inject constructor(
                     sourceHref = chapter.sourceHref,
                     navigationTitle = chapter.navigationTitle
                 )
-            }
+            },
+            allowDuplicate = allowDuplicate
         )
     }
 
@@ -131,14 +121,6 @@ class BookRepository @Inject constructor(
             )
         )
         bookDao.updateBookLastReadTime(bookId, now)
-    }
-
-    private suspend fun findDuplicate(book: ImportedBook): BookEntity? {
-        val identifier = book.metadata.identifier?.takeIf { it.isNotBlank() }
-        if (identifier != null) {
-            bookDao.findByIdentifier(identifier)?.let { return it }
-        }
-        return bookDao.findByFingerprint(book.metadata.contentFingerprint)
     }
 
     companion object {

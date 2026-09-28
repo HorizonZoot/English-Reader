@@ -28,7 +28,8 @@ import org.junit.Test
  * [BookRepository] 的映射与去重策略测试。
  *
  * 真实 SQLite 的原子性与生词保护由 `BookDaoAndroidTest` 覆盖；这里只钉住
- * 仓库层自己的决策：去重优先级、typed 失败、以及 domain → entity 映射不丢字段。
+ * DAO 默认方法中的去重优先级、typed 失败，以及仓库 domain → entity 映射不丢字段。
+ * 用委托 DAO 执行真实默认方法，不用于证明事务隔离。
  */
 class BookRepositoryTest {
 
@@ -39,8 +40,17 @@ class BookRepositoryTest {
     @Before
     fun setup() {
         bookDao = mockk(relaxed = true)
+        coEvery { bookDao.findByIdentifier(any()) } returns null
+        coEvery { bookDao.findByFingerprint(any()) } returns null
         articleDao = mockk(relaxed = true)
-        repository = BookRepository(bookDao, articleDao)
+        val policyDao = object : BookDao by bookDao {
+            override suspend fun insertBookWithChapters(
+                book: BookEntity,
+                chapters: List<Pair<ArticleEntity, BookChapterEntity>>,
+                allowDuplicate: Boolean
+            ): Long = super<BookDao>.insertBookWithChapters(book, chapters, allowDuplicate)
+        }
+        repository = BookRepository(policyDao, articleDao)
     }
 
     @Test
@@ -65,6 +75,7 @@ class BookRepositoryTest {
         }
         // 命中 identifier 后不应再查指纹：identifier 是出版方分配的强标识
         coVerify(exactly = 0) { bookDao.findByFingerprint(any()) }
+        coVerify(exactly = 0) { bookDao.insertBookRow(any()) }
     }
 
     @Test
@@ -88,9 +99,30 @@ class BookRepositoryTest {
     }
 
     @Test
+    fun persist_identifierMiss_fallsBackToFingerprint() = runTest {
+        val existing = BookEntity(
+            id = 33,
+            title = "Same text, different edition",
+            contentFingerprint = "fp-default",
+            sourceFormat = BookSourceFormat.EPUB3,
+            chapterCount = 1,
+            totalChars = 4
+        )
+        coEvery { bookDao.findByFingerprint("fp-default") } returns existing
+
+        try {
+            repository.persist(book(identifier = "new-identifier"))
+            fail("expected ImportException")
+        } catch (error: ImportException) {
+            assertEquals(33L, (error.failure as ImportFailure.DuplicateBook).existingBookId)
+        }
+        coVerify(exactly = 0) { bookDao.insertBookRow(any()) }
+    }
+
+    @Test
     fun persist_blankIdentifier_skipsIdentifierLookupAndUsesFingerprint() = runTest {
         coEvery { bookDao.findByFingerprint(any()) } returns null
-        coEvery { bookDao.insertBookWithChapters(any(), any()) } returns 5L
+        coEvery { bookDao.insertBookRow(any()) } returns 5L
 
         assertEquals(5L, repository.persist(book(identifier = "   ")))
 
@@ -100,7 +132,7 @@ class BookRepositoryTest {
 
     @Test
     fun persist_allowDuplicate_skipsBothLookups() = runTest {
-        coEvery { bookDao.insertBookWithChapters(any(), any()) } returns 9L
+        coEvery { bookDao.insertBookRow(any()) } returns 9L
 
         assertEquals(9L, repository.persist(book(identifier = "urn:isbn:1"), allowDuplicate = true))
 
@@ -110,12 +142,13 @@ class BookRepositoryTest {
 
     @Test
     fun persist_mapsMetadataAndChapterOrderWithoutLoss() = runTest {
+        repository = BookRepository(bookDao, articleDao)
         coEvery { bookDao.findByIdentifier(any()) } returns null
         coEvery { bookDao.findByFingerprint(any()) } returns null
         val bookSlot = slot<BookEntity>()
         val chaptersSlot = slot<List<Pair<ArticleEntity, BookChapterEntity>>>()
         coEvery {
-            bookDao.insertBookWithChapters(capture(bookSlot), capture(chaptersSlot))
+            bookDao.insertBookWithChapters(capture(bookSlot), capture(chaptersSlot), false)
         } returns 7L
 
         repository.persist(

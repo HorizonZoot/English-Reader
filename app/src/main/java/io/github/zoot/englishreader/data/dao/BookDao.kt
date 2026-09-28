@@ -10,6 +10,8 @@ import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
+import io.github.zoot.englishreader.data.importer.ImportException
+import io.github.zoot.englishreader.data.importer.ImportFailure
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -65,7 +67,7 @@ interface BookDao {
      * 插入书籍行。
      *
      * 用 ABORT 而非 REPLACE：REPLACE 会静默删掉同 id 的既有书并级联清空其章节与进度。
-     * 重复导入必须由上层的去重查询显式拒绝，而不是靠冲突策略吞掉。
+     * 重复导入由 [insertBookWithChapters] 在同一事务内显式拒绝，而不是靠冲突策略吞掉。
      */
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertBookRow(book: BookEntity): Long
@@ -93,7 +95,7 @@ interface BookDao {
     // ---- 事务 ----
 
     /**
-     * 原子写入一本书：书籍行 → 各章节 article + 关系行 → 初始阅读位置。
+     * 原子判重并写入一本书：重复查询 → 书籍行 → 各章节 article + 关系行 → 初始阅读位置。
      *
      * 任一步失败整体回滚，不会留下「有书没章节」或「章节数与 chapterCount 不符」的状态。
      *
@@ -102,14 +104,25 @@ interface BookDao {
      * 原始 spine 下标必然有空洞，让 DAO 统一重编号比让每个调用方自己维护更可靠。
      *
      * @param chapters 章节正文与关系元数据配对，顺序即阅读顺序，不可为空
+     * @param allowDuplicate 仅用户明确选择「仍然导入」时跳过重复查询
      * @return 新书 id
      */
     @Transaction
     suspend fun insertBookWithChapters(
         book: BookEntity,
-        chapters: List<Pair<ArticleEntity, BookChapterEntity>>
+        chapters: List<Pair<ArticleEntity, BookChapterEntity>>,
+        allowDuplicate: Boolean = false
     ): Long {
         require(chapters.isNotEmpty()) { "chapters must not be empty" }
+
+        if (!allowDuplicate) {
+            val existing = book.identifier?.takeIf { it.isNotBlank() }
+                ?.let { findByIdentifier(it) }
+                ?: findByFingerprint(book.contentFingerprint)
+            if (existing != null) {
+                throw ImportException(ImportFailure.DuplicateBook(existing.id, existing.title))
+            }
+        }
 
         val bookId = insertBookRow(book)
         var firstArticleId = 0L

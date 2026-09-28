@@ -7,8 +7,11 @@ import io.github.zoot.englishreader.data.remote.update.GitHubReleaseFeedApiServi
 import io.github.zoot.englishreader.di.UpdateIo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.io.IOException
@@ -41,24 +44,41 @@ class GitHubUpdateReleaseSource internal constructor(
     override suspend fun getPublishedReleases(): List<GitHubRelease> {
         try {
             val entries = withContext(ioDispatcher) {
-                feedService.getReleaseFeed().use { body ->
-                    if (body.contentLength() > GitHubReleaseFeedParser.MAX_FEED_BYTES) {
-                        throw IOException("Release feed too large")
+                val call = feedService.getReleaseFeed()
+                // Keep cancellation attached through body consumption, not only until headers arrive.
+                val cancellation = launch(start = CoroutineStart.UNDISPATCHED) {
+                    suspendCancellableCoroutine<Nothing> { continuation ->
+                        continuation.invokeOnCancellation { call.cancel() }
                     }
-                    val source = body.source()
-                    source.request(GitHubReleaseFeedParser.MAX_FEED_BYTES + 1)
-                    currentCoroutineContext().ensureActive()
-                    if (source.buffer.size > GitHubReleaseFeedParser.MAX_FEED_BYTES) {
-                        throw IOException("Release feed too large")
+                }
+                try {
+                    val response = call.execute()
+                    if (!response.isSuccessful) {
+                        response.errorBody()?.close()
+                        throw HttpException(response)
                     }
-                    GitHubReleaseFeedParser.parse(source.readUtf8()).map { entry ->
-                        GitHubRelease(
-                            entry.tag,
-                            entry.title,
-                            entry.htmlContent?.let { HtmlCompat.fromHtml(it, HtmlCompat.FROM_HTML_MODE_LEGACY).toString().trim() },
-                            entry.url
-                        )
+                    val body = response.body() ?: throw IOException("Empty release feed body")
+                    body.use {
+                        if (body.contentLength() > GitHubReleaseFeedParser.MAX_FEED_BYTES) {
+                            throw IOException("Release feed too large")
+                        }
+                        val source = body.source()
+                        source.request(GitHubReleaseFeedParser.MAX_FEED_BYTES + 1)
+                        currentCoroutineContext().ensureActive()
+                        if (source.buffer.size > GitHubReleaseFeedParser.MAX_FEED_BYTES) {
+                            throw IOException("Release feed too large")
+                        }
+                        GitHubReleaseFeedParser.parse(source.readUtf8()).map { entry ->
+                            GitHubRelease(
+                                entry.tag,
+                                entry.title,
+                                entry.htmlContent?.let { HtmlCompat.fromHtml(it, HtmlCompat.FROM_HTML_MODE_LEGACY).toString().trim() },
+                                entry.url
+                            )
+                        }
                     }
+                } finally {
+                    cancellation.cancel()
                 }
             }
             return entries.sortedWith { a, b ->

@@ -12,12 +12,14 @@ import okhttp3.OkHttpClient
 import okhttp3.ResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import retrofit2.Call
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import java.util.concurrent.TimeUnit
@@ -82,6 +84,32 @@ class GitHubUpdateReleaseSourceTest {
     }
 
     @Test
+    fun declaredOversizedFeed_usesFallbackWithoutWaitingForBody() = runTest {
+        feedServer.enqueue(MockResponse().setBody("").setHeader("Content-Length", "600000"))
+        apiServer.enqueue(apiRelease())
+        assertEquals("v0.1.4-beta", source().getPublishedReleases().single().tagName)
+        assertEquals(1, apiServer.requestCount)
+    }
+
+    @Test
+    fun absentFeedBody_usesFallback() = runTest {
+        feedServer.enqueue(MockResponse().setResponseCode(204))
+        apiServer.enqueue(apiRelease())
+        assertEquals("v0.1.4-beta", source().getPublishedReleases().single().tagName)
+        assertEquals(1, apiServer.requestCount)
+    }
+
+    @Test
+    fun transportFailure_beforeHeadersOrDuringBody_fallsBackToRest() = runTest {
+        for (policy in listOf(SocketPolicy.DISCONNECT_AT_START, SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)) {
+            feedServer.enqueue(MockResponse().setBody(atomFeed("v0.1.4-beta")).setSocketPolicy(policy))
+            apiServer.enqueue(apiRelease())
+            assertEquals("v0.1.4-beta", source().getPublishedReleases().single().tagName)
+        }
+        assertEquals(2, apiServer.requestCount)
+    }
+
+    @Test
     fun rateLimitedFallback_respectsResetWhileFeedRemainsAvailable() = runTest {
         repeat(3) { feedServer.enqueue(MockResponse().setResponseCode(503)) }
         apiServer.enqueue(MockResponse().setResponseCode(403)
@@ -117,7 +145,7 @@ class GitHubUpdateReleaseSourceTest {
         val cancellation = CancellationException("cancel check")
         var fallbackCalls = 0
         val feed = object : GitHubReleaseFeedApiService {
-            override suspend fun getReleaseFeed(): ResponseBody = throw cancellation
+            override fun getReleaseFeed(): Call<ResponseBody> = throw cancellation
         }
         val api = object : GitHubReleaseApiService {
             override suspend fun getPublishedReleases(): List<io.github.zoot.englishreader.data.remote.update.GitHubRelease> {

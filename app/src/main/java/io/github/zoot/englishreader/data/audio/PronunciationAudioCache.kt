@@ -61,13 +61,14 @@ data class PronunciationCacheStats(val wordCount: Int, val totalBytes: Long)
  *
  * ## 失败安全
  *
- * 缓存的任何失败都不得影响发音：取不到就走网络，写不进就只是没缓存上。所有 IO 都包
- * `runCatching`，[get] 在任何异常下返回 null，[put] 静默放弃。
+ * 自动缓存失败不得影响发音：取不到就走网络，写不进就只是没缓存上；取消仍向上传播。
+ * 用户主动 [clear] 时，清理失败向调用方报告，不能谎报空间已经释放。
  */
 @Singleton
 class PronunciationAudioCache internal constructor(
     private val context: Context,
-    private val callFactory: Call.Factory
+    private val callFactory: Call.Factory,
+    private val deleteFile: (File) -> Boolean = File::delete
 ) {
     @Inject constructor(@ApplicationContext context: Context) : this(context, createHttpClient())
 
@@ -162,23 +163,30 @@ class PronunciationAudioCache internal constructor(
         Unit
     }
 
-    /** 写入一条缓存。写完检查上限，超限则 LRU 清理。 */
+    /** 写入前预留容量；无法回收空间时跳过缓存，不影响发音。 */
     suspend fun put(word: String, bytes: ByteArray) = withContext(Dispatchers.IO) {
         runCatching {
             mutex.withLock {
+                if (bytes.size > MAX_CACHE_BYTES) throw IOException("audio exceeds cache capacity")
                 if (!cacheDir.isDirectory && !cacheDir.mkdirs()) {
                     throw IOException("cannot create cache dir")
                 }
                 val key = hash(word)
                 val file = File(cacheDir, "$key$AUDIO_SUFFIX")
+                val index = readIndex()
+                if (!makeRoom(index, file, bytes.size.toLong())) {
+                    writeIndex(index)
+                    throw IOException("cache capacity unavailable")
+                }
                 try {
                     file.writeBytes(bytes)
                 } catch (io: IOException) {
                     // 磁盘满会留下半个文件，删掉避免它被后续 get 当成有效缓存。
-                    file.delete()
+                    if (!removeFile(file)) Log.w(TAG, "Partial audio cleanup failed")
+                    index.remove(key)
+                    writeIndex(index)
                     throw io
                 }
-                val index = readIndex()
                 index.put(
                     key,
                     JSONObject()
@@ -186,7 +194,6 @@ class PronunciationAudioCache internal constructor(
                         .put(KEY_BYTES, bytes.size)
                         .put(KEY_LAST_ACCESS, System.currentTimeMillis())
                 )
-                evictIfNeeded(index)
                 writeIndex(index)
             }
         }.onFailure {
@@ -216,7 +223,7 @@ class PronunciationAudioCache internal constructor(
                 val index = readIndex()
                 var count = 0
                 index.keys().forEach { key ->
-                    if (index.optJSONObject(key) != null) count++
+                    if (index.optJSONObject(key) != null && File(cacheDir, "$key$AUDIO_SUFFIX").isFile) count++
                 }
                 PronunciationCacheStats(count, diskBytes)
             }
@@ -233,14 +240,15 @@ class PronunciationAudioCache internal constructor(
      * 索引损坏时按索引删会漏掉孤儿，那正是用户点「清除」想收回的空间。
      */
     suspend fun clear() = withContext(Dispatchers.IO) {
-        runCatching {
-            mutex.withLock {
-                cacheDir.listFiles()?.forEach { it.delete() }
-                Unit
+        mutex.withLock {
+            if (!cacheDir.exists()) return@withLock
+            val files = cacheDir.listFiles() ?: throw IOException("cannot list audio cache")
+            var failed = false
+            files.forEach {
+                coroutineContext.ensureActive()
+                if (!removeFile(it)) failed = true
             }
-        }.onFailure {
-            if (it is CancellationException) throw it
-            Log.w(TAG, "Audio cache clear failed")
+            if (failed) throw IOException("audio cache cleanup incomplete")
         }
         Unit
     }
@@ -264,7 +272,9 @@ class PronunciationAudioCache internal constructor(
         runCatching {
             mutex.withLock {
                 val key = hash(word)
-                File(cacheDir, "$key$AUDIO_SUFFIX").delete()
+                if (!removeFile(File(cacheDir, "$key$AUDIO_SUFFIX"))) {
+                    Log.w(TAG, "Invalid audio cleanup failed")
+                }
                 val index = readIndex()
                 index.remove(key)
                 writeIndex(index)
@@ -295,15 +305,19 @@ class PronunciationAudioCache internal constructor(
      *
      * 调用方必须已持有 [mutex]。
      */
-    private fun evictIfNeeded(index: JSONObject) {
+    private fun makeRoom(index: JSONObject, incomingFile: File, incomingBytes: Long): Boolean {
         val audioFiles = cacheDir.listFiles { f: File -> f.name.endsWith(AUDIO_SUFFIX) }
-            ?: return
+            ?: throw IOException("cannot list audio cache")
 
         var total = 0L
+        val additionalBytes = (incomingBytes - incomingFile.length()).coerceAtLeast(0)
         val entries = mutableListOf<Triple<String, Long, Long>>() // key, lastAccess, bytes
         val orphans = mutableListOf<File>()
 
         audioFiles.forEach { file ->
+            val bytes = file.length()
+            total += bytes
+            if (file == incomingFile) return@forEach
             val key = file.name.removeSuffix(AUDIO_SUFFIX)
             val meta = index.optJSONObject(key)
             if (meta == null) {
@@ -311,31 +325,32 @@ class PronunciationAudioCache internal constructor(
             } else {
                 // 用**磁盘上的实际长度**而非索引里记的字节数：两者不一致时（写入中途失败、
                 // 索引被外部改动）应当信磁盘，否则额度会算错。
-                val bytes = file.length()
-                total += bytes
                 entries += Triple(key, meta.optLong(KEY_LAST_ACCESS), bytes)
             }
         }
 
         // 孤儿先删：无索引记录意味着 lastAccess 不可知，无法参与 LRU，留着只占额度。
-        orphans.forEach { it.delete() }
-        if (orphans.isNotEmpty()) {
-            Log.d(TAG, "Removed ${orphans.size} orphaned audio file(s)")
+        orphans.forEach {
+            val bytes = it.length()
+            if (removeFile(it)) total -= bytes
         }
 
-        if (total <= MAX_CACHE_BYTES) return
+        if (total + additionalBytes <= MAX_CACHE_BYTES) return true
 
         // 同 lastAccess 时按 key 排序，保证顺序确定 —— 否则同毫秒写入的多条在不同运行里
         // 被删的可能不是同一批，缺陷难复现。
         entries.sortWith(compareBy({ it.second }, { it.first }))
         for ((key, _, bytes) in entries) {
-            if (total <= EVICT_TARGET_BYTES) break
-            File(cacheDir, "$key$AUDIO_SUFFIX").delete()
-            index.remove(key)
-            total -= bytes
+            if (total + additionalBytes <= EVICT_TARGET_BYTES) break
+            if (removeFile(File(cacheDir, "$key$AUDIO_SUFFIX"))) {
+                index.remove(key)
+                total -= bytes
+            }
         }
-        Log.d(TAG, "Evicted audio cache down to $total bytes")
+        return total + additionalBytes <= MAX_CACHE_BYTES
     }
+
+    private fun removeFile(file: File): Boolean = deleteFile(file) || !file.exists()
 
     /** 索引损坏时当作空索引：已有文件成为孤儿，下次 [get] 时按 `exists()` 检查清理。 */
     private fun readIndex(): JSONObject =

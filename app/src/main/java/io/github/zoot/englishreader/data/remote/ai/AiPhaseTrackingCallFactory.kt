@@ -11,7 +11,6 @@ import okhttp3.Request
 import okhttp3.Response
 import okio.Timeout
 import java.io.IOException
-import java.io.InterruptedIOException
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.util.concurrent.atomic.AtomicReference
@@ -75,14 +74,9 @@ class AiPhaseTrackingCallFactory(
         }
 
         private fun classified(error: IOException, tracker: AiCallPhaseTracker): IOException =
-            if (error is InterruptedIOException) {
-                AiTimeoutException(
-                    checkNotNull(AiTimeoutClassifier.classify(error, tracker.phase)),
-                    error
-                )
-            } else {
-                error
-            }
+            if (error is AiTimeoutException) error
+            else AiTimeoutClassifier.classify(error, tracker.phase)
+                ?.let { AiTimeoutException(it, error) } ?: error
     }
 }
 

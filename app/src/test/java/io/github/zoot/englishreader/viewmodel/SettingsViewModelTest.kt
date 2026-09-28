@@ -567,6 +567,31 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun clearPronunciationCache_partialFailure_refreshesUsageAndEmitsFailure() = runTest {
+        val cache = mockk<PronunciationAudioCache>(relaxed = true)
+        val remaining = PronunciationCacheStats(1, 3_000)
+        coEvery { cache.clear() } throws IOException("cleanup incomplete")
+        coEvery { cache.stats() } returns remaining
+        val viewModel = createViewModel(pronunciationCache = cache)
+        viewModel.clearPronunciationCache()
+        advanceUntilIdle()
+        assertEquals(remaining, viewModel.pronunciationCacheStats.value)
+        assertEquals(ProfileActionResult.FAILED, viewModel.profileActionEvents.first().action)
+    }
+
+    @Test
+    fun clearPronunciationCache_cancelled_emitsNoFailure() = runTest {
+        val cache = mockk<PronunciationAudioCache>(relaxed = true)
+        coEvery { cache.clear() } throws CancellationException("cancelled")
+        val viewModel = createViewModel(pronunciationCache = cache)
+        viewModel.profileActionEvents.test {
+            viewModel.clearPronunciationCache()
+            advanceUntilIdle()
+            expectNoEvents()
+        }
+    }
+
+    @Test
     fun clearAiExplanationCache_failureEmitsFailed() = runTest {
         coEvery { explanationCacheRepository.clearAllCache() } throws IOException("disk unavailable")
         val viewModel = createViewModel()

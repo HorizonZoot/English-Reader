@@ -67,6 +67,37 @@ class AiPhaseTrackingCallFactoryTest {
     }
 
     @Test
+    fun execute_wrappedConnectTimeout_preservesPhaseAtTransportBoundary() {
+        val failure = IOException("wrapper", SocketTimeoutException())
+        val factory = AiPhaseTrackingCallFactory(ThrowingCallFactory(failure) { it.markConnect() })
+        val thrown = runCatching { factory.newCall(request()).execute() }.exceptionOrNull()
+        assertTrue(thrown is AiTimeoutException)
+        assertEquals(TimeoutPhase.CONNECT, (thrown as AiTimeoutException).phase)
+        assertSame(failure, thrown.cause)
+    }
+
+    @Test
+    fun enqueue_wrappedCallDeadline_preservesOuterCallSemantics() {
+        val deadline = InterruptedIOException().apply { initCause(SocketTimeoutException()) }
+        val factory = AiPhaseTrackingCallFactory(ThrowingCallFactory(IOException(deadline)))
+        var failure: IOException? = null
+        factory.newCall(request()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) { failure = e }
+            override fun onResponse(call: Call, response: Response) = Unit
+        })
+        assertTrue(failure is AiTimeoutException)
+        assertEquals(TimeoutPhase.CALL, (failure as AiTimeoutException).phase)
+    }
+
+    @Test
+    fun classifier_tlsWithNestedTimeout_doesNotReplaceTlsCategory() {
+        val tls = javax.net.ssl.SSLHandshakeException("tls").apply {
+            initCause(SocketTimeoutException())
+        }
+        org.junit.Assert.assertNull(AiTimeoutClassifier.classify(IOException(tls), TimeoutPhase.CONNECT))
+    }
+
+    @Test
     fun classifier_untaggedSocketTimeout_fallsBackToRead() {
         assertEquals(
             TimeoutPhase.READ,

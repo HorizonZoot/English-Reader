@@ -1,6 +1,8 @@
 package io.github.zoot.englishreader.data.remote.ai
 
 import io.github.zoot.englishreader.data.ai.TimeoutPhase
+import io.github.zoot.englishreader.data.ai.AiTimeoutException
+import io.github.zoot.englishreader.data.ai.aiFailureCause
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.SocketTimeoutException
@@ -14,11 +16,13 @@ import java.net.SocketTimeoutException
  */
 object AiTimeoutClassifier {
     fun classify(exception: IOException, lastPhase: TimeoutPhase?): TimeoutPhase? {
+        val cause = exception.aiFailureCause()
         return when {
-            exception is SocketTimeoutException && lastPhase == TimeoutPhase.CONNECT ->
+            cause is AiTimeoutException -> cause.phase
+            cause is SocketTimeoutException && lastPhase == TimeoutPhase.CONNECT ->
                 TimeoutPhase.CONNECT
-            exception is SocketTimeoutException -> TimeoutPhase.READ
-            exception is InterruptedIOException -> TimeoutPhase.CALL
+            cause is SocketTimeoutException -> TimeoutPhase.READ
+            cause is InterruptedIOException -> TimeoutPhase.CALL
             else -> null
         }
     }

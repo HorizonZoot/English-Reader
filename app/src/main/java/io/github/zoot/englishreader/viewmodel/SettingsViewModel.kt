@@ -609,8 +609,17 @@ class SettingsViewModel @Inject constructor(
      */
     fun clearPronunciationCache() {
         viewModelScope.launch {
-            pronunciationAudioCache.clear()
+            var failed = false
+            try {
+                pronunciationAudioCache.clear()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                Log.w(TAG, "Audio cache clear failed")
+                failed = true
+            }
             _pronunciationCacheStats.value = pronunciationAudioCache.stats()
+            if (failed) _profileActionEvents.send(ProfileActionEvent(ProfileActionResult.FAILED))
         }
     }
 

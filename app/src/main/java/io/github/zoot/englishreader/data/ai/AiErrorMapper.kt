@@ -32,11 +32,10 @@ class AiErrorMapper(
     }
 
     fun map(exception: Exception): AiError {
-        if (exception is CancellationException) throw exception
-
-        return when (exception) {
-            is HttpException -> mapHttpException(exception)
-            is AiTimeoutException -> AiError.Timeout(exception.phase)
+        return when (val cause = exception.aiFailureCause()) {
+            is CancellationException -> throw cause
+            is HttpException -> mapHttpException(cause)
+            is AiTimeoutException -> AiError.Timeout(cause.phase)
             is SocketTimeoutException -> AiError.Timeout(TimeoutPhase.READ)
             is InterruptedIOException -> AiError.Timeout(TimeoutPhase.CALL)
             is UnknownHostException -> if (onlineSafely()) {
@@ -70,6 +69,8 @@ class AiErrorMapper(
 
     private fun onlineSafely(): Boolean = try {
         isOnline()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
     } catch (_: Exception) {
         true
     }

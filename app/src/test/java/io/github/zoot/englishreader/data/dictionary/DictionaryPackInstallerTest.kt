@@ -178,6 +178,63 @@ class DictionaryPackInstallerTest {
         )
     }
 
+    @Test
+    fun install_oversizedIgnoredColumn_rollsBackPreviouslyInsertedBatches() = runBlocking {
+        assertOversizedRowRollsBack("extra,/test/,definition,释义," + "x".repeat(65_536) + "\n")
+    }
+
+    @Test
+    fun install_oversizedRetainedField_rollsBackPreviouslyInsertedBatches() = runBlocking {
+        assertOversizedRowRollsBack("extra,/test/," + "x".repeat(16_385) + ",释义\n")
+    }
+
+    private suspend fun assertOversizedRowRollsBack(row: String) {
+        seedBuiltInDictionary()
+        val before = db.dictionaryDao().getCount()
+        val body = requireNotNull(csvResponse(uniqueWords = 50_000).getBody())
+        body.writeUtf8(row)
+        server.enqueue(MockResponse().setBody(body))
+        installer.install()
+        assertEquals(DictionaryPackState.Failed(DictionaryPackFailure.CORRUPT), installer.state.value)
+        assertEquals(before, db.dictionaryDao().getCount())
+        assertNotNull(db.dictionaryDao().lookup("seed-1"))
+        assertFalse(File(context.cacheDir, "ecdict-pack.csv").exists())
+        assertNotEquals(PACK_VERSION, installedDictVersion())
+    }
+
+    @Test
+    fun install_longValidFields_boundsBatchCharactersAndPreservesDefinitions() = runBlocking {
+        val real = db.dictionaryDao()
+        var largestBatch = 0
+        val observingDao = object : DictionaryDao by real {
+            override suspend fun replaceAllStreaming(
+                block: suspend (insert: suspend (List<DictionaryEntry>) -> Unit) -> Unit
+            ) {
+                real.replaceAllStreaming { insert ->
+                    block { entries ->
+                        val chars = entries.sumOf {
+                            it.word.length + it.chinese.length +
+                                it.phonetic.orEmpty().length + it.english.orEmpty().length
+                        }
+                        largestBatch = maxOf(largestBatch, chars)
+                        insert(entries)
+                    }
+                }
+            }
+        }
+        val boundedInstaller = DictionaryPackInstaller(context, observingDao, mutationLock).apply {
+            packUrl = server.url("/ecdict.csv").toString()
+        }
+        val definition = "x".repeat(16_384)
+        val body = requireNotNull(csvResponse(uniqueWords = 50_000).getBody())
+        repeat(40) { body.writeUtf8("long$it,/test/,$definition,释义\r\n") }
+        server.enqueue(MockResponse().setBody(body))
+        boundedInstaller.install()
+        assertEquals(DictionaryPackState.Installed(50_040), boundedInstaller.state.value)
+        assertEquals(definition, real.lookup("long39")?.english)
+        assertTrue(largestBatch in 1..512 * 1024)
+    }
+
     /** HTTP 失败归 NETWORK —— 与坏包区分开，这才是「请检查网络」该出现的场合。 */
     @Test
     fun install_httpError_reportsNetwork() = runBlocking {

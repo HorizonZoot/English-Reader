@@ -346,24 +346,33 @@ class DictionaryPackInstaller internal constructor(
     private suspend fun parseAndInstall(source: File): Int = withContext(Dispatchers.IO) {
         var persisted = 0
         dictionaryDao.replaceAllStreaming { insert ->
-            source.bufferedReader().useLines { lines ->
+            source.reader().use { input ->
+                val lines = DictionaryPackCsvReader(input)
                 val batch = ArrayList<DictionaryEntry>(INSERT_BATCH_SIZE)
+                var batchChars = 0
                 var parsed = 0
                 var isHeader = true
-                for (line in lines) {
+                while (true) {
+                    val line = lines.readLine() ?: break
                     coroutineContext.ensureActive()
                     if (isHeader) {
                         isHeader = false
                         if (line.startsWith("word,")) continue
                     }
                     val entry = parseCsvLine(line) ?: continue
-                    batch += entry
-                    if (batch.size >= INSERT_BATCH_SIZE) {
+                    val entryChars = entry.word.length + entry.chinese.length +
+                        entry.phonetic.orEmpty().length + entry.english.orEmpty().length
+                    if (batch.isNotEmpty() &&
+                        (batch.size >= INSERT_BATCH_SIZE || batchChars + entryChars > MAX_BATCH_CHARS)
+                    ) {
                         insert(batch.toList())
                         parsed += batch.size
                         batch.clear()
+                        batchChars = 0
                         publish(DictionaryPackState.Installing(parsed))
                     }
+                    batch += entry
+                    batchChars += entryChars
                 }
                 if (batch.isNotEmpty()) {
                     insert(batch.toList())
@@ -519,6 +528,9 @@ class DictionaryPackInstaller internal constructor(
                 }
                 else -> current.append(c)
             }
+            if (current.length > MAX_FIELD_CHARS) {
+                throw MalformedPackException("CSV field exceeds character budget")
+            }
             i++
             // 前四列够用，提前退出省掉长行的剩余解析。
             if (out.size >= 4) break
@@ -539,7 +551,7 @@ class DictionaryPackInstaller internal constructor(
      *
      * 类型区分之后，改文案不再影响用户看到的提示。
      */
-    private class MalformedPackException(message: String) : IOException(message)
+    internal class MalformedPackException(message: String) : IOException(message)
 
     /**
      * 把 [IOException] 归类成用户能采取下一步的失败原因。
@@ -595,6 +607,10 @@ class DictionaryPackInstaller internal constructor(
         private const val PROGRESS_STEP_BYTES = 512 * 1024L
 
         private const val INSERT_BATCH_SIZE = 2_000
+
+        // UTF-16 字符数；行读取与字段解析分别有界，长释义批次也不能只按行数限制。
+        private const val MAX_FIELD_CHARS = 16 * 1024
+        private const val MAX_BATCH_CHARS = 512 * 1024
 
         /**
          * cause 链的遍历上限。Room 通常只包一层，取 8 层足够而不至于在异常自引用时死循环。

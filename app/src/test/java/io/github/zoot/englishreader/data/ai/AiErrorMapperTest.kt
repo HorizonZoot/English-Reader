@@ -93,6 +93,40 @@ class AiErrorMapperTest {
         assertTrue(thrown is CancellationException)
     }
 
+    @Test
+    fun map_wrappedFailures_preservesTypedCategoryAndOuterTimeoutPhase() {
+        val failures = listOf(
+            UnknownHostException() to AiError.DnsFailure,
+            SSLHandshakeException("tls") to AiError.TlsFailure,
+            JsonDataException("json") to AiError.MalformedResponse,
+            httpException(429, "120") to AiError.RateLimited(120),
+            AiTimeoutException(TimeoutPhase.CONNECT, SocketTimeoutException()) to
+                AiError.Timeout(TimeoutPhase.CONNECT),
+            InterruptedIOException().apply { initCause(SocketTimeoutException()) } to
+                AiError.Timeout(TimeoutPhase.CALL)
+        )
+        failures.forEach { (cause, expected) ->
+            assertEquals(expected, mapper.map(IOException("wrapper", cause)))
+        }
+        assertEquals(AiError.Offline,
+            AiErrorMapper(isOnline = { false }).map(IOException("wrapper", UnknownHostException())))
+    }
+
+    @Test
+    fun map_wrappedCancellation_rethrowsOriginalEvenInsideTypedFailure() {
+        val cancellation = CancellationException("cancelled")
+        val failure = AiTimeoutException(TimeoutPhase.CALL, IOException(cancellation))
+        org.junit.Assert.assertSame(cancellation, runCatching { mapper.map(failure) }.exceptionOrNull())
+    }
+
+    @Test
+    fun map_cyclicCauses_terminatesWithoutMessageClassification() {
+        val first = IOException("SSL timeout")
+        val second = IOException("DNS offline", first)
+        first.initCause(second)
+        assertEquals(AiError.Unknown, mapper.map(first))
+    }
+
     private fun httpException(status: Int, retryAfter: String? = null): HttpException {
         val mediaType = "application/json".toMediaType()
         val errorBody = "{}".toResponseBody(mediaType)

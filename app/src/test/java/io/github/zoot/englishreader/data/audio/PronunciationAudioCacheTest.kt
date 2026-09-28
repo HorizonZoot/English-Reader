@@ -466,6 +466,51 @@ class PronunciationAudioCacheTest {
         assertNull(cache.get("one"))
     }
 
+    @Test
+    fun clear_deleteFails_reportsFailureAndRetainsActualDiskUsage() = runBlocking {
+        cache.put("locked", ByteArray(3_000))
+        val failing = PronunciationAudioCache(context, mockk()) { false }
+        assertTrue(runCatching { failing.clear() }.exceptionOrNull() is IOException)
+        assertEquals(3_000L, failing.stats().totalBytes)
+        assertNotNull(failing.get("locked"))
+    }
+
+    @Test
+    fun put_undeletableIndexedFiles_doesNotGrowBeyondBudget() = runBlocking {
+        val chunk = ByteArray(1024 * 1024)
+        repeat(20) { cache.put("locked-$it", chunk) }
+        val failing = PronunciationAudioCache(context, mockk()) { false }
+        repeat(3) { failing.put("new-$it", chunk) }
+        assertEquals(PronunciationAudioCache.MAX_CACHE_BYTES, failing.stats().totalBytes)
+        assertEquals(20, failing.stats().wordCount)
+        assertNotNull(failing.get("locked-0"))
+        assertNull(failing.get("new-0"))
+    }
+
+    @Test
+    fun put_undeletableOrphan_countsItsBytesBeforeWriting() = runBlocking {
+        cacheDir.mkdirs()
+        val orphan = File(cacheDir, "orphan.mp3")
+        java.io.RandomAccessFile(orphan, "rw").use {
+            it.setLength(PronunciationAudioCache.MAX_CACHE_BYTES)
+        }
+        val failing = PronunciationAudioCache(context, mockk()) { file ->
+            if (file == orphan) false else file.delete()
+        }
+        failing.put("new", ByteArray(2_000))
+        assertEquals(PronunciationAudioCache.MAX_CACHE_BYTES, failing.stats().totalBytes)
+        assertNull(failing.get("new"))
+    }
+
+    @Test
+    fun invalidate_deleteFails_preventsAnotherHitButKeepsResidualBytesVisible() = runBlocking {
+        cache.put("broken", ByteArray(3_000))
+        val failing = PronunciationAudioCache(context, mockk()) { false }
+        failing.invalidate("broken")
+        assertNull(failing.get("broken"))
+        assertEquals(3_000L, failing.stats().totalBytes)
+    }
+
     /**
      * 词里的特殊字符不能破坏文件名。
      *

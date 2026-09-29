@@ -21,6 +21,7 @@ import io.github.zoot.englishreader.data.dao.WholeTranslationDao
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.TranslationProgressIntegrityException
+import io.github.zoot.englishreader.data.entity.TranslationProgressRow
 import io.github.zoot.englishreader.data.entity.TranslationSegmentEntity
 import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
 import io.github.zoot.englishreader.data.local.AiAuthStrategy
@@ -46,12 +47,15 @@ import io.mockk.mockk
 import io.mockk.slot
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
@@ -94,6 +98,7 @@ class WholeTranslationRepositoryTest {
     /** executor 收到的规范化段落文本，按调用顺序。 */
     private val requestedInputs = mutableListOf<String>()
     private val claimUpdates = AtomicInteger()
+    private val fullSegmentReads = AtomicInteger()
 
     @Before
     fun setUp() {
@@ -105,6 +110,11 @@ class WholeTranslationRepositoryTest {
             .setQueryCallback({ sql, _ ->
                 if (sql.startsWith("UPDATE translation_segments SET status = 'translating'")) {
                     claimUpdates.incrementAndGet()
+                }
+                if (sql == "SELECT * FROM translation_segments WHERE taskId = ? " +
+                    "ORDER BY articleId ASC, paragraphIndex ASC"
+                ) {
+                    fullSegmentReads.incrementAndGet()
                 }
             }, Runnable::run)
             .build()
@@ -147,6 +157,7 @@ class WholeTranslationRepositoryTest {
         assertEquals(listOf("Alpha.", "Beta.", "Gamma."), requestedInputs)
         assertEquals("译:Alpha.\n\n译:Beta.\n\n译:Gamma.", db.articleDao().getArticleById(articleId)?.translation)
         assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus((result as WholeTranslationStartResult.Started).taskId))
+        assertEquals("only publication may read full segments", 1, fullSegmentReads.get())
     }
 
     @Test
@@ -258,6 +269,7 @@ class WholeTranslationRepositoryTest {
         assertEquals(listOf("A.", "B.", "C."), requestedInputs)
         assertEquals(WholeTranslationTaskStatus.PAUSED, taskStatus(taskId))
         assertNull("partial success must not materialize", db.articleDao().getArticleById(articleId)?.translation)
+        assertEquals("incomplete finish must not load translations", 0, fullSegmentReads.get())
 
         requestedInputs.clear()
         repo.retryFailed(taskId)
@@ -266,6 +278,7 @@ class WholeTranslationRepositoryTest {
         assertEquals("only the failed segment may be re-requested", listOf("B."), requestedInputs)
         assertEquals(WholeTranslationTaskStatus.COMPLETED, taskStatus(taskId))
         assertEquals("译:A.\n\n译:B.\n\n译:C.", db.articleDao().getArticleById(articleId)?.translation)
+        assertEquals("retry publishes with one full read", 1, fullSegmentReads.get())
     }
 
     /** 可重试失败在一次运行里只尝试一次，不会对同一段无限循环。 */
@@ -508,6 +521,98 @@ class WholeTranslationRepositoryTest {
         assertEquals("second segment must not be requested against edited source", listOf("Old one."), requestedInputs)
         assertEquals(WholeTranslationTaskStatus.FAILED, taskStatus(taskId))
         assertEquals("旧译文", db.articleDao().getArticleById(articleId)?.translation)
+    }
+
+    // ---- 收尾进度 ----
+
+    @Test
+    fun finish_emptySegments_pausesWithoutPublishing() = runTest {
+        val articleId = insertArticle("Only.")
+        val taskId = createPausedTask(articleId)
+        db.openHelper.writableDatabase.execSQL(
+            "DELETE FROM translation_segments WHERE taskId = ?", arrayOf(taskId)
+        )
+
+        repository(this).resume(taskId)
+        advanceUntilIdle()
+
+        assertEquals(WholeTranslationTaskStatus.PAUSED, taskStatus(taskId))
+        assertNull(db.articleDao().getArticleById(articleId)?.translation)
+        assertEquals(0, fullSegmentReads.get())
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun finish_invalidProgressRow_failsWithoutPublishingOrLoadingTranslations() = runTest {
+        data class InvalidRow(
+            val articleId: Long? = null,
+            val index: Int = 0,
+            val attempts: Int = 0,
+            val status: String = "translated",
+            val translation: String? = "译文"
+        )
+        val cases = listOf(
+            InvalidRow(articleId = 0), InvalidRow(index = -1), InvalidRow(attempts = -1),
+            InvalidRow(status = "future"), InvalidRow(translation = null),
+            InvalidRow(translation = ""), InvalidRow(translation = "\t\n\u00a0\u2003\u202f")
+        )
+        val repo = repository(this)
+        for (case in cases) {
+            val articleId = insertArticle("Only.")
+            val original = requireNotNull(db.articleDao().getArticleById(articleId))
+            db.articleDao().updateArticle(original.copy(translation = "旧译文"))
+            val taskId = createPausedTask(articleId)
+            db.openHelper.writableDatabase.execSQL(
+                "UPDATE translation_segments SET articleId = ?, paragraphIndex = ?, attemptCount = ?, " +
+                    "status = ?, translatedText = ? WHERE taskId = ?",
+                arrayOf(case.articleId ?: articleId, case.index, case.attempts, case.status, case.translation, taskId)
+            )
+
+            repo.resume(taskId)
+            advanceUntilIdle()
+
+            assertEquals("invalid row: $case", WholeTranslationTaskStatus.FAILED, taskStatus(taskId))
+            assertEquals(TranslationFailureReason.UNKNOWN, taskFailure(taskId))
+            assertEquals("旧译文", db.articleDao().getArticleById(articleId)?.translation)
+        }
+        assertEquals(0, fullSegmentReads.get())
+        assertTrue(requestedInputs.isEmpty())
+    }
+
+    @Test
+    fun finish_progressReadCancelled_propagatesWithoutFailureOrPublication() = runTest {
+        val articleId = insertArticle("Only.")
+        val taskId = createPausedTask(articleId)
+        setClaimState(taskId, 0, "translating", lease = NOW + 60_000)
+        val cancellation = CancellationException("cancel progress read")
+        val worker = SupervisorJob()
+        var completion: Throwable? = null
+        var readEntered = false
+        val dao = object : WholeTranslationDao by db.wholeTranslationDao() {
+            override suspend fun getProgressRows(taskId: Long, whitespaceChars: String): List<TranslationProgressRow> {
+                readEntered = true
+                currentCoroutineContext().job.invokeOnCompletion { completion = it }
+                throw cancellation
+            }
+        }
+        val repo = WholeTranslationRepository(
+            dao, db.articleDao(), resolver, executor,
+            CoroutineScope(worker + StandardTestDispatcher(testScheduler)), { NOW }, POLICY
+        )
+        try {
+            repo.resume(taskId)
+            advanceUntilIdle()
+
+            assertTrue(readEntered)
+            assertTrue(completion === cancellation)
+            assertEquals(WholeTranslationTaskStatus.RUNNING, taskStatus(taskId))
+            assertNull(taskFailure(taskId))
+            assertNull(db.articleDao().getArticleById(articleId)?.translation)
+            assertEquals(0, fullSegmentReads.get())
+            assertTrue(requestedInputs.isEmpty())
+        } finally {
+            worker.cancel()
+        }
     }
 
     // ---- 观察 ----

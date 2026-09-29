@@ -28,7 +28,6 @@ import io.github.zoot.englishreader.util.SentenceSplitter
 import io.github.zoot.englishreader.util.TranslationBlockPlanner
 import io.github.zoot.englishreader.model.TranslationPlannerVersion
 import io.github.zoot.englishreader.model.TranslationProcessingMode
-import io.github.zoot.englishreader.model.TranslationSegment
 import io.github.zoot.englishreader.model.TranslationSegmentStatus
 import io.github.zoot.englishreader.model.WholeTranslationProgress
 import io.github.zoot.englishreader.model.WholeTranslationScope
@@ -547,8 +546,11 @@ class WholeTranslationRepository internal constructor(
     }
 
     private suspend fun finish(taskId: Long) {
-        val segments = dao.getSegments(taskId).map { it.toDomain() }
-        val progress = WholeTranslationProgress.from(segments)
+        val progress = WholeTranslationProgress.summarize(
+            dao.getProgressRows(taskId),
+            TranslationProgressRow::validatedStatus,
+            { TranslationFailureReason.fromStableToken(it.failureReason) }
+        )
         if (!progress.isFullyTranslated) {
             // 仍有未完成项：由 UI 按失败类别与剩余工作提供可用动作。
             dao.updateTaskStatus(taskId, WholeTranslationTaskStatus.PAUSED.toStableToken(), null, clock())
@@ -594,17 +596,6 @@ class WholeTranslationRepository internal constructor(
             }.toSet()
         )
     }
-
-    private fun TranslationSegmentEntity.toDomain() = TranslationSegment(
-        articleId = articleId,
-        paragraphIndex = paragraphIndex,
-        sourceFingerprint = sourceFingerprint,
-        status = TranslationSegmentStatus.fromStableToken(status),
-        translatedText = translatedText,
-        failureReason = TranslationFailureReason.fromStableToken(failureReason),
-        attemptCount = attemptCount,
-        leaseExpiresAt = leaseExpiresAt
-    )
 
     companion object {
         private const val TAG = "WholeTranslationRepo"

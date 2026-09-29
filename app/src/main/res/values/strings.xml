@@ -361,7 +361,7 @@
     <string name="settings_profile_models_loading">正在获取模型列表…</string>
     <string name="settings_profile_models_loaded">连接成功，已获取 %1$d 个模型</string>
     <string name="settings_profile_models_empty">服务端未返回可用的模型 ID，请检查接口与权限。</string>
-    <string name="settings_profile_models_hint">可手动填写模型 ID，或先测试连接再下拉选择。测试仅查询模型列表，不发送生成请求，也不验证模型生成能力或账户余额。</string>
+    <string name="settings_profile_models_hint">可直接手动填写模型 ID 并保存，测试连接为可选操作，成功后可下拉选择。测试仅查询模型列表，不发送生成请求；保存配置不代表已验证模型生成能力或账户余额。</string>
     <string name="ai_error_model_unavailable">未找到此模型 ID，请核对服务商提供的模型名称及访问权限</string>
     <string name="settings_profile_identity">服务商：%1$s\nBase URL：%2$s\n模型：%3$s\n认证：%4$s</string>
     <string name="settings_profile_card_summary">%1$s · %2$s</string>

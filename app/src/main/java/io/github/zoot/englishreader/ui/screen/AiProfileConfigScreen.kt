@@ -226,8 +226,7 @@ fun AiProfileConfigScreen(
         else -> AiProfileValidation(false, false, false, false, false)
     }
     val testing = discovery.loading
-    val saveEnabled = discovery.result is AiModelDiscoveryResult.Success &&
-        !profileMutationInFlight && !testing
+    val saveEnabled = !profileMutationInFlight && !testing
 
     Scaffold(
         topBar = {

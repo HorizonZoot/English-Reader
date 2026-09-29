@@ -93,7 +93,7 @@ class AiProfileConfigScreenTest {
 
         composeTestRule.onNodeWithTag("profile_add_top").performClick()
         composeTestRule.onNodeWithText("新增 AI 配置").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
     }
 
     @Test
@@ -192,9 +192,11 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_provider_selector").performClick()
         composeTestRule.onNodeWithTag("profile_provider_option_KIMI").performClick()
         composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("Kimi")
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
-        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("replacement-key")
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("profile_api_key_error").assertExists()
+        coVerify(exactly = 0) { harness.repository.updateProfile(any(), any()) }
+        composeTestRule.onNodeWithTag("profile_api_key").performScrollTo().performTextInput("replacement-key")
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
     }
 
     @Test
@@ -251,6 +253,113 @@ class AiProfileConfigScreenTest {
     }
 
     @Test
+    fun manualSave_withoutDiscovery_createsCustomProfileWithoutNetwork() {
+        val harness = harness()
+        coEvery { harness.repository.createProfile(any(), any()) } returns ProfileMutationResult.Success
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_provider_selector").performClick()
+        composeTestRule.onNodeWithTag("profile_provider_option_OPENAI_COMPATIBLE")
+            .performScrollTo().performClick()
+        composeTestRule.onNodeWithTag("profile_display_name").assertEditableTextEquals("OpenAI 兼容")
+        composeTestRule.onNodeWithTag("profile_base_url").assertEditableTextEquals("")
+            .performTextInput("https://custom.example.com/v1")
+        composeTestRule.onNodeWithTag("profile_model_id").performTextInput("manual-model")
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+            .performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        coVerify(exactly = 1) {
+            harness.repository.createProfile(match {
+                it.providerTemplate == AiProviderTemplate.OPENAI_COMPATIBLE &&
+                    it.baseUrl == "https://custom.example.com/v1" && it.modelId == "manual-model"
+            }, "sk-draft")
+        }
+        coVerify(exactly = 0) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnection(any(), any()) }
+        composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
+    }
+
+    @Test
+    fun manualSave_modelListNotFound_savesWithoutGenerationProbe() {
+        val harness = harness()
+        coEvery { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) } returns
+            AiModelDiscoveryResult.Failure(AiError.HttpNotFound(404))
+        coEvery { harness.repository.createProfile(any(), any()) } returns ProfileMutationResult.Success
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        confirmProbe()
+
+        composeTestRule.onNodeWithTag("profile_editor_test_result").assertExists()
+        composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+            .performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        coVerify(exactly = 1) { harness.repository.createProfile(any(), "sk-draft") }
+        coVerify(exactly = 1) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnection(any(), any()) }
+        composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
+    }
+
+    @Test
+    fun manualSave_unchangedConnection_keepsSavedKeyWithoutDiscovery() {
+        val target = profile("profile-1", "Primary")
+        val harness = harness(listOf(target), activeProfileId = target.profileId)
+        coEvery { harness.repository.updateProfile(any(), any()) } returns ProfileMutationResult.Success
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_manage_${target.profileId}").performClick()
+        composeTestRule.onNodeWithText("编辑配置").performClick()
+        composeTestRule.onNodeWithTag("profile_display_name").performTextReplacement("Renamed")
+        composeTestRule.onNodeWithTag("profile_api_key").assertEditableTextEquals("")
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+            .performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        coVerify(exactly = 1) {
+            harness.repository.updateProfile(target.copy(displayName = "Renamed"), null)
+        }
+        coVerify(exactly = 0) { harness.aiClient.discoverModels(any<String>()) }
+        coVerify(exactly = 0) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnection(any(), any()) }
+        composeTestRule.onNodeWithText("编辑 AI 配置").assertDoesNotExist()
+    }
+
+    @Test
+    fun manualSave_invalidFields_showsLocalErrorsWithoutMutationOrDiscovery() {
+        val harness = harness()
+        setScreen(harness)
+        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        val tags = listOf("profile_display_name", "profile_base_url", "profile_model_id", "profile_temperature")
+        for (tag in tags) {
+            composeTestRule.onNodeWithTag(tag).performScrollTo().performTextClearance()
+        }
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+            .performScrollTo().performClick()
+        for (tag in tags + "profile_api_key") {
+            composeTestRule.onNodeWithTag("${tag}_error").performScrollTo().assertIsDisplayed()
+        }
+        composeTestRule.onNodeWithTag("profile_display_name").performScrollTo().performTextInput("Primary")
+        composeTestRule.onNodeWithTag("profile_model_id").performTextInput("manual-model")
+        composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
+        composeTestRule.onNodeWithTag("profile_base_url").performScrollTo().performTextInput("http://example.com")
+        composeTestRule.onNodeWithTag("profile_temperature").performScrollTo().performTextInput("NaN")
+        composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo().performClick()
+
+        composeTestRule.onNodeWithTag("profile_base_url_error").assertExists()
+        composeTestRule.onNodeWithTag("profile_temperature_error").assertExists()
+        coVerify(exactly = 0) { harness.repository.createProfile(any(), any()) }
+        coVerify(exactly = 0) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+        composeTestRule.onNodeWithText("新增 AI 配置").assertExists()
+    }
+
+    @Test
     fun discoverModels_blankModel_loadsCatalogWithoutFeeConfirmationAndKeepsSelections() {
         val harness = harness()
         coEvery { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) } returns
@@ -297,7 +406,7 @@ class AiProfileConfigScreenTest {
     }
 
     @Test
-    fun discoverModels_keyOrProviderChange_clearsCatalogAndDisablesSave() {
+    fun discoverModels_keyOrProviderChange_clearsCatalogWithoutBlockingSave() {
         val harness = harness()
         coEvery { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) } returns
             AiModelDiscoveryResult.Success(listOf("deepseek-v4-flash"))
@@ -309,7 +418,7 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_api_key").performScrollTo().performTextInput("-changed")
         composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
         composeTestRule.onNodeWithTag("profile_editor_test_result").assertDoesNotExist()
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
         confirmProbe()
         composeTestRule.onNodeWithTag("profile_model_dropdown").assertExists()
 
@@ -317,7 +426,7 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_provider_option_KIMI").performClick()
         composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
         composeTestRule.onNodeWithTag("profile_editor_test_result").assertDoesNotExist()
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
         coVerify(exactly = 2) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
     }
 
@@ -345,16 +454,12 @@ class AiProfileConfigScreenTest {
         coVerify(exactly = 0) { harness.repository.updateProfile(any(), any()) }
 
         composeTestRule.onNodeWithTag("profile_api_key").performTextInput("replacement-key")
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
-        confirmProbe()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
         composeTestRule.onNodeWithTag("profile_editor_save").performScrollTo().performClick()
         composeTestRule.waitForIdle()
 
-        coVerify(exactly = 1) {
-            harness.aiClient.discoverModels(match<AiModelDiscoveryDraft> {
-                it.baseUrl == target.baseUrl && it.apiKey == "replacement-key"
-            })
-        }
+        coVerify(exactly = 0) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        coVerify(exactly = 1) { harness.aiClient.discoverModels(target.profileId) }
         coVerify(exactly = 1) {
             harness.repository.updateProfile(
                 match { it.profileId == target.profileId && it.modelId == "other-model" },
@@ -364,10 +469,11 @@ class AiProfileConfigScreenTest {
     }
 
     @Test
-    fun unsavedDraft_connectionTestFailure_isShownInsideEditor() {
+    fun unsavedDraft_connectionTestFailure_isShownButDoesNotBlockManualSave() {
         val harness = harness()
         coEvery { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) } returns
             AiModelDiscoveryResult.Failure(AiError.HttpAuth(401))
+        coEvery { harness.repository.createProfile(any(), any()) } returns ProfileMutationResult.Success
         setScreen(harness)
 
         composeTestRule.onNodeWithTag("profile_add_empty").performClick()
@@ -380,7 +486,13 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_api_key_hidden").performClick()
         composeTestRule.onNodeWithTag("profile_api_key").assertEditableTextEquals("sk-draft")
         composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+            .performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        coVerify(exactly = 1) { harness.repository.createProfile(any(), "sk-draft") }
+        coVerify(exactly = 1) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+        composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
     }
 
     @Test
@@ -396,6 +508,7 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithTag("profile_add_empty").performClick()
         composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-old")
         confirmProbe()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
         coVerify(exactly = 1) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
         composeTestRule.waitForIdle()
 
@@ -756,10 +869,11 @@ class AiProfileConfigScreenTest {
     }
 
     @Test
-    fun testConnection_emptyCatalog_doesNotEnableSaveOrShowVerifiedArrow() {
+    fun testConnection_emptyCatalog_allowsManualSaveWithoutVerifiedArrow() {
         val harness = harness()
         coEvery { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) } returns
             AiModelDiscoveryResult.Failure(AiError.NoContent)
+        coEvery { harness.repository.createProfile(any(), any()) } returns ProfileMutationResult.Success
         setScreen(harness)
         composeTestRule.onNodeWithTag("profile_add_empty").performClick()
         composeTestRule.onNodeWithTag("profile_api_key").performTextInput("sk-draft")
@@ -767,8 +881,14 @@ class AiProfileConfigScreenTest {
 
         composeTestRule.onNodeWithTag("profile_model_dropdown").assertDoesNotExist()
         composeTestRule.onNodeWithTag("profile_model_verified").assertDoesNotExist()
-        composeTestRule.onNodeWithTag("profile_editor_save").assertIsNotEnabled()
         composeTestRule.onNodeWithText("连接测试成功").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("profile_editor_save").assertIsEnabled()
+            .performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+        coVerify(exactly = 1) { harness.repository.createProfile(any(), "sk-draft") }
+        coVerify(exactly = 1) { harness.aiClient.discoverModels(any<AiModelDiscoveryDraft>()) }
+        coVerify(exactly = 0) { harness.aiClient.testConnectionDraft(any()) }
+        composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
     }
 
     private fun confirmProbe() {

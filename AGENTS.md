@@ -82,6 +82,16 @@ Choose verification by change scope; do not claim a gate that was not run:
 
 Run Gradle from the repository root with JDK 17 and Android SDK 34, using `gradlew.bat` on Windows. Run the local verification required by the matrix for the completed change; avoid unrelated broad builds. Connected device tests still require the user's request and an available device/emulator; calling a check necessary does not waive that approval requirement.
 
+## Git Branch Management
+
+- `main` is the stable, user-accepted integration branch. Only merge changes after the applicable local checks pass and the user confirms device acceptance. Passing agent tests alone is not device acceptance. Being ready to push does not authorize a push; obtain explicit permission for remote operations.
+- Keep one shared feature-development branch for all new features and their testing. Reuse the existing `feat/onboarding` branch until the user explicitly chooses another name; do not create a separate branch per feature, test pass, review, or agent.
+- Fix defects discovered while developing or accepting a feature on that same feature branch. Use the shared `fix` branch only for independent repairs to already accepted functionality in `main`, not for feature-test fixes. Create it only when needed for authorized repair work, and apply the same verification and user device-acceptance gate before merging.
+- Unless the user explicitly authorizes an exception, the only branch roles are `main`, the shared `fix`, and the single shared feature branch. Do not create additional branches (including automatic agent/worktree branches). Do not rename or delete legacy branches without permission.
+- Branches do not require separate Android Studio projects or worktrees. Prefer switching branches in one clean working directory; do not automatically create new worktrees. Never discard, silently stash, or commit unrelated working-tree changes to make switching possible. If an existing worktree owns a branch, explain that constraint and agree on consolidation before removing or relocating it.
+- Before merging, inspect both histories, the complete incoming commit/file set, and local changes. If a feature branch includes other unmerged work beyond the user's approved scope, obtain confirmation instead of silently merging it. Resolve conflicts by preserving both intended behaviors, not by blindly choosing ours/theirs; request a decision for ambiguous semantics.
+- After conflict resolution, inspect the integrated diff and run the applicable checks on the final snapshot. Material changes that invalidate device acceptance require renewed user acceptance before merging. Keep commits focused, report the target branch and included commits, and never equate merge approval with permission to push.
+
 ## Change Discipline
 
 Keep changes focused, minimal, and root-cause oriented. Do not refactor unrelated code or update unrelated documentation. Preserve existing working-tree changes that are outside the requested scope.

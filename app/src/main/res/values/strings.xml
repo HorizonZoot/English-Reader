@@ -2,6 +2,43 @@
 <resources>
     <string name="app_name">English Reader</string>
     <string name="settings_title">设置</string>
+
+    <!-- First-use guide: static, offline content; no configuration or remote requests. -->
+    <string name="onboarding_title">使用引导</string>
+    <string name="settings_onboarding">重新查看使用引导</string>
+    <string name="settings_onboarding_summary">阅读、查词、生词本、朗读与可选 AI</string>
+    <string name="onboarding_loading">正在读取使用引导状态…</string>
+    <string name="onboarding_page_position">第 %1$d / %2$d 页</string>
+    <string name="onboarding_skip">跳过</string>
+    <string name="onboarding_previous">上一步</string>
+    <string name="onboarding_next">下一步</string>
+    <string name="onboarding_start">开始使用</string>
+    <string name="onboarding_return_settings">返回设置</string>
+    <string name="onboarding_saving">正在保存…</string>
+    <string name="onboarding_read_failed">无法读取引导状态，暂时显示使用引导。你可以继续或跳过。</string>
+    <string name="onboarding_save_failed">未能保存引导完成状态，已允许本次进入应用；下次启动可能再次显示。</string>
+    <string name="onboarding_library_title">从一篇文章开始</string>
+    <string name="onboarding_library_body">在“文章”页打开文章或书籍，用顶部搜索框按标题或作者查找。\n\n点击导入，可选择 TXT、Markdown、EPUB 文件，或粘贴英文文本。EPUB 会按章节导入，方便从目录开始阅读。</string>
+    <string name="onboarding_dictionary_title">长按单词，松手查词</string>
+    <string name="onboarding_dictionary_body">阅读时长按一个英文单词，选中的词会高亮；松手后打开词义卡片。\n\n内置词库支持常用词离线查询，未命中时可能联网查询。查词时的真人发音也可能联网获取；扩展词库可稍后在设置中按需下载。</string>
+    <string name="onboarding_vocabulary_title">把生词留给下一次</string>
+    <string name="onboarding_vocabulary_body">在词义卡片中点击“添加到生词本”，即可收藏这个单词。只查词不会自动收藏。\n\n回到“生词本”查看释义、播放发音，也可从“查看原文”回到单词所在文章，结合上下文复习。</string>
+    <string name="onboarding_tts_title">让英文读给你听</string>
+    <string name="onboarding_tts_body">点击句子后选择“朗读”，或在阅读页使用连续朗读。语音设置可以调整音色与语速。\n\n应用内置 Jen 离线语音，首次使用时准备模型。网络语音是可选项，需要单独授权；系统语音引擎可能发送朗读文本并产生流量费用。本引导不会播放或下载语音。</string>
+    <string name="onboarding_ai_title">AI 可选，阅读不必等待</string>
+    <string name="onboarding_ai_body">需要翻译或解释时，可稍后在“设置 → AI profile”配置服务商、模型和 API Key。不配置 AI，也能阅读、查词和收藏生词。\n\nAI 请求会将所选文本或请求范围内的文章内容发送给第三方服务商，可能跨境传输，并消耗额度或产生费用。API Key 仅在本地加密存储。\n\n本引导只作说明，不会发送文本、测试连接或开启联网选项。</string>
+    <string name="onboarding_library_image">书架示意：搜索标题或作者，打开书籍，或点击加号导入。</string>
+    <string name="onboarding_dictionary_image">查词示意：长按 curious，松手后显示释义“好奇的”。</string>
+    <string name="onboarding_vocabulary_image">收藏示意：将 curious 添加到生词本，稍后复习。</string>
+    <string name="onboarding_tts_image">朗读示意：句子播放产生声波，可在语音设置调整朗读。</string>
+    <string name="onboarding_ai_image">可选 AI 示意：翻译与解释由第三方服务商处理，配置由你决定。</string>
+    <string name="onboarding_sample_book">我的第一本英文书</string>
+    <string name="onboarding_sample_word" translatable="false">curious</string>
+    <string name="onboarding_sample_definition">好奇的 · 想要了解的</string>
+    <string name="onboarding_hold_release">长按选词 → 松手查词</string>
+    <string name="onboarding_ai_sample">翻译与解释</string>
+    <string name="onboarding_ai_provider">第三方 AI 服务商</string>
+    <string name="onboarding_ai_optional">按需配置，不强制开启</string>
     <string name="error_unknown">未知错误</string>
     <string name="error_network">网络错误</string>
     <string name="error_delete_article_failed">删除文章失败</string>

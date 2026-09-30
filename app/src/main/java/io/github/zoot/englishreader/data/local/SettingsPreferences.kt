@@ -79,6 +79,7 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
     constructor(context: Context) : this(context.settingsDataStore)
 
     companion object {
+        private val ONBOARDING_COMPLETED_KEY = booleanPreferencesKey("onboarding_completed")
         private val FONT_SIZE_KEY = stringPreferencesKey("font_size_option")
         private val THEME_KEY = stringPreferencesKey("theme_option")
         private val READING_MODE_KEY = stringPreferencesKey("reading_mode")
@@ -88,6 +89,14 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
         private val LAST_UPDATE_CHECK_KEY = longPreferencesKey("last_update_check_at")
         private val UPDATE_DOWNLOAD_ID_KEY = longPreferencesKey("update_download_id")
         private val UPDATE_DOWNLOAD_TAG_KEY = stringPreferencesKey("update_download_tag")
+    }
+
+    // 首次引导由 ViewModel 区分读取失败与未完成，不能在存储层静默回退。
+    val onboardingCompleted: Flow<Boolean> = dataStore.data
+        .map { preferences -> preferences[ONBOARDING_COMPLETED_KEY] ?: false }
+
+    suspend fun completeOnboarding() {
+        dataStore.edit { preferences -> preferences[ONBOARDING_COMPLETED_KEY] = true }
     }
 
     // DataStore 读盘失败会抛 IOException（官方约定），.catch 回退默认值而非让异常

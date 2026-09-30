@@ -106,7 +106,8 @@ fun SettingsScreen(
     hasUpdateDownload: Boolean = false,
     manualUpdateOutcomes: Flow<ManualCheckOutcome> = emptyFlow(),
     viewModel: SettingsViewModel = hiltViewModel(),
-    modelsViewModel: TtsModelsViewModel = hiltViewModel()
+    modelsViewModel: TtsModelsViewModel = hiltViewModel(),
+    onOpenOnboarding: () -> Unit = {}
 ) {
     val fontSize by viewModel.fontSizeOption.collectAsStateWithLifecycle()
     val theme by viewModel.themeOption.collectAsStateWithLifecycle()
@@ -209,7 +210,8 @@ fun SettingsScreen(
             AboutSection(
                 onCheckForUpdate = onCheckForUpdate,
                 checking = checkingForUpdate,
-                hasDownload = hasUpdateDownload
+                hasDownload = hasUpdateDownload,
+                onOpenOnboarding = onOpenOnboarding
             )
         }
     }
@@ -229,9 +231,17 @@ fun SettingsScreen(
 internal fun AboutSection(
     onCheckForUpdate: () -> Unit,
     checking: Boolean,
-    hasDownload: Boolean = false
+    hasDownload: Boolean = false,
+    onOpenOnboarding: () -> Unit = {}
 ) {
     SettingsGroup(title = stringResource(R.string.settings_about)) {
+        SettingsActionRow(
+            icon = { Icon(Icons.Outlined.Info, contentDescription = null) },
+            title = stringResource(R.string.settings_onboarding),
+            supporting = stringResource(R.string.settings_onboarding_summary),
+            onClick = onOpenOnboarding,
+            testTag = "settings-onboarding"
+        )
         SettingsActionRow(
             icon = {
                 Icon(

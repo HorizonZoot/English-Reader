@@ -26,6 +26,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -55,6 +56,9 @@ import io.github.zoot.englishreader.ui.screen.ArticleListScreen
 import io.github.zoot.englishreader.ui.screen.ArticleEditorScreen
 import io.github.zoot.englishreader.ui.screen.AiProfileConfigScreen
 import io.github.zoot.englishreader.ui.screen.BookTocScreen
+import io.github.zoot.englishreader.ui.screen.OnboardingGate
+import io.github.zoot.englishreader.ui.navigation.ONBOARDING_REPLAY_ROUTE
+import io.github.zoot.englishreader.ui.navigation.onboardingReplayDestination
 import io.github.zoot.englishreader.ui.screen.ReadingScreen
 import io.github.zoot.englishreader.ui.screen.SettingsScreen
 import io.github.zoot.englishreader.ui.screen.SettingsCacheManagementScreen
@@ -173,7 +177,9 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize(),
                             color = MaterialTheme.colorScheme.background
                         ) {
-                            EnglishReaderNavigation()
+                            OnboardingGate {
+                                EnglishReaderNavigation()
+                            }
                         }
                     }
                 }
@@ -187,6 +193,7 @@ fun EnglishReaderNavigation() {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val isOnboardingReplay by rememberUpdatedState(currentRoute == ONBOARDING_REPLAY_ROUTE)
 
     // 更新检查的 VM 取在这里——本处位于任何 composable() 目的地**之外**，于是解析到
     // Activity 作用域的 ViewModelStore：旋屏时实例被保留，其 init 里的自动检查不会重跑。
@@ -200,7 +207,7 @@ fun EnglishReaderNavigation() {
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, updateViewModel) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_START) updateViewModel.onForeground()
+            if (event == Lifecycle.Event.ON_START && !isOnboardingReplay) updateViewModel.onForeground()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -343,7 +350,7 @@ fun EnglishReaderNavigation() {
         }
     ) { padding ->
         // 弹窗挂在 NavHost 之上：它要能盖在任意目的地上，且不因用户导航到别处而成为孤儿。
-        pendingUpdate?.let { update ->
+        pendingUpdate?.takeIf { currentRoute != ONBOARDING_REPLAY_ROUTE }?.let { update ->
             UpdateDialog(
                 versionName = update.versionName,
                 releaseNotes = update.releaseNotes,
@@ -356,7 +363,7 @@ fun EnglishReaderNavigation() {
                 onDismiss = updateViewModel::dismissUpdate
             )
         }
-        if (downloadDialogVisible) {
+        if (downloadDialogVisible && currentRoute != ONBOARDING_REPLAY_ROUTE) {
             UpdateDownloadDialog(
                 state = updateDownload,
                 busy = downloadActionBusy,
@@ -460,6 +467,9 @@ fun EnglishReaderNavigation() {
             SettingsScreen(
                 onOpenAiProfile = { navController.navigate("settings/ai-profile") },
                 onOpenCacheManagement = { navController.navigate("settings/cache") },
+                onOpenOnboarding = {
+                    navController.navigate(ONBOARDING_REPLAY_ROUTE) { launchSingleTop = true }
+                },
                 onCheckForUpdate = updateViewModel::checkManually,
                 checkingForUpdate = checkingUpdate,
                 hasUpdateDownload = updateDownload.hasDownloadTarget || downloadActionBusy,
@@ -467,6 +477,8 @@ fun EnglishReaderNavigation() {
                 viewModel = viewModel
             )
         }
+
+        onboardingReplayDestination(navController)
 
         composable("settings/cache") {
             SettingsCacheManagementScreen(onBack = { navController.popBackStack() })

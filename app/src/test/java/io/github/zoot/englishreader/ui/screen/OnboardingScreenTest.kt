@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -51,6 +52,7 @@ class OnboardingScreenTest {
     fun pages_nextAndPrevious_showFiveDistinctTopicsAndFinishOnlyOnStart() {
         var finishes = 0
         compose.setContent { EnglishReaderTheme { OnboardingScreen(onFinish = { finishes++ }) } }
+        compose.onNode(isDialog()).assertExists()
         compose.onNodeWithText(text(R.string.onboarding_previous)).assertIsNotEnabled()
         titles.indices.forEach { index ->
             compose.onNodeWithText(position(index)).assertIsDisplayed()
@@ -121,6 +123,7 @@ class OnboardingScreenTest {
     }
 
     @Test
+    @Config(qualifiers = "w320dp-h480dp")
     fun compactScreen_largeFontAndDarkTheme_keepsAllPageTextScrollableAndControlsReachable() {
         compose.setContent {
             val density = LocalDensity.current

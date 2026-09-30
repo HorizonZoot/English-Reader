@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,6 +41,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -64,6 +66,8 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -77,6 +81,7 @@ import io.github.zoot.englishreader.viewmodel.OnboardingViewModel
 @Composable
 fun OnboardingGate(
     viewModel: OnboardingViewModel = hiltViewModel(),
+    background: @Composable () -> Unit = {},
     content: @Composable () -> Unit
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -104,17 +109,22 @@ fun OnboardingGate(
                 CircularProgressIndicator()
                 Text(stringResource(R.string.onboarding_loading), Modifier.padding(16.dp))
             }
-            is OnboardingState.Guide -> OnboardingScreen(
-                onFinish = viewModel::finish,
-                saving = current.saving
-            )
+            is OnboardingState.Guide -> {
+                Box(Modifier.fillMaxSize().clearAndSetSemantics {}) { background() }
+                OnboardingScreen(
+                    onFinish = viewModel::finish,
+                    saving = current.saving,
+                    feedback = { SnackbarHost(snackbarHostState) }
+                )
+            }
             OnboardingState.Ready -> content()
         }
-        // Kept outside the gate so a failed write remains visible after entering the app.
-        SnackbarHost(
-            snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding()
-        )
+        if (state !is OnboardingState.Guide) {
+            SnackbarHost(
+                snackbarHostState,
+                modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding()
+            )
+        }
     }
 }
 
@@ -131,19 +141,42 @@ fun OnboardingScreen(
     onFinish: () -> Unit,
     modifier: Modifier = Modifier,
     saving: Boolean = false,
-    replay: Boolean = false
+    replay: Boolean = false,
+    feedback: @Composable () -> Unit = {}
 ) {
     var pageIndex by rememberSaveable { mutableIntStateOf(0) }
+    BackHandler { if (!saving) onFinish() }
+    Dialog(
+        onDismissRequest = { if (!saving) onFinish() },
+        properties = DialogProperties(dismissOnClickOutside = false, usePlatformDefaultWidth = false)
+    ) {
+        OnboardingContent(onFinish, pageIndex, { pageIndex = it }, modifier, saving, replay, feedback)
+    }
+}
+
+@Composable
+internal fun OnboardingContent(
+    onFinish: () -> Unit,
+    pageIndex: Int,
+    onPageChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    saving: Boolean = false,
+    replay: Boolean = false,
+    feedback: @Composable () -> Unit = {}
+) {
     val pages = OnboardingPage.entries
     val page = pages[pageIndex]
     // Consume Back while saving too: a second Back must not finish the Activity mid-write.
     BackHandler { if (!saving) onFinish() }
 
-    Box(
-        modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).safeDrawingPadding(),
-        contentAlignment = Alignment.TopCenter
+    Surface(
+        modifier = modifier.padding(24.dp).widthIn(max = 480.dp).fillMaxWidth()
+            .heightIn(max = 600.dp).fillMaxHeight(0.85f),
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 6.dp
     ) {
-        Column(Modifier.widthIn(max = 600.dp).fillMaxSize().padding(horizontal = 24.dp)) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -165,17 +198,29 @@ fun OnboardingScreen(
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 16.dp).clearAndSetSemantics {},
+                horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
+            ) {
+                pages.indices.forEach { index ->
+                    Box(Modifier.size(6.dp).background(
+                        if (index == pageIndex) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outlineVariant,
+                        RoundedCornerShape(50)
+                    ))
+                }
+            }
             key(page) {
                 Column(
                     modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     OnboardingIllustration(page)
                     Text(
                         stringResource(page.title),
                         modifier = Modifier.semantics { heading() },
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = MaterialTheme.colorScheme.onBackground
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         stringResource(page.body),
@@ -190,12 +235,12 @@ fun OnboardingScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 OutlinedButton(
-                    onClick = { if (pageIndex > 0) pageIndex-- },
+                    onClick = { if (pageIndex > 0) onPageChange(pageIndex - 1) },
                     enabled = pageIndex > 0 && !saving,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                 ) { Text(stringResource(R.string.onboarding_previous)) }
                 Button(
-                    onClick = { if (pageIndex < pages.lastIndex) pageIndex++ else onFinish() },
+                    onClick = { if (pageIndex < pages.lastIndex) onPageChange(pageIndex + 1) else onFinish() },
                     enabled = !saving,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                 ) {
@@ -207,6 +252,7 @@ fun OnboardingScreen(
                     }))
                 }
             }
+            feedback()
         }
     }
 }

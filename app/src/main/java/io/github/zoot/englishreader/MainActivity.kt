@@ -177,7 +177,11 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxSize(),
                             color = MaterialTheme.colorScheme.background
                         ) {
-                            OnboardingGate {
+                            OnboardingGate(
+                                background = {
+                                    ArticleListScreen(onArticleClick = {}, onBookClick = {})
+                                }
+                            ) {
                                 EnglishReaderNavigation()
                             }
                         }
@@ -231,7 +235,7 @@ fun EnglishReaderNavigation() {
         // 在这里再套一层默认的系统栏 insets，会让每个内嵌页面被二次下移。
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (currentRoute == "article_list" || currentRoute == "vocabulary" || currentRoute == "settings") {
+            if (currentRoute == "article_list" || currentRoute == "vocabulary" || currentRoute == "settings" || currentRoute == ONBOARDING_REPLAY_ROUTE) {
                 ArticleUiTheme {
                     // 选中色降低一点饱和度（叠一层透明度而不是换色相），未选中统一系统灰，
                     // 让底栏退到内容之后；文字不加粗。
@@ -333,7 +337,7 @@ fun EnglishReaderNavigation() {
                                         )
                                     },
                                     colors = navigationColors,
-                                    selected = currentRoute == "settings",
+                                    selected = currentRoute == "settings" || currentRoute == ONBOARDING_REPLAY_ROUTE,
                                     onClick = {
                                         if (currentRoute != "settings") {
                                             navController.navigate("settings") {

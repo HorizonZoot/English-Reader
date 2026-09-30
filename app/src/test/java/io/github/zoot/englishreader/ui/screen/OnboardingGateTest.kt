@@ -31,6 +31,8 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import org.junit.After
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -55,6 +57,7 @@ class OnboardingGateTest {
     }
     private lateinit var model: OnboardingViewModel
     private var updateModel: UpdateViewModel? = null
+    private var backgroundComposed = false
     private lateinit var back: OnBackPressedDispatcher
 
     @After
@@ -67,9 +70,12 @@ class OnboardingGateTest {
     fun gate_unknownThenIncomplete_neverComposesNormalContentOrStartsUpdateCheck() {
         render()
         compose.onNodeWithText(text(R.string.onboarding_loading)).assertIsDisplayed()
+        compose.runOnIdle { assertFalse(backgroundComposed) }
         assertNormalContentNotCreated()
         compose.runOnIdle { completed.value = false }
         compose.onNodeWithText(text(R.string.onboarding_title)).assertIsDisplayed()
+        compose.runOnIdle { assertTrue(backgroundComposed) }
+        compose.onNodeWithText("Library background").assertDoesNotExist()
         assertNormalContentNotCreated()
         repeat(4) { compose.onNodeWithText(text(R.string.onboarding_next)).performClick() }
         assertNormalContentNotCreated()
@@ -129,7 +135,16 @@ class OnboardingGateTest {
         compose.setContent {
             back = LocalOnBackPressedDispatcherOwner.current!!.onBackPressedDispatcher
             EnglishReaderTheme {
-                OnboardingGate(viewModel = model) {
+                OnboardingGate(
+                    viewModel = model,
+                    background = {
+                        DisposableEffect(Unit) {
+                            backgroundComposed = true
+                            onDispose { backgroundComposed = false }
+                        }
+                        Text("Library background")
+                    }
+                ) {
                     // A real update VM exercises its automatic-check side effect at the gate boundary.
                     DisposableEffect(Unit) {
                         val createdModel = UpdateViewModel(updates, downloads)
@@ -149,6 +164,7 @@ class OnboardingGateTest {
     }
 
     private fun assertNormalContentEntered() {
+        compose.runOnIdle { assertFalse(backgroundComposed) }
         compose.onNodeWithText(text(R.string.nav_articles)).assertIsDisplayed()
         compose.onNodeWithText(text(R.string.onboarding_title)).assertDoesNotExist()
         coVerify(exactly = 1) { preferences.completeOnboarding() }

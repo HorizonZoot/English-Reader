@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -107,7 +108,9 @@ class OnboardingNavigationTest {
         }
         repeat(3) { exit ->
             compose.onNodeWithTag("settings-onboarding").performScrollTo().performClick()
+            compose.onNode(isDialog()).assertExists()
             compose.onNodeWithText(text(R.string.onboarding_title)).assertIsDisplayed()
+            compose.onNodeWithTag("settings-onboarding").assertExists()
             compose.onNodeWithText(position(1)).assertIsDisplayed()
             compose.runOnIdle { assertEquals(ONBOARDING_REPLAY_ROUTE, nav.currentDestination?.route) }
             when (exit) {

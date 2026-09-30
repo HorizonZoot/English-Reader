@@ -48,6 +48,10 @@
     <string name="library_section_title">我的阅读</string>
     <string name="library_more_actions">%1$s 的更多操作</string>
     <string name="library_importing">正在导入</string>
+    <string name="library_search_hint">搜索标题或作者</string>
+    <string name="library_search_clear">清空搜索</string>
+    <string name="library_search_empty">没有找到匹配的文章或书籍</string>
+    <string name="library_search_empty_supporting">试试其他标题或作者，或清空搜索查看全部。</string>
     <!-- 导入状态指示器。与 library_importing（按钮的无障碍描述）分开：这三条是屏幕中央
          显示给所有用户看的正文，省略号是刻意的「进行中」暗示。 -->
     <string name="import_status_importing">正在导入…</string>

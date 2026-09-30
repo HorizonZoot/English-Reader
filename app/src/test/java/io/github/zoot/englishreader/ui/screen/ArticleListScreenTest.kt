@@ -89,6 +89,7 @@ class ArticleListScreenTest {
     private val openedBooks = mutableListOf<Long>()
     private val viewModel = mockk<ArticleListViewModel>(relaxed = true).also { model ->
         every { model.libraryItems } returns libraryItemsState
+        every { model.searchQuery } returns MutableStateFlow("")
         every { model.importState } returns importState
         every { model.uiEvent } returns uiEvents.receiveAsFlow()
             .onStart { activeEventCollectors.incrementAndGet() }

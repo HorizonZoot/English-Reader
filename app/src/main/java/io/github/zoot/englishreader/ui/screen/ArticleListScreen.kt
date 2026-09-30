@@ -7,13 +7,18 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
@@ -22,6 +27,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -30,6 +36,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -61,6 +68,11 @@ fun ArticleListScreen(
     onEditArticle: ((Long) -> Unit)? = null
 ) = ArticleUiTheme {
     val libraryItems by viewModel.libraryItems.collectAsStateWithLifecycle()
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val listState = rememberLazyListState()
+    LaunchedEffect(searchQuery.trim()) {
+        listState.scrollToItem(0)
+    }
     val importState by viewModel.importState.collectAsStateWithLifecycle()
     val isImporting = importState is ImportState.Running
     var articleToDelete by remember(viewModel) { mutableStateOf<ArticleSummary?>(null) }
@@ -187,7 +199,9 @@ fun ArticleListScreen(
         topBar = {
             LibraryHeader(
                 isImporting = isImporting,
-                onImport = { if (!isImporting) showImportDialog = true }
+                onImport = { if (!isImporting) showImportDialog = true },
+                searchQuery = searchQuery,
+                onSearchQueryChange = viewModel::updateSearchQuery
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -222,12 +236,18 @@ fun ArticleListScreen(
                         modifier = Modifier.size(40.dp)
                     )
                     Text(
-                        text = stringResource(R.string.articles_empty),
+                        text = stringResource(
+                            if (searchQuery.isBlank()) R.string.articles_empty
+                            else R.string.library_search_empty
+                        ),
                         style = MaterialTheme.typography.titleMedium,
                         textAlign = TextAlign.Center
                     )
                     Text(
-                        text = stringResource(R.string.articles_empty_supporting),
+                        text = stringResource(
+                            if (searchQuery.isBlank()) R.string.articles_empty_supporting
+                            else R.string.library_search_empty_supporting
+                        ),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -238,6 +258,7 @@ fun ArticleListScreen(
                     modifier = Modifier
                         .widthIn(max = 600.dp)
                         .fillMaxSize(),
+                    state = listState,
                     contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 20.dp)
                 ) {
                     item(key = "library-section") {
@@ -292,7 +313,14 @@ fun ArticleListScreen(
 }
 
 @Composable
-private fun LibraryHeader(isImporting: Boolean, onImport: () -> Unit) {
+private fun LibraryHeader(
+    isImporting: Boolean,
+    onImport: () -> Unit,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit
+) {
+    val focusManager = LocalFocusManager.current
+    val searchDescription = stringResource(R.string.library_search_hint)
     val importDescription = stringResource(
         if (isImporting) R.string.library_importing else R.string.import_article
     )
@@ -341,6 +369,31 @@ private fun LibraryHeader(isImporting: Boolean, onImport: () -> Unit) {
                 modifier = Modifier
                     .padding(top = 8.dp, bottom = 8.dp)
                     .semantics { heading() }
+            )
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics { contentDescription = searchDescription },
+                placeholder = { Text(searchDescription) },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                trailingIcon = if (searchQuery.isNotEmpty()) {
+                    {
+                        IconButton(
+                            onClick = { onSearchQueryChange("") },
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = stringResource(R.string.library_search_clear)
+                            )
+                        }
+                    }
+                } else null,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() })
             )
         }
     }

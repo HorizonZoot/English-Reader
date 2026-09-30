@@ -46,8 +46,15 @@ class ArticleListViewModel @Inject constructor(
     val articles: StateFlow<List<ArticleEntity>> = articleRepository.getAllArticles()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    fun updateSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
     /**
-     * 书架条目：单篇文章 + 书籍，按时间倒序合并。
+     * 书架条目：单篇文章 + 书籍，按标题／作者过滤并按时间倒序合并。
      *
      * 用 [ArticleRepository.getStandaloneArticles] 而不是 [articles]：章节也是
      * `ArticleEntity`，直接用全量文章会让一本 500 章的书在列表里铺出 500 行。
@@ -58,9 +65,16 @@ class ArticleListViewModel @Inject constructor(
      */
     val libraryItems: StateFlow<List<LibraryItem>> = combine(
         articleRepository.getStandaloneArticles(),
-        bookRepository.getAllBooks()
-    ) { standalone, books ->
-        (standalone.map { LibraryItem.Article(it) } + books.map { LibraryItem.Book(it) })
+        bookRepository.getAllBooks(),
+        searchQuery
+    ) { standalone, books, query ->
+        val keyword = query.trim()
+        val matchingArticles = standalone.filter { it.title.contains(keyword, ignoreCase = true) }
+        val matchingBooks = books.filter {
+            it.title.contains(keyword, ignoreCase = true) ||
+                it.author?.contains(keyword, ignoreCase = true) == true
+        }
+        (matchingArticles.map { LibraryItem.Article(it) } + matchingBooks.map { LibraryItem.Book(it) })
             .sortedByDescending { it.sortKey }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 

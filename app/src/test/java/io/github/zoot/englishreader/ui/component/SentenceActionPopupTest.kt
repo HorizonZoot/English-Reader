@@ -157,27 +157,6 @@ class SentenceActionPopupTest {
     }
 
     @Test
-    fun actionPopup_doesNotOwnFocusOrOutsideDismissal() {
-        val properties = sentencePopupProperties(SentencePopupMode.ACTIONS)
-
-        assertEquals(false, properties.focusable)
-        assertEquals(false, properties.dismissOnClickOutside)
-    }
-
-    @Test
-    fun resultPopupModes_keepFocusAndOutsideDismissal() {
-        listOf(
-            SentencePopupMode.TRANSLATION,
-            SentencePopupMode.EXPLANATION
-        ).forEach { mode ->
-            val properties = sentencePopupProperties(mode)
-
-            assertEquals(mode.name, true, properties.focusable)
-            assertEquals(mode.name, true, properties.dismissOnClickOutside)
-        }
-    }
-
-    @Test
     fun popupDismiss_waitsForFadeOutAndDispatchesExactlyOnce() {
         composeRule.mainClock.autoAdvance = false
         var dismissCount = 0

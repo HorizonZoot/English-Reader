@@ -8,6 +8,7 @@ import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.spyk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
@@ -48,7 +49,7 @@ class DictionaryMutationCoordinationTest {
     private val assetReads = AtomicInteger()
     private val database = TransactionDao()
     private val mutex = ObservedMutex()
-    private val mutationLock = mockk<DictionaryMutationLock>().also { shared ->
+    private val mutationLock = spyk(DictionaryMutationLock()).also { shared ->
         every { shared.mutex } returns mutex
     }
     private val context = mockk<Context>()
@@ -160,23 +161,13 @@ class DictionaryMutationCoordinationTest {
         val installingDao = object : DictionaryDao by database {
             override suspend fun replaceAllStreaming(block: suspend (suspend (List<DictionaryEntry>) -> Unit) -> Unit): Unit = coroutineScope {
                 val child = launch(start = CoroutineStart.UNDISPATCHED) {
-                    try {
-                        awaitCancellation()
-                    } finally {
-                        withContext(NonCancellable) {
-                            cleanupEntered.complete(Unit)
-                            releaseCleanup.await()
-                            cleanupDone.set(true)
-                        }
-                    }
+                    cleanupEntered.complete(Unit)
+                    releaseCleanup.await()
+                    cleanupDone.set(true)
                 }
-                try {
-                    database.replaceAllStreaming(block)
-                    committed.complete(Unit)
-                    awaitCancellation()
-                } finally {
-                    child.cancel()
-                }
+                database.replaceAllStreaming(block)
+                committed.complete(Unit)
+                child.join()
             }
 
             override suspend fun getCount(): Int {
@@ -210,11 +201,13 @@ class DictionaryMutationCoordinationTest {
             withTimeout(10_000) { mutex.attempts.receive() }
             assertFalse(initRead.isCompleted)
             assertFalse(cancellationSeen.isCompleted)
+            assertEquals(0L, mutationLock.revision.value)
             releaseCleanup.complete(Unit)
             installation.join()
             initialize.join()
 
             assertTrue(cancellationSeen.isCompleted)
+            assertEquals(1L, mutationLock.revision.value)
             assertEquals(0, assetReads.get())
             assertEquals(100, version.get())
             assertEquals(DictionaryPackState.Installed(PACK_ENTRIES), installer.state.value)
@@ -260,6 +253,7 @@ class DictionaryMutationCoordinationTest {
         assertCancellation(cancellation, runCatching { installer.install() }.exceptionOrNull())
 
         assertEquals(20, database.committedCount)
+        assertEquals(0L, mutationLock.revision.value)
         assertNotNull(database.lookup("old1"))
         assertEquals(1, version.get())
         assertEquals(DictionaryPackState.Failed(DictionaryPackFailure.CANCELLED), installer.state.value)
@@ -344,6 +338,49 @@ class DictionaryMutationCoordinationTest {
         } finally {
             mutex.unlock()
             operation.cancelAndJoin()
+        }
+    }
+
+    @Test
+    fun install_sameSizeReplacement_publishesEachCommitAndRemovePublishesAgain() = runBlocking {
+        val installer = installer()
+        installer.install()
+        assertEquals(1L, mutationLock.revision.value)
+        installer.install()
+        assertEquals(2L, mutationLock.revision.value)
+        assertEquals(PACK_ENTRIES, database.committedCount)
+        installer.remove()
+        assertEquals(3L, mutationLock.revision.value)
+        assertNotNull(database.lookup("hello"))
+    }
+
+    @Test
+    fun install_cancelledDuringStreaming_rollsBackWithoutRevision() = runBlocking {
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val dao = object : DictionaryDao by database {
+            override suspend fun replaceAllStreaming(block: suspend (suspend (List<DictionaryEntry>) -> Unit) -> Unit) {
+                database.replaceAllStreaming { insert ->
+                    block { batch ->
+                        entered.complete(Unit)
+                        release.await()
+                        insert(batch)
+                    }
+                }
+            }
+        }
+        val installer = installer(dao)
+        val job = launch { installer.install() }
+        try {
+            withTimeout(10_000) { entered.await() }
+            job.cancel()
+            release.complete(Unit)
+            withTimeout(10_000) { job.join() }
+            assertEquals(0L, mutationLock.revision.value)
+            assertEquals(20, database.committedCount)
+        } finally {
+            release.complete(Unit)
+            job.cancelAndJoin()
         }
     }
 

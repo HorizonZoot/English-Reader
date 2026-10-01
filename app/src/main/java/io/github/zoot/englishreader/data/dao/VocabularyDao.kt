@@ -3,6 +3,7 @@ package io.github.zoot.englishreader.data.dao
 import androidx.room.*
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.entity.VocabularyWithSource
+import io.github.zoot.englishreader.util.WordLookupKey
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -33,6 +34,19 @@ interface VocabularyDao {
 
     @Query("SELECT * FROM vocabulary WHERE articleId = :articleId ORDER BY createdAt DESC")
     fun getVocabularyByArticle(articleId: Long): Flow<List<VocabularyEntity>>
+
+    @Query("SELECT word FROM vocabulary WHERE articleId = :articleId")
+    suspend fun getWordsByArticle(articleId: Long): List<String>
+
+    /** Compare legacy and new spelling in one transaction without rewriting saved surface text. */
+    @Transaction
+    suspend fun insertVocabularyIfAbsent(vocabulary: VocabularyEntity): Long {
+        val key = WordLookupKey.normalize(vocabulary.word)
+        if (vocabulary.articleId != null &&
+            getWordsByArticle(vocabulary.articleId).any { WordLookupKey.normalize(it) == key }
+        ) return -1L
+        return insertVocabulary(vocabulary)
+    }
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertVocabulary(vocabulary: VocabularyEntity): Long

@@ -15,13 +15,17 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.TimeGrouper
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
+import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupingTime
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
+import io.github.zoot.englishreader.util.WordLookupKey
 import io.github.zoot.englishreader.util.AudioPlayer
 import io.github.zoot.englishreader.util.NetworkChecker
 import io.github.zoot.englishreader.util.TtsPlayer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 import kotlinx.coroutines.Job
@@ -30,6 +34,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.TimeZone
 import javax.inject.Inject
 
 /**
@@ -81,14 +86,23 @@ class VocabularyViewModel @Inject constructor(
     )
     val expandedGroups: StateFlow<Set<VocabularyGroupId>> = _expandedGroups.asStateFlow()
 
+    private val groupingTime = MutableStateFlow(VocabularyGroupingTime.current())
+
+    fun updateGroupingTime(time: VocabularyGroupingTime) {
+        groupingTime.value = time
+    }
+
     // 分组后的生词列表
     val groups: StateFlow<List<VocabularyGroup>> = combine(
         vocabulary,
         groupType,
-        expandedGroups
-    ) { words, type, expanded ->
+        expandedGroups,
+        groupingTime
+    ) { words, type, expanded, time ->
         when (type) {
-            GroupType.ByTime -> timeGrouper.group(words, expanded)
+            GroupType.ByTime -> timeGrouper.group(
+                words, expanded, time.nowMillis, TimeZone.getTimeZone(time.zoneId)
+            )
             GroupType.ByAlphabet -> alphabetGrouper.group(words, expanded)
             // ByArticle 已从 UI 中移除，如果意外触发则返回空列表
             GroupType.ByArticle -> emptyList()
@@ -100,11 +114,15 @@ class VocabularyViewModel @Inject constructor(
      *
      * 释义要在打开生词本时逐词查库（[DictionaryRepository.lookupOffline]），所以结果按词缓存：
      * 生词列表每次变动只补查新出现的词，删除/撤销不会让整屏重新查一遍。
-     * 缓存的 key 是 lowercase 后的词——词典查询契约要求已归一化的输入，且
-     * `WordLemmatizer` 的候选也走 lowercase，同一词的任意大小写写法结果相同。
+     * 缓存 key 统一大小写与内部排版撇号；不更改生词的显示文本。
      */
-    val details: StateFlow<Map<Long, VocabularyWordDetail>> = vocabularyWithSource
-        .map { rows -> resolveDetails(rows) }
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val details: StateFlow<Map<Long, VocabularyWordDetail>> = combine(
+        vocabularyWithSource,
+        dictionaryRepository.revision
+    ) { rows, revision -> rows to revision }
+        .mapLatest { (rows, revision) -> resolveDetails(rows, revision) }
+        .filterNotNull()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIPTION_TIMEOUT_MS), emptyMap())
 
     /**
@@ -202,7 +220,7 @@ class VocabularyViewModel @Inject constructor(
     fun playWordAudio(vocabulary: VocabularyEntity) {
         val word = vocabulary.word.trim()
         if (word.isEmpty()) return
-        val key = word.lowercase()
+        val key = WordLookupKey.normalize(word)
         stopAudio(preserveTtsPreparation = true)
         val generation = audioGeneration
         val token = audioPlayer.beginRequest()
@@ -310,13 +328,22 @@ class VocabularyViewModel @Inject constructor(
      * 而 [glossCache] 是普通 MutableMap。
      */
     private suspend fun resolveDetails(
-        rows: List<VocabularyWithSource>
-    ): Map<Long, VocabularyWordDetail> = glossCacheMutex.withLock {
-        rows.associate { row ->
+        rows: List<VocabularyWithSource>,
+        revision: Long
+    ): Map<Long, VocabularyWordDetail>? = glossCacheMutex.withLock {
+        if (revision != dictionaryRepository.revision.value) return@withLock null
+        if (glossCacheRevision != revision) {
+            glossCache.clear()
+            glossCacheRevision = revision
+        }
+        val details = rows.associate { row ->
             val word = row.vocabulary
-            val key = word.word.lowercase()
+            val key = WordLookupKey.normalize(word.word)
             if (!glossCache.containsKey(key)) {
-                glossCache[key] = lookupGloss(key)
+                val gloss = lookupGloss(key)
+                currentCoroutineContext().ensureActive()
+                if (revision != dictionaryRepository.revision.value) return@withLock null
+                glossCache[key] = gloss
             }
             val gloss = glossCache[key]
             word.id to VocabularyWordDetail(
@@ -326,6 +353,7 @@ class VocabularyViewModel @Inject constructor(
                 sourceTitle = row.articleTitle
             )
         }
+        details.takeIf { revision == dictionaryRepository.revision.value }
     }
 
     /** 离线词典查询；词库未收录时返回 null。 */
@@ -350,6 +378,7 @@ class VocabularyViewModel @Inject constructor(
     private val glossCache = mutableMapOf<String, GlossLookup?>()
 
     private val glossCacheMutex = Mutex()
+    private var glossCacheRevision = -1L
 
     private companion object {
         const val SUBSCRIPTION_TIMEOUT_MS = 5000L

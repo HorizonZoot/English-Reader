@@ -60,6 +60,8 @@ import io.github.zoot.englishreader.util.TtsPlaybackResult
 import io.github.zoot.englishreader.util.TtsVoiceSnapshot
 import io.github.zoot.englishreader.util.failureReason
 import io.github.zoot.englishreader.util.ParagraphAligner
+import io.github.zoot.englishreader.util.WordBoundaryDetector
+import io.github.zoot.englishreader.util.WordLookupKey
 import io.github.zoot.englishreader.data.audio.WordAudioUrl
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineStart
@@ -1669,7 +1671,7 @@ class ReadingViewModel @Inject constructor(
                 if (generation == articleLoadGeneration && articleId == requestedArticleId &&
                     articleId == _article.value?.id
                 ) {
-                    _vocabularyWords.value = vocabList.mapTo(mutableSetOf()) { it.word.lowercase() }
+                    _vocabularyWords.value = vocabList.mapTo(mutableSetOf()) { WordLookupKey.normalize(it.word) }
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -1706,7 +1708,7 @@ class ReadingViewModel @Inject constructor(
                     return@launch
                 }
                 // 缓存优先，离线也能播放之前下载的真人读音。
-                val cached = pronunciationAudioCache.get(word.lowercase())
+                val cached = pronunciationAudioCache.get(WordLookupKey.normalize(word))
                 if (!isCurrentWordAudioRequest(generation, token)) return@launch
                 if (cached == null && !networkChecker.isOnline()) {
                     if (!silent) speakViaTts(word, generation, token)
@@ -1725,7 +1727,7 @@ class ReadingViewModel @Inject constructor(
                             Log.e("ReadingViewModel", "Audio playback failed: ${exception.javaClass.simpleName}")
                             if (cached != null) {
                                 try {
-                                    pronunciationAudioCache.invalidate(word.lowercase())
+                                    pronunciationAudioCache.invalidate(WordLookupKey.normalize(word))
                                 } catch (cancellation: CancellationException) {
                                     throw cancellation
                                 } catch (_: Exception) {
@@ -1743,7 +1745,7 @@ class ReadingViewModel @Inject constructor(
                 _isLoadingAudio.value = false
                 if (cached == null && networkChecker.isOnline()) {
                     viewModelScope.launch {
-                        runCatching { pronunciationAudioCache.download(word.lowercase(), audioUrl) }
+                        runCatching { pronunciationAudioCache.download(WordLookupKey.normalize(word), audioUrl) }
                             .onFailure {
                                 if (it is CancellationException) throw it
                                 Log.w("ReadingViewModel", "Failed to cache pronunciation audio")
@@ -1800,8 +1802,8 @@ class ReadingViewModel @Inject constructor(
     /**
      * 在正文里定位生词所在的段落。
      *
-     * 先按整词匹配（`\b`），找不到再退化成子串匹配：生词就是从正文里选出来的，理论上
-     * 必然命中，但 `\b` 会把带撇号的词（`don't`）在中间断开，也可能因为词尾标点而落空。
+     * 先按提词器的整词边界匹配，找不到再退化成子串匹配。
+     * 撇号仅在等长搜索副本中折叠，返回的偏移始终指向原文。
      * 两级都找不到时返回 null，调用方退回正常的阅读位置恢复。
      *
      * 段落切分用 [ParagraphAligner.splitParagraphs]，与阅读页渲染时的分段同源——
@@ -1812,14 +1814,14 @@ class ReadingViewModel @Inject constructor(
         if (needle.isEmpty()) return null
         val paragraphs = ParagraphAligner.splitParagraphs(content)
 
-        val wholeWord = Regex("\\b${Regex.escape(needle)}\\b", RegexOption.IGNORE_CASE)
         paragraphs.forEachIndexed { index, paragraph ->
-            wholeWord.find(paragraph)?.let {
-                return ReadingAnchor(index, ReadingTextKind.ORIGINAL, it.range.first)
+            WordBoundaryDetector.findWordRanges(paragraph, needle).firstOrNull()?.let {
+                return ReadingAnchor(index, ReadingTextKind.ORIGINAL, it.startOffset)
             }
         }
         paragraphs.forEachIndexed { index, paragraph ->
-            val at = paragraph.indexOf(needle, ignoreCase = true)
+            val at = WordLookupKey.foldApostrophes(paragraph)
+                .indexOf(WordLookupKey.foldApostrophes(needle), ignoreCase = true)
             if (at >= 0) return ReadingAnchor(index, ReadingTextKind.ORIGINAL, at)
         }
         return null

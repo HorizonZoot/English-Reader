@@ -51,6 +51,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import io.github.zoot.englishreader.R
+import io.github.zoot.englishreader.util.WordLookupKey
 import io.github.zoot.englishreader.core.SentenceRange
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.local.FontSizeOption
@@ -249,6 +250,10 @@ fun ReadingScreen(
             WholeTranslationSheet(
                 state = wholeTranslationState,
                 onDismiss = viewModel::dismissWholeTranslation,
+                onDone = {
+                    showTranslation = true
+                    viewModel.dismissWholeTranslation()
+                },
                 onSelectScope = viewModel::selectWholeTranslationScope,
                 onSelectMode = viewModel::selectWholeTranslationMode,
                 onPreserveParagraphs = viewModel::preserveWholeTranslationParagraphs,
@@ -334,7 +339,7 @@ fun ReadingScreen(
                     viewModel.playWordAudio(definition.inflectedForm ?: definition.word, definition.audioUrl)
                 },
                 isLoadingAudio = isLoadingAudio,
-                isInVocabulary = { form -> vocabularyWords.contains(form.lowercase()) },
+                isInVocabulary = { form -> vocabularyWords.contains(WordLookupKey.normalize(form)) },
                 onVisibleTopChanged = { top -> wordSheetTopOnScreen = top }
             )
         }

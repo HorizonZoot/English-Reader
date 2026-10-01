@@ -32,6 +32,7 @@ import okio.Buffer
 import okio.Source
 import okio.Timeout
 import okio.buffer
+import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -61,6 +62,7 @@ import org.robolectric.annotation.Config
 class PronunciationAudioCacheTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
+    private val client = PronunciationAudioCache.createHttpClient()
     private lateinit var cache: PronunciationAudioCache
 
     private val cacheDir: File
@@ -69,7 +71,25 @@ class PronunciationAudioCacheTest {
     @Before
     fun setUp() {
         cacheDir.deleteRecursively()
-        cache = PronunciationAudioCache(context)
+        cache = PronunciationAudioCache(context, client)
+    }
+
+    @After
+    fun tearDown() {
+        client.dispatcher.cancelAll()
+        client.connectionPool.evictAll()
+        client.dispatcher.executorService.shutdown()
+    }
+
+    @Test
+    fun put_typographicAndAsciiApostrophe_shareEntryAndEviction() = runBlocking {
+        val audio = ByteArray(2_000) { it.toByte() }
+        cache.put("DON’T", audio)
+        assertArrayEquals(audio, requireNotNull(cache.get("don't")).readBytes())
+        cache.put("don't", audio)
+        assertEquals(1, cache.stats().wordCount)
+        cache.invalidate("don’t")
+        assertNull(cache.get("don't"))
     }
 
     @Test
@@ -528,16 +548,11 @@ class PronunciationAudioCacheTest {
         assertEquals(tricky.size, cache.stats().wordCount)
     }
 
-    /** 大小写不同的同一个词是不同的键 —— 调用方负责归一化，缓存不猜。 */
     @Test
-    fun caseSensitivity_isTheCallersResponsibility() = runBlocking {
-        cache.put("Word", ByteArray(1_000))
-
-        assertNull(
-            "cache must not silently fold case; ReadingViewModel already lowercases " +
-                "before lookup, so folding here would hide a caller bug",
-            cache.get("word")
-        )
+    fun put_mixedCase_usesSharedLookupIdentity() = runBlocking {
+        val bytes = ByteArray(1_000)
+        cache.put("Word", bytes)
+        assertArrayEquals(bytes, requireNotNull(cache.get("word")).readBytes())
     }
 
 }

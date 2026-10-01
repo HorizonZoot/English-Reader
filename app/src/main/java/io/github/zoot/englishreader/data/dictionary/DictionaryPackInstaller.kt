@@ -244,7 +244,10 @@ class DictionaryPackInstaller internal constructor(
             mutationLock.mutex.withLock {
                 coroutineContext.ensureActive()
                 withContext(Dispatchers.IO + NonCancellable) {
-                    dictionaryDao.replaceAll(entries)
+                    mutationLock.commitMutation {
+                        dictionaryDao.replaceAll(entries)
+                        true
+                    }
                     committed = true
                     context.getSharedPreferences(DICT_PREFS, Context.MODE_PRIVATE)
                         .edit().putInt(KEY_DICT_VERSION, BuiltInDictionary.VERSION).apply()
@@ -345,69 +348,59 @@ class DictionaryPackInstaller internal constructor(
      */
     private suspend fun parseAndInstall(source: File): Int = withContext(Dispatchers.IO) {
         var persisted = 0
-        dictionaryDao.replaceAllStreaming { insert ->
-            source.reader().use { input ->
-                val lines = DictionaryPackCsvReader(input)
-                val batch = ArrayList<DictionaryEntry>(INSERT_BATCH_SIZE)
-                var batchChars = 0
-                var parsed = 0
-                var isHeader = true
-                while (true) {
-                    val line = lines.readLine() ?: break
-                    coroutineContext.ensureActive()
-                    if (isHeader) {
-                        isHeader = false
-                        if (line.startsWith("word,")) continue
-                    }
-                    val entry = parseCsvLine(line) ?: continue
-                    val entryChars = entry.word.length + entry.chinese.length +
-                        entry.phonetic.orEmpty().length + entry.english.orEmpty().length
-                    if (batch.isNotEmpty() &&
-                        (batch.size >= INSERT_BATCH_SIZE || batchChars + entryChars > MAX_BATCH_CHARS)
-                    ) {
-                        insert(batch.toList())
-                        parsed += batch.size
-                        batch.clear()
-                        batchChars = 0
-                        publish(DictionaryPackState.Installing(parsed))
-                    }
-                    batch += entry
-                    batchChars += entryChars
-                }
-                if (batch.isNotEmpty()) {
-                    insert(batch.toList())
-                    parsed += batch.size
-                }
-
-                // 校验必须在**事务内**，且用数据库实际行数而非解析行数。
-                //
-                // 两个独立的坑，审计各给了 SQLite 反例：
-                //
-                // 1. 原来这个检查在 `replaceAllStreaming` **之后**，也就是事务已提交。异常包
-                //    （能解析出 1..49,999 条）会先把旧词库覆盖掉再报失败。而
-                //    `DictionaryRepository.ensureInitialized` 的条件是「版本够 && count > 0」——
-                //    残缺词库非空，于是重启也不会重建。实测：7,005 条被替换成 1 条后，
-                //    原有样本词永久消失。这违反词库 PRD R3「安装失败不得失去现有词库」。
-                //
-                // 2. 用 `parsed`（解析行数）当判据是错的：`insertAll` 是
-                //    `OnConflictStrategy.REPLACE`，重复主键会合并。50,000 行同一个词能满足阈值，
-                //    而数据库里只有 1 条。`DictionaryPackState.Installed` 的文档说那个数字是
-                //    「数据库里的实际条数」，所以必须查库。
-                //
-                // 在这里抛异常会让 `deleteAll` 与已插入的批次一起回滚，用户保有原词库。
+        mutationLock.commitMutation { caller ->
+            dictionaryDao.replaceAllStreaming { insert ->
+                installEntries(source, insert) { caller.ensureActive() }
+                caller.ensureActive()
                 persisted = dictionaryDao.getCount()
                 if (!hasExtendedDictionary(persisted)) {
-                    throw MalformedPackException(
-                        "pack persisted only $persisted entries (parsed $parsed lines); " +
-                            "rolling back to keep the existing dictionary"
-                    )
+                    throw MalformedPackException("pack persisted only $persisted entries; rolling back")
                 }
+                caller.ensureActive()
             }
+            true
         }
         coroutineContext.ensureActive()
         markExtendedDictionaryVersion()
         Log.d(TAG, "Dictionary pack installed: $persisted entries")
         persisted
+    }
+
+    private suspend fun installEntries(
+        source: File,
+        insert: suspend (List<DictionaryEntry>) -> Unit,
+        checkCancellation: () -> Unit
+    ) {
+        source.reader().use { input ->
+            val lines = DictionaryPackCsvReader(input)
+            val batch = ArrayList<DictionaryEntry>(INSERT_BATCH_SIZE)
+            var batchChars = 0
+            var parsed = 0
+            var isHeader = true
+            while (true) {
+                checkCancellation()
+                val line = lines.readLine() ?: break
+                if (isHeader) {
+                    isHeader = false
+                    if (line.startsWith("word,")) continue
+                }
+                val entry = parseCsvLine(line) ?: continue
+                val entryChars = entry.word.length + entry.chinese.length +
+                    entry.phonetic.orEmpty().length + entry.english.orEmpty().length
+                if (batch.isNotEmpty() &&
+                    (batch.size >= INSERT_BATCH_SIZE || batchChars + entryChars > MAX_BATCH_CHARS)
+                ) {
+                    insert(batch.toList())
+                    parsed += batch.size
+                    batch.clear()
+                    batchChars = 0
+                    publish(DictionaryPackState.Installing(parsed))
+                }
+                batch += entry
+                batchChars += entryChars
+            }
+            if (batch.isNotEmpty()) insert(batch.toList())
+        }
     }
 
     private fun markExtendedDictionaryVersion() {

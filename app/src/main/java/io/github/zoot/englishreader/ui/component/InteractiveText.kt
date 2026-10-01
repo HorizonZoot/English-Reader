@@ -37,7 +37,7 @@ import io.github.zoot.englishreader.core.SentenceRange
 import io.github.zoot.englishreader.ui.theme.LocalReaderHighlightColors
 import io.github.zoot.englishreader.util.SentenceSplitter
 import io.github.zoot.englishreader.util.WordBoundaryDetector
-import java.util.Locale
+import io.github.zoot.englishreader.util.WordLookupKey
 
 /**
  * 交互式文本组件
@@ -279,19 +279,12 @@ fun InteractiveText(
     val selectedWordRanges = remember(
         text, selectedWord, selectedWordStartOffset, selectedWordEndOffset, sourceStartOffset
     ) {
-        buildList {
-            val word = selectedWord?.takeIf { it.isNotEmpty() } ?: return@buildList
-            var from = 0
-            while (from < text.length) {
-                val start = text.indexOf(word, from, ignoreCase = true)
-                if (start < 0) break
-                val range = WordBoundaryDetector.getWordRangeAtOffset(text, start)
-                if (range != null && range.word.equals(word, ignoreCase = true) &&
-                    (selectedWordStartOffset == null ||
-                        (selectedWordStartOffset == range.startOffset + sourceStartOffset &&
-                            selectedWordEndOffset == range.endOffset + sourceStartOffset))
-                ) add(range)
-                from = range?.endOffset ?: (start + 1)
+        val word = selectedWord?.takeIf { it.isNotEmpty() }
+        if (word == null) emptyList() else {
+            WordBoundaryDetector.findWordRanges(text, word).filter { range ->
+                selectedWordStartOffset == null ||
+                    (selectedWordStartOffset == range.startOffset + sourceStartOffset &&
+                        selectedWordEndOffset == range.endOffset + sourceStartOffset)
             }
         }
     }
@@ -577,7 +570,7 @@ internal fun extractAccessibilityWords(
             continue
         }
 
-        val normalizedWord = range.word.lowercase(Locale.US)
+        val normalizedWord = WordLookupKey.normalize(range.word)
         if (seenWords.add(normalizedWord)) {
             words += range.word
         }

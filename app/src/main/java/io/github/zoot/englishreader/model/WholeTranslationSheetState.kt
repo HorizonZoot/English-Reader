@@ -128,14 +128,13 @@ enum class WholeTranslationPrimaryAction {
     RETRY_FAILED,
     CONTINUE_IN_BACKGROUND,
 
-    /** 任务成功完成，收起面板。 */
+    /** 任务成功完成，显示译文并收起面板。 */
     DONE,
 
     /**
      * 任务已被用户取消，或没有可以继续处理的失败项，收起面板。
      *
-     * 与 [DONE] 分开只为文案：两者动作相同（收起面板），但取消后显示「完成」会让用户以为
-     * 译文已经可用。
+     * 保持现有译文显示状态，不触发 [DONE] 的显示译文动作。
      */
     CLOSE
 }

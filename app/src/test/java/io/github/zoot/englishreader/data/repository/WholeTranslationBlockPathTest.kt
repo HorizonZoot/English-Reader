@@ -43,8 +43,10 @@ import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -78,6 +80,7 @@ class WholeTranslationBlockPathTest {
     private lateinit var executor: AiExecutor
     private lateinit var resolver: AiExplanationRequestResolver
     private val requestedInputs = mutableListOf<String>()
+    private val applicationJobs = mutableListOf<Pair<Job, TestCoroutineScheduler>>()
 
     @Before
     fun setUp() {
@@ -102,7 +105,12 @@ class WholeTranslationBlockPathTest {
 
     @After
     fun tearDown() {
-        db.close()
+        try {
+            applicationJobs.forEach { (job, _) -> job.cancel() }
+            applicationJobs.map { it.second }.distinct().forEach { it.advanceUntilIdle() }
+        } finally {
+            db.close()
+        }
     }
 
     // ---- 用户报告的问题 ----
@@ -409,18 +417,31 @@ class WholeTranslationBlockPathTest {
     @Test
     fun start_afterCancellingConflictingTask_succeeds() = runTest {
         val articleId = insertArticle("First sentence.\nSecond sentence.")
-        succeedWith { "译:${it.trim()}" }
+        coEvery { executor.execute(any(), any()) } returns AiClientResult.Failure(AiError.Offline)
         val repo = repository(this)
         val first = repo.start(WholeTranslationScope.CurrentArticle(articleId))
             as WholeTranslationStartResult.Started
         advanceUntilIdle()
-        // 完成态同样不构成冲突，这里显式取消以覆盖用户手动放弃的那条路径。
+        assertEquals(
+            WholeTranslationTaskStatus.PAUSED,
+            WholeTranslationTaskStatus.fromStableToken(db.wholeTranslationDao().getTask(first.taskId)?.status)
+        )
+        bindToBook(articleId)
+        val chapter = WholeTranslationScope.Chapter(bookId = 9, articleIds = listOf(articleId))
+        assertEquals(
+            WholeTranslationStartResult.Conflict(first.taskId, "article:$articleId"),
+            repo.start(chapter)
+        )
+
         repo.cancel(first.taskId)
         advanceUntilIdle()
-        requestedInputs.clear()
+        assertEquals(
+            WholeTranslationTaskStatus.CANCELLED,
+            WholeTranslationTaskStatus.fromStableToken(db.wholeTranslationDao().getTask(first.taskId)?.status)
+        )
 
-        bindToBook(articleId)
-        val second = repo.start(WholeTranslationScope.Chapter(bookId = 9, articleIds = listOf(articleId)))
+        succeedWith { "译:${it.trim()}" }
+        val second = repo.start(chapter)
         advanceUntilIdle()
 
         assertTrue("取消既有任务后必须能重新开始", second is WholeTranslationStartResult.Started)
@@ -677,13 +698,14 @@ class WholeTranslationBlockPathTest {
 
     // ---- helpers ----
 
-    private fun repository(scope: CoroutineScope) = WholeTranslationRepository(
+    private fun repository(scope: TestScope) = WholeTranslationRepository(
         dao = db.wholeTranslationDao(),
         articleDao = db.articleDao(),
         requestResolver = resolver,
         executor = executor,
         applicationScope = CoroutineScope(
-            SupervisorJob() + StandardTestDispatcher((scope as TestScope).testScheduler)
+            SupervisorJob().also { applicationJobs += it to scope.testScheduler } +
+                StandardTestDispatcher(scope.testScheduler)
         ),
         clock = { NOW },
         materializationPolicy = POLICY,

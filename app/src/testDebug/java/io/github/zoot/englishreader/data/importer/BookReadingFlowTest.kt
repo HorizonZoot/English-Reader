@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.data.importer
 
 import android.content.Context
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import io.github.zoot.englishreader.core.SentenceRange
 import androidx.room.Room
@@ -79,6 +80,7 @@ class BookReadingFlowTest {
     private lateinit var dictionaryRepository: DictionaryRepository
     private lateinit var aiExplanationRepository: AiExplanationRepository
     private lateinit var viewModel: ReadingViewModel
+    private val viewModelStore = ViewModelStore()
     private val applicationScope by lazy { TestScope(mainDispatcherRule.testDispatcher) }
 
     @Before
@@ -129,12 +131,18 @@ class BookReadingFlowTest {
             mockk(relaxed = true),
             SavedStateHandle()
         )
+        viewModelStore.put("reading", viewModel)
     }
 
     @After
     fun tearDown() {
-        applicationScope.backgroundScope.cancel()
-        db.close()
+        try {
+            viewModelStore.clear()
+            applicationScope.backgroundScope.cancel()
+            applicationScope.testScheduler.runCurrent()
+        } finally {
+            db.close()
+        }
     }
 
     @Test

@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit
 internal class UpdateRepositoryFixture {
 
     val server = MockWebServer()
+    private val clients = mutableListOf<OkHttpClient>()
     val networkChecker: NetworkChecker = mockk(relaxed = true)
     val preferences: SettingsPreferences = mockk(relaxed = true)
 
@@ -57,7 +58,7 @@ internal class UpdateRepositoryFixture {
                     .readTimeout(500, TimeUnit.MILLISECONDS)
                     .callTimeout(1, TimeUnit.SECONDS)
                     .retryOnConnectionFailure(false)
-                    .build()
+                    .build().also { clients += it }
             )
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
@@ -114,7 +115,17 @@ internal class UpdateRepositoryFixture {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
     }
 
-    fun shutdown() = server.shutdown()
+    fun shutdown() {
+        try {
+            clients.forEach { it.dispatcher.cancelAll() }
+            server.shutdown()
+        } finally {
+            clients.forEach {
+                it.connectionPool.evictAll()
+                it.dispatcher.executorService.shutdown()
+            }
+        }
+    }
 
     /** 断言时间戳被记录（成功检查后）。 */
     fun verifyCheckRecorded(times: Int) {

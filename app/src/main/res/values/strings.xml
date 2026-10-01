@@ -259,7 +259,7 @@
     <string name="whole_translation_progress_failed">已翻译 %1$d / %2$d，失败 %3$d</string>
     <string name="whole_translation_status_running">正在翻译…</string>
     <string name="whole_translation_status_paused">已暂停</string>
-    <string name="whole_translation_status_completed">翻译完成，已显示中文对照</string>
+    <string name="whole_translation_status_completed">翻译完成，点击“完成”查看译文</string>
     <string name="whole_translation_status_failed_configuration">任务已停止：AI 配置或凭据不可用，请检查设置</string>
     <string name="whole_translation_status_blocked">剩余失败项无法直接重试；可取消此任务，调整分段或原文后重新翻译。</string>
     <string name="whole_translation_status_failed_generic">任务已停止</string>

@@ -72,6 +72,18 @@ class DictionaryRepositoryTest {
     }
 
     @Test
+    fun lookupOffline_typographicApostrophe_queriesCanonicalKey() = runTest {
+        coEvery { dao.getCount() } returns 20
+        stubInstalledDictVersion(999)
+        val entry = DictionaryEntry(word = "don't", phonetic = "", chinese = "不要", english = "do not")
+        coEvery { dao.lookup("don't") } returns entry
+
+        assertEquals(entry, repository.lookupOffline(" DON’T ")?.entry)
+        coVerify(exactly = 1) { dao.lookup("don't") }
+        coVerify(exactly = 0) { dao.lookup("don’t") }
+    }
+
+    @Test
     fun ensureInitialized_emptyDb_parsesAndInsertsEntries() = runTest {
         coEvery { dao.getCount() } returns 0
         stubAsset(

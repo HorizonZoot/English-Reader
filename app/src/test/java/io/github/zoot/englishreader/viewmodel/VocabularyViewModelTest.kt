@@ -15,6 +15,7 @@ import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.model.TtsReadingSettings
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
+import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupingTime
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
 import io.github.zoot.englishreader.util.AudioPlayer
 import io.github.zoot.englishreader.util.MainDispatcherRule
@@ -35,6 +36,9 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.advanceTimeBy
@@ -49,6 +53,8 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
+import java.time.Instant
+import java.time.ZoneId
 
 /**
  * VocabularyViewModel 单元测试
@@ -99,6 +105,7 @@ class VocabularyViewModelTest {
      * 构造后再改 mock 的返回值是无效的（指向的是另一个 flow 对象）。这也让本文件与
      * ArticleListViewModelTest 的「@Before 建一次，用例只改上游」约定一致。
      */
+    private val dictionaryRevision = MutableStateFlow(0L)
     private val rowsFlow = MutableStateFlow<List<VocabularyWithSource>>(emptyList())
 
     @Before
@@ -113,6 +120,7 @@ class VocabularyViewModelTest {
         ttsPlayer = mockk(relaxed = true)
         pronunciationAudioCache = mockk(relaxed = true)
         settingsPreferences = mockk(relaxed = true)
+        every { dictionaryRepository.revision } returns dictionaryRevision
         every { vocabularyRepository.getAllVocabularyWithSource() } returns rowsFlow
         every { networkChecker.isOnline() } returns true
         // 默认未授权联网 TTS：与产品默认值一致（SettingsPreferences.allowNetworkTts 缺省 false），
@@ -253,6 +261,70 @@ class VocabularyViewModelTest {
     }
 
     @Test
+    fun groups_timeChangedWithoutWordUpdates_reclassifiesAndPreservesExpansion() = runTest {
+        val now = Instant.parse("2024-07-18T23:59:59Z").toEpochMilli()
+        val utc = ZoneId.of("UTC")
+        withWords(listOf(vocab("apple", 1).copy(createdAt = now - 3_600_000)))
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now, utc))
+        viewModel.toggleGroup(VocabularyGroupId.Yesterday)
+        val expanded = viewModel.expandedGroups.value
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.groups.collect() }
+        runCurrent()
+        assertEquals(VocabularyGroupId.Today, viewModel.groups.value.single().id)
+
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now + 1_000, utc))
+        runCurrent()
+        assertEquals(VocabularyGroupId.Yesterday, viewModel.groups.value.single().id)
+        assertTrue(viewModel.groups.value.single().isExpanded)
+        assertEquals(expanded, viewModel.expandedGroups.value)
+
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now, utc))
+        runCurrent()
+        assertEquals(VocabularyGroupId.Today, viewModel.groups.value.single().id)
+    }
+
+    @Test
+    fun groups_zoneChangedWithoutWordUpdates_reclassifiesSameInstant() = runTest {
+        val now = Instant.parse("2024-07-18T01:00:00Z").toEpochMilli()
+        withWords(listOf(vocab("apple", 1).copy(createdAt = now - 7_200_000)))
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now, ZoneId.of("UTC")))
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.groups.collect() }
+        runCurrent()
+        assertEquals(VocabularyGroupId.Yesterday, viewModel.groups.value.single().id)
+
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now, ZoneId.of("America/New_York")))
+        runCurrent()
+        assertEquals(VocabularyGroupId.Today, viewModel.groups.value.single().id)
+    }
+
+    @Test
+    fun groups_clockRefresh_reusesBucketsAndDoesNotReloadDetailsOrResetAlphabetMode() = runTest {
+        val now = Instant.parse("2024-07-18T12:00:00Z").toEpochMilli()
+        val utc = ZoneId.of("UTC")
+        withWords(listOf(vocab("apple", 1).copy(createdAt = now - 3_600_000)))
+        coEvery { dictionaryRepository.lookupOffline("apple") } returns offlineEntry("apple", null, "苹果")
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now, utc))
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.groups.collect() }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.details.collect() }
+        runCurrent()
+        val todayWords = viewModel.groups.value.single().words
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now + 1_000, utc))
+        runCurrent()
+        assertSame(todayWords, viewModel.groups.value.single().words)
+
+        viewModel.switchGroupType(GroupType.ByAlphabet)
+        viewModel.toggleGroup(VocabularyGroupId.Alphabet("A"))
+        runCurrent()
+        val alphabetWords = viewModel.groups.value.single().words
+        viewModel.updateGroupingTime(VocabularyGroupingTime(now + 86_400_000, utc))
+        runCurrent()
+        assertEquals(GroupType.ByAlphabet, viewModel.groupType.value)
+        assertEquals(setOf(VocabularyGroupId.Alphabet("A")), viewModel.expandedGroups.value)
+        assertSame(alphabetWords, viewModel.groups.value.single().words)
+        coVerify(exactly = 1) { dictionaryRepository.lookupOffline("apple") }
+    }
+
+    @Test
     fun deleteVocabulary_afterPersisting_emitsDeletedWithThatWord() = runTest {
         val entity = vocab("delete-me", 99)
 
@@ -369,6 +441,18 @@ class VocabularyViewModelTest {
     }
 
     @Test
+    fun details_apostropheVariants_shareLookupWithoutChangingSavedSurface() = runTest {
+        withRows(listOf(row("DON’T", 1), row("don't", 2)))
+        coEvery { dictionaryRepository.lookupOffline("don't") } returns offlineEntry("don't", null, "不要")
+
+        val details = awaitDetails()
+        assertEquals("不要", details.getValue(1).chinese)
+        assertEquals("不要", details.getValue(2).chinese)
+        assertEquals(listOf("DON’T", "don't"), viewModel.vocabulary.first { it.size == 2 }.map { it.word })
+        coVerify(exactly = 1) { dictionaryRepository.lookupOffline("don't") }
+    }
+
+    @Test
     fun details_inflectedForm_reportsHeadword() = runTest {
         withRows(listOf(row("lives", id = 7L)))
         coEvery { dictionaryRepository.lookupOffline("lives") } returns
@@ -395,6 +479,74 @@ class VocabularyViewModelTest {
         assertTrue(!detail.hasGloss)
         // 词库查不到不应连累来源标题。
         assertEquals("Obscure Words", detail.sourceTitle)
+    }
+
+    @Test
+    fun details_revisionChanges_refreshesCachedMissAndHitWithoutChangingRows() = runTest {
+        withRows(listOf(row("apple", 1), row("missing", 2)))
+        coEvery { dictionaryRepository.lookupOffline("apple") } returns offlineEntry("apple", null, "旧释义")
+        coEvery { dictionaryRepository.lookupOffline("missing") } returns null
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.details.collect() }
+        runCurrent()
+        assertEquals("旧释义", viewModel.details.value.getValue(1).chinese)
+        assertNull(viewModel.details.value.getValue(2).chinese)
+
+        coEvery { dictionaryRepository.lookupOffline("apple") } returns null
+        coEvery { dictionaryRepository.lookupOffline("missing") } returns offlineEntry("missing", null, "新释义")
+        dictionaryRevision.value++
+        runCurrent()
+
+        assertNull(viewModel.details.value.getValue(1).chinese)
+        assertEquals("新释义", viewModel.details.value.getValue(2).chinese)
+        coVerify(exactly = 2) { dictionaryRepository.lookupOffline("apple") }
+        coVerify(exactly = 2) { dictionaryRepository.lookupOffline("missing") }
+    }
+
+    @Test
+    fun details_revisionChangesDuringLookup_discardsLateResultAndRequeries() = runTest {
+        withRows(listOf(row("apple", 1)))
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { dictionaryRepository.lookupOffline("apple") } coAnswers {
+            if (++calls == 1) {
+                entered.complete(Unit)
+                withContext(NonCancellable) { release.await() }
+                offlineEntry("apple", null, "旧释义")
+            } else offlineEntry("apple", null, "新释义")
+        }
+        val observed = mutableListOf<String?>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.details.collect { it[1]?.let { detail -> observed += detail.chinese } }
+        }
+        try {
+            entered.await()
+            dictionaryRevision.value++
+            runCurrent()
+            release.complete(Unit)
+            runCurrent()
+            assertEquals(listOf("新释义"), observed)
+            assertEquals(2, calls)
+            withRows(listOf(row("apple", 1, "source")))
+            runCurrent()
+            assertEquals("新释义", viewModel.details.value.getValue(1).chinese)
+            assertEquals(2, calls)
+        } finally {
+            release.complete(Unit)
+        }
+    }
+
+    @Test
+    fun details_revisionChangedWhileUnsubscribed_refreshesRetainedViewModel() = runTest {
+        withRows(listOf(row("apple", 1)))
+        coEvery { dictionaryRepository.lookupOffline("apple") } returns null
+        assertNull(awaitDetails().getValue(1).chinese)
+        advanceTimeBy(16_000)
+        runCurrent()
+        coEvery { dictionaryRepository.lookupOffline("apple") } returns offlineEntry("apple", null, "新释义")
+        dictionaryRevision.value++
+        val refreshed = viewModel.details.first { it[1]?.chinese == "新释义" }
+        assertEquals("新释义", refreshed.getValue(1).chinese)
     }
 
     /** 取第一份非空的 details：stateIn 的初始值是空 map，解析完成后才发第二份。 */

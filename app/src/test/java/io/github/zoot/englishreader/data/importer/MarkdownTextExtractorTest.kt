@@ -172,9 +172,7 @@ class MarkdownTextExtractorTest {
         val result = MarkdownTextExtractor.extract(md)
 
         // 未找到等长闭合符 → 整串反引号按普通字符原样保留，正文不丢
-        assertTrue("正文不得丢失，实际: $result", result.contains("code"))
-        assertTrue(result.contains("Before"))
-        assertTrue(result.contains("after"))
+        assertEquals(md, result)
     }
 
     @Test
@@ -308,9 +306,7 @@ class MarkdownTextExtractorTest {
 
         val result = MarkdownTextExtractor.extract(md)
 
-        assertFalse(result.contains("- "))
-        assertTrue(result.contains("first item"))
-        assertTrue(result.contains("second item"))
+        assertEquals("first item\nsecond item\nthird item", result)
     }
 
     @Test

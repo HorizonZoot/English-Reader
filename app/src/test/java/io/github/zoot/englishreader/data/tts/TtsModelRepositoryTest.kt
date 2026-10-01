@@ -28,6 +28,7 @@ import okio.Buffer
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream
+import org.junit.After
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -35,10 +36,20 @@ import org.junit.rules.TemporaryFolder
 
 class TtsModelRepositoryTest {
     @get:Rule val temporary = TemporaryFolder()
+    private val clients = mutableListOf<OkHttpClient>()
     private val files = linkedMapOf(
         "model.onnx" to "model bytes", "tokens.txt" to "tokens",
         "espeak-ng-data/phondata" to "phonemes", "espeak-ng-data/voices/!v/test" to "voice"
     )
+
+    @After
+    fun tearDown() {
+        clients.forEach {
+            it.dispatcher.cancelAll()
+            it.connectionPool.evictAll()
+            it.dispatcher.executorService.shutdown()
+        }
+    }
 
     @Test fun install_bundledArchive_survivesReopenWithoutNetwork() = runBlocking {
         val bytes = zip(files)
@@ -257,7 +268,13 @@ class TtsModelRepositoryTest {
     }
 
     private fun repository(root: File, entry: TtsModelEntry, bytes: ByteArray, dispatcher: CoroutineDispatcher = Dispatchers.IO) =
-        TtsModelRepository(root, { ByteArrayInputStream(bytes) }, OkHttpClient(), dispatcher, listOf(entry))
+        TtsModelRepository(
+            root,
+            { ByteArrayInputStream(bytes) },
+            OkHttpClient().also { clients += it },
+            dispatcher,
+            listOf(entry)
+        )
 
     private fun entry(bytes: ByteArray) = TtsModelCatalog.libritts.copy(
         id = "fixture", modelFile = "model.onnx", assetPath = "fixture.zip",

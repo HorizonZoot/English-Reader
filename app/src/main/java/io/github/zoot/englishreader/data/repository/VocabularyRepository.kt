@@ -54,7 +54,7 @@ class VocabularyRepository @Inject constructor(
      * 避免 UI 和其他调用方依赖数据库实现细节。
      */
     suspend fun insertVocabulary(vocabulary: VocabularyEntity): VocabularyInsertResult {
-        val id = vocabularyDao.insertVocabulary(vocabulary)
+        val id = vocabularyDao.insertVocabularyIfAbsent(vocabulary)
         return if (id == -1L) {
             VocabularyInsertResult.AlreadyExists
         } else {

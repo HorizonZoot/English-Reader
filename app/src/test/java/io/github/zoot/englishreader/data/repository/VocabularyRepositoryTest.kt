@@ -27,7 +27,7 @@ class VocabularyRepositoryTest {
             -1L to VocabularyInsertResult.AlreadyExists,
             42L to VocabularyInsertResult.Inserted(42L)
         ).forEach { (daoReturn, expected) ->
-            coEvery { dao.insertVocabulary(vocabulary) } returns daoReturn
+            coEvery { dao.insertVocabularyIfAbsent(vocabulary) } returns daoReturn
             assertEquals(expected, repository.insertVocabulary(vocabulary))
         }
     }

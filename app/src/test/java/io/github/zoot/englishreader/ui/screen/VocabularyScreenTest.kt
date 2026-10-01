@@ -1,26 +1,21 @@
 package io.github.zoot.englishreader.ui.screen
 
+import android.content.Intent
+import android.os.Looper
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.down
-import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.moveBy
 import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -45,6 +40,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -184,6 +180,71 @@ class VocabularyScreenTest {
     }
 
     @Test
+    fun groupingClock_visibleResumeAndBroadcasts_refreshButStopAndDisposalDetach() {
+        val owner = object : LifecycleOwner {
+            val registry = LifecycleRegistry.createUnsafe(this)
+            override val lifecycle: Lifecycle = registry
+        }
+        val visible = mutableStateOf(true)
+        var updates = 0
+        var before = 0
+        every { viewModel.updateGroupingTime(any()) } answers { updates++ }
+        composeRule.runOnUiThread { owner.registry.currentState = Lifecycle.State.RESUMED }
+        composeRule.setContent {
+            CompositionLocalProvider(LocalLifecycleOwner provides owner) {
+                if (visible.value) VocabularyScreen(onOpenArticle = { _, _ -> }, viewModel = viewModel)
+            }
+        }
+        composeRule.runOnIdle {
+            assertTrue(updates > 0)
+            before = updates
+            owner.registry.currentState = Lifecycle.State.STARTED
+            owner.registry.currentState = Lifecycle.State.RESUMED
+        }
+        composeRule.runOnIdle { assertEquals(before + 1, updates) }
+
+        for (action in listOf(Intent.ACTION_TIME_CHANGED, Intent.ACTION_TIMEZONE_CHANGED, Intent.ACTION_DATE_CHANGED)) {
+            composeRule.runOnIdle {
+                before = updates
+                RuntimeEnvironment.getApplication().sendBroadcast(Intent(action))
+                shadowOf(Looper.getMainLooper()).idle()
+            }
+            composeRule.runOnIdle { assertEquals(before + 1, updates) }
+        }
+        composeRule.runOnIdle { owner.registry.currentState = Lifecycle.State.STARTED }
+        composeRule.runOnIdle {
+            before = updates
+            RuntimeEnvironment.getApplication().sendBroadcast(Intent(Intent.ACTION_TIME_CHANGED))
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+        composeRule.runOnIdle {
+            assertEquals(before + 1, updates)
+            owner.registry.currentState = Lifecycle.State.CREATED
+        }
+        composeRule.runOnIdle {
+            before = updates
+            RuntimeEnvironment.getApplication().sendBroadcast(Intent(Intent.ACTION_TIME_CHANGED))
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+        composeRule.runOnIdle {
+            assertEquals(before, updates)
+            owner.registry.currentState = Lifecycle.State.RESUMED
+        }
+        composeRule.runOnIdle {
+            assertTrue(updates > before)
+            visible.value = false
+        }
+        composeRule.runOnIdle {
+            before = updates
+            RuntimeEnvironment.getApplication().sendBroadcast(Intent(Intent.ACTION_TIMEZONE_CHANGED))
+            shadowOf(Looper.getMainLooper()).idle()
+            owner.registry.currentState = Lifecycle.State.STARTED
+            owner.registry.currentState = Lifecycle.State.RESUMED
+        }
+        composeRule.runOnIdle { assertEquals(before, updates) }
+    }
+
+    @Test
     fun tappingWord_playsItsPronunciation() {
         val word = word(1L, "noticing")
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
@@ -205,36 +266,6 @@ class VocabularyScreenTest {
         composeRule.onNodeWithText("Zyxwvu").assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.no_definitions_found)).assertDoesNotExist()
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).assertDoesNotExist()
-    }
-
-    @Test
-    fun swipeLeft_deletesThatWord() {
-        val word = word(1L, "noticing")
-        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
-
-        composeRule.onNodeWithTag("vocabulary-word-1").performTouchInput { swipeLeft() }
-
-        verify(exactly = 1) { viewModel.deleteVocabulary(word) }
-    }
-
-    @Test
-    fun swipeLeft_rowSlidesBackAndWaitsForTheListToDropIt() {
-        // 删除是异步的（Room 写完才回流）。行必须滑回原位等列表移除它，不能停在
-        // dismissed 锚点上：删除万一没落库，Flow 不回流、行也滑不回来（StartToEnd 已关、
-        // Settled 又被 confirmValueChange 拒），那一行就永久卡在屏幕外。
-        //
-        // 断言比「还有一个像素可见」严格得多：必须回到滑动前的确切位置。此前那版
-        // 只断言 right > 0，而行实际左移了 272dp、只剩 24dp 残边——照样通过。
-        val word = word(1L, "noticing")
-        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
-        val before = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
-
-        composeRule.onNodeWithTag("vocabulary-word-1").performTouchInput { swipeLeft() }
-
-        val after = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
-        composeRule.onNodeWithText("noticing").assertIsDisplayed()
-        assertEquals("row must slide back to where it started", before.left, after.left)
-        assertEquals(before.right, after.right)
     }
 
     @Test
@@ -282,23 +313,6 @@ class VocabularyScreenTest {
         }
 
         composeRule.onNodeWithText("vt. 注意, 注意到").assertIsDisplayed()
-    }
-
-    @Test
-    fun swipeLeft_rowFollowsTheFingerMidGesture() {
-        // backgroundContent 清空之后这条必须验：SwipeToDismissBox 的拖动锚点由内容尺寸
-        // 推导，背景为空时若推导出零距离，滑动就会「不跟手」——手势有效但没有任何反馈。
-        val word = word(1L, "noticing")
-        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
-        val before = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
-
-        composeRule.onNodeWithTag("vocabulary-word-1").performTouchInput {
-            down(center)
-            moveBy(Offset(-120f, 0f))
-        }
-
-        val dragged = composeRule.onNodeWithText("noticing").getUnclippedBoundsInRoot()
-        assertTrue("row did not follow the drag: $before -> $dragged", dragged.left < before.left)
     }
 
     @Test

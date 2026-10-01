@@ -58,7 +58,26 @@ object WordBoundaryDetector {
      * 字母、数字、内部的 apostrophe (') 和 hyphen (-) 都算单词字符
      */
     private fun isWordChar(char: Char): Boolean {
-        return char.isLetterOrDigit() || char == '\'' || char == '-'
+        return char.isLetterOrDigit() || char == '\'' || char == '\u2019' || char == '-'
+    }
+
+    /** Match lookup identities, but return ranges and spelling from the untouched source. */
+    fun findWordRanges(text: String, word: String): List<WordRange> {
+        val needle = WordLookupKey.foldApostrophes(word)
+        if (needle.isEmpty()) return emptyList()
+        val searchable = WordLookupKey.foldApostrophes(text)
+        return buildList {
+            var from = 0
+            while (from < text.length) {
+                val start = searchable.indexOf(needle, from, ignoreCase = true)
+                if (start < 0) break
+                val range = getWordRangeAtOffset(text, start)
+                if (range != null && WordLookupKey.normalize(range.word) == WordLookupKey.normalize(word)) {
+                    add(range)
+                }
+                from = range?.endOffset ?: (start + 1)
+            }
+        }
     }
 
     /**

@@ -27,7 +27,7 @@ android {
         applicationId = "io.github.zoot.englishreader"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
+        versionCode = 5
         versionName = "0.1.3-beta"
         testInstrumentationRunner = "io.github.zoot.englishreader.HiltTestRunner"
 
@@ -212,6 +212,10 @@ dependencies {
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.hilt.android.testing)
     androidTestImplementation(libs.room.testing)
+    androidTestImplementation(libs.mockk.android) {
+        // Instrumentation 使用 JUnit4，不加载 MockK 的 JUnit5 extension。
+        exclude(group = "org.junit.jupiter")
+    }
     kspAndroidTest(libs.hilt.compiler)
     debugImplementation(libs.compose.ui.test.manifest)
 }

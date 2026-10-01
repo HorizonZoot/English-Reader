@@ -365,19 +365,20 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun rotateApiKey_successEmitsRotated_withoutExposingKeyInState() = runTest {
+    fun rotateApiKey_success_emitsOneRotatedEventWithoutKey() = runTest {
         val repository = mockProfileRepository()
         coEvery { repository.rotateApiKey("profile-1", "rotated-key") } returns ProfileMutationResult.Success
         val viewModel = createViewModel(repository)
 
-        viewModel.rotateApiKey("profile-1", " rotated-key ")
-        advanceUntilIdle()
+        viewModel.profileActionEvents.test {
+            viewModel.rotateApiKey("profile-1", " rotated-key ")
+            advanceUntilIdle()
 
-        assertEquals(
-            ProfileActionEvent(ProfileActionResult.ROTATED, "profile-1"),
-            viewModel.profileActionEvents.first()
-        )
-        assertFalse(viewModel.toString().contains("rotated-key"))
+            val event = awaitItem()
+            assertEquals(ProfileActionEvent(ProfileActionResult.ROTATED, "profile-1"), event)
+            assertFalse(event.toString().contains("rotated-key"))
+            expectNoEvents()
+        }
         coVerify(exactly = 1) { repository.rotateApiKey("profile-1", "rotated-key") }
     }
 

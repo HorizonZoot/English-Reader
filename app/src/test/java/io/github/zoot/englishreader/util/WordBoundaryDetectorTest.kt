@@ -12,6 +12,9 @@ class WordBoundaryDetectorTest {
             Triple("The quick brown fox", 5, "quick"),
             Triple("The dog wondered.", 12, "wondered"),
             Triple("I don't know", 3, "don't"),
+            Triple("I don’t know", 5, "don’t"),
+            Triple("‘children’s’ books", 6, "children’s"),
+            Triple("’word’", 2, "word"),
             Triple("A well-known fact", 5, "well-known"),
             Triple("test", 4, "test"), // 光标恰好位于文本末尾。
             Triple("-word", 1, "word"),
@@ -49,6 +52,28 @@ class WordBoundaryDetectorTest {
             }
             from = start + word.length
         }
+    }
+
+    @Test
+    fun findWordRanges_curlyApostrophe_keepsSourceOffsetsAndWholeWordMatching() {
+        val text = "‘DON’T’ don’t don’tstop don't."
+        val ranges = WordBoundaryDetector.findWordRanges(text, "don't")
+        assertEquals(listOf("DON’T", "don’t", "don't"), ranges.map { it.word })
+        assertEquals(listOf(1, 8, 24), ranges.map { it.startOffset })
+        ranges.forEach { assertEquals(it.word, text.substring(it.startOffset, it.endOffset)) }
+        assertEquals(emptyList<WordBoundaryDetector.WordRange>(), WordBoundaryDetector.findWordRanges(text, "don"))
+    }
+
+    @Test
+    fun getWordRangeAtOffset_curlyApostrophe_everyInternalOffsetKeepsSurface() {
+        val text = "‘children’s’ books"
+        for (offset in 1..10) {
+            assertEquals(
+                WordBoundaryDetector.WordRange("children’s", 1, 11),
+                WordBoundaryDetector.getWordRangeAtOffset(text, offset)
+            )
+        }
+        listOf(0, 11).forEach { assertNull(WordBoundaryDetector.getWordRangeAtOffset(text, it)) }
     }
 
     @Test

@@ -228,7 +228,7 @@ class WholeTranslationSheetTest {
     }
 
     @Test
-    fun tracking_failedConfiguration_explainsAndHidesRetry() {
+    fun tracking_failedConfiguration_explainsAndShowsRetry() {
         setContent(
             tracking(
                 WholeTranslationTaskStatus.FAILED,
@@ -246,15 +246,15 @@ class WholeTranslationSheetTest {
     }
 
     @Test
-    fun tracking_completed_showsDoneAndNoCancel() {
+    fun tracking_completed_requestsTranslationDisplayAndNoCancel() {
         setContent(tracking(WholeTranslationTaskStatus.COMPLETED, translated = 10, total = 10))
 
-        composeRule.onNodeWithTag("whole-translation-status").assertTextEquals("翻译完成，已显示中文对照")
+        composeRule.onNodeWithTag("whole-translation-status").assertTextEquals("翻译完成，点击“完成”查看译文")
         composeRule.onNodeWithTag("whole-translation-primary").assertTextEquals("完成")
         composeRule.onAllNodesWithTagCount("whole-translation-cancel-task", 0)
 
         composeRule.onNodeWithTag("whole-translation-primary").performScrollTo().performClick()
-        assertEquals(listOf("dismiss"), clicks)
+        assertEquals(listOf("done"), clicks)
     }
 
     @Test
@@ -301,6 +301,7 @@ class WholeTranslationSheetTest {
                     WholeTranslationContent(
                         state = state.value,
                         onDismiss = { clicks += "dismiss" },
+                        onDone = { clicks += "done" },
                         onSelectScope = onSelectScope,
                         onStart = { clicks += "start" },
                         onResume = { clicks += "resume" },

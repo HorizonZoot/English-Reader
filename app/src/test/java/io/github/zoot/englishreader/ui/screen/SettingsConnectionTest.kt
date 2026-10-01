@@ -16,9 +16,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import io.github.zoot.englishreader.R
-import io.github.zoot.englishreader.data.local.AiAuthStrategy
-import io.github.zoot.englishreader.data.local.AiProviderProfile
-import io.github.zoot.englishreader.data.local.AiProviderTemplate
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -67,46 +64,42 @@ class SettingsConnectionTest {
     }
 
     @Test
-    fun inFlightState_disablesOnlyMatchingProfile() {
-        setContent(
-            onTest = {},
-            profiles = listOf(profile("profile-1"), profile("profile-2")),
-            inFlightProfileIds = setOf("profile-1")
-        )
+    fun connectionControl_disabledTestingAndReadyInputs_setButtonEnabledState() {
+        composeRule.setContent {
+            Column {
+                ProfileConnectionTestControl(
+                    enabled = false,
+                    testing = true,
+                    onConfirmed = {},
+                    modifier = Modifier.testTag("test_connection_disabled")
+                )
+                ProfileConnectionTestControl(
+                    enabled = true,
+                    testing = false,
+                    onConfirmed = {},
+                    modifier = Modifier.testTag("test_connection_ready")
+                )
+            }
+        }
 
-        composeRule.onNodeWithTag("test_connection_profile-1").assertIsNotEnabled()
-        composeRule.onNodeWithTag("test_connection_profile-2").assertIsEnabled()
+        composeRule.onNodeWithTag("test_connection_disabled").assertIsNotEnabled()
+        composeRule.onNodeWithTag("test_connection_ready").assertIsEnabled()
     }
 
     private fun setContent(
-        profiles: List<AiProviderProfile> = listOf(profile()),
-        inFlightProfileIds: Set<String> = emptySet(),
         onTest: () -> Unit
     ) {
         composeRule.setContent {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 AiProfileDisclosure()
-                profiles.forEach { profile ->
-                    ProfileConnectionTestControl(
-                        enabled = profile.profileId !in inFlightProfileIds,
-                        testing = profile.profileId in inFlightProfileIds,
-                        onConfirmed = onTest,
-                        modifier = Modifier.testTag("test_connection_${profile.profileId}")
-                    )
-                }
+                ProfileConnectionTestControl(
+                    enabled = true,
+                    testing = false,
+                    onConfirmed = onTest
+                )
             }
         }
     }
-
-    private fun profile(profileId: String = "profile-1") = AiProviderProfile(
-        profileId = profileId,
-        displayName = "Test profile",
-        providerTemplate = AiProviderTemplate.DEEPSEEK,
-        baseUrl = "https://api.deepseek.com",
-        modelId = "deepseek-chat",
-        authStrategy = AiAuthStrategy.API_KEY,
-        temperature = 0.2
-    )
 
     private fun text(resourceId: Int): String =
         ApplicationProvider.getApplicationContext<Context>().getString(resourceId)

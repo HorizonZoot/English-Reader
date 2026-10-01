@@ -262,7 +262,7 @@ class ReadingWholeTranslationViewModelTest {
     }
 
     @Test
-    fun openWholeTranslation_whileArticleLoading_isIgnored() = runTest {
+    fun openWholeTranslation_withoutLoadedArticle_isIgnored() = runTest {
         // 未加载任何文章
         viewModel.openWholeTranslation()
         advanceUntilIdle()

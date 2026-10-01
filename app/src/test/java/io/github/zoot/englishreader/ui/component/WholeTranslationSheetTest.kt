@@ -228,7 +228,7 @@ class WholeTranslationSheetTest {
     }
 
     @Test
-    fun tracking_failedConfiguration_explainsAndHidesRetry() {
+    fun tracking_failedConfiguration_explainsAndShowsRetry() {
         setContent(
             tracking(
                 WholeTranslationTaskStatus.FAILED,

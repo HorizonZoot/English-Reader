@@ -409,18 +409,31 @@ class WholeTranslationBlockPathTest {
     @Test
     fun start_afterCancellingConflictingTask_succeeds() = runTest {
         val articleId = insertArticle("First sentence.\nSecond sentence.")
-        succeedWith { "译:${it.trim()}" }
+        coEvery { executor.execute(any(), any()) } returns AiClientResult.Failure(AiError.Offline)
         val repo = repository(this)
         val first = repo.start(WholeTranslationScope.CurrentArticle(articleId))
             as WholeTranslationStartResult.Started
         advanceUntilIdle()
-        // 完成态同样不构成冲突，这里显式取消以覆盖用户手动放弃的那条路径。
+        assertEquals(
+            WholeTranslationTaskStatus.PAUSED,
+            WholeTranslationTaskStatus.fromStableToken(db.wholeTranslationDao().getTask(first.taskId)?.status)
+        )
+        bindToBook(articleId)
+        val chapter = WholeTranslationScope.Chapter(bookId = 9, articleIds = listOf(articleId))
+        assertEquals(
+            WholeTranslationStartResult.Conflict(first.taskId, "article:$articleId"),
+            repo.start(chapter)
+        )
+
         repo.cancel(first.taskId)
         advanceUntilIdle()
-        requestedInputs.clear()
+        assertEquals(
+            WholeTranslationTaskStatus.CANCELLED,
+            WholeTranslationTaskStatus.fromStableToken(db.wholeTranslationDao().getTask(first.taskId)?.status)
+        )
 
-        bindToBook(articleId)
-        val second = repo.start(WholeTranslationScope.Chapter(bookId = 9, articleIds = listOf(articleId)))
+        succeedWith { "译:${it.trim()}" }
+        val second = repo.start(chapter)
         advanceUntilIdle()
 
         assertTrue("取消既有任务后必须能重新开始", second is WholeTranslationStartResult.Started)

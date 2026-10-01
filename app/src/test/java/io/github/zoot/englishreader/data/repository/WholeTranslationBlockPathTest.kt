@@ -43,8 +43,10 @@ import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -78,6 +80,7 @@ class WholeTranslationBlockPathTest {
     private lateinit var executor: AiExecutor
     private lateinit var resolver: AiExplanationRequestResolver
     private val requestedInputs = mutableListOf<String>()
+    private val applicationJobs = mutableListOf<Pair<Job, TestCoroutineScheduler>>()
 
     @Before
     fun setUp() {
@@ -102,7 +105,12 @@ class WholeTranslationBlockPathTest {
 
     @After
     fun tearDown() {
-        db.close()
+        try {
+            applicationJobs.forEach { (job, _) -> job.cancel() }
+            applicationJobs.map { it.second }.distinct().forEach { it.advanceUntilIdle() }
+        } finally {
+            db.close()
+        }
     }
 
     // ---- 用户报告的问题 ----
@@ -690,13 +698,14 @@ class WholeTranslationBlockPathTest {
 
     // ---- helpers ----
 
-    private fun repository(scope: CoroutineScope) = WholeTranslationRepository(
+    private fun repository(scope: TestScope) = WholeTranslationRepository(
         dao = db.wholeTranslationDao(),
         articleDao = db.articleDao(),
         requestResolver = resolver,
         executor = executor,
         applicationScope = CoroutineScope(
-            SupervisorJob() + StandardTestDispatcher((scope as TestScope).testScheduler)
+            SupervisorJob().also { applicationJobs += it to scope.testScheduler } +
+                StandardTestDispatcher(scope.testScheduler)
         ),
         clock = { NOW },
         materializationPolicy = POLICY,

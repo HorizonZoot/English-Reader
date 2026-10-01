@@ -7,6 +7,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -71,6 +73,37 @@ class VocabularyDaoAndroidTest {
         assertEquals(original.phonetic, rows.single().phonetic)
         assertEquals(original.definitions, rows.single().definitions)
         assertEquals(original.definitionSource, rows.single().definitionSource)
+    }
+
+    @Test
+    fun insertVocabularyIfAbsent_apostropheVariants_preservesLegacySurfaceAndArticleScope() = runBlocking {
+        val firstArticle = articleDao.insertArticle(ArticleEntity(title = "one", content = "content"))
+        val secondArticle = articleDao.insertArticle(ArticleEntity(title = "two", content = "content"))
+        val original = VocabularyEntity(word = "DON’T", articleId = firstArticle, definitions = "original")
+        val originalId = vocabularyDao.insertVocabulary(original)
+
+        assertEquals(-1L, vocabularyDao.insertVocabularyIfAbsent(original.copy(word = "don't", definitions = "new")))
+        assertEquals(original.copy(id = originalId), vocabularyDao.getVocabularyByArticle(firstArticle).first().single())
+        val newId = vocabularyDao.insertVocabularyIfAbsent(original.copy(word = "don't", articleId = secondArticle))
+        assertEquals(newId, vocabularyDao.getVocabularyByArticle(secondArticle).first().single().id)
+    }
+
+    @Test
+    fun insertVocabularyIfAbsent_concurrentVariants_insertsOnce() = runBlocking {
+        val articleId = articleDao.insertArticle(ArticleEntity(title = "article", content = "content"))
+        val ids = listOf("don't", "don’t").map { word ->
+            async { vocabularyDao.insertVocabularyIfAbsent(VocabularyEntity(word = word, articleId = articleId)) }
+        }.awaitAll()
+        assertEquals(1, ids.count { it != -1L })
+        assertEquals(1, vocabularyDao.getVocabularyByArticle(articleId).first().size)
+    }
+
+    @Test
+    fun insertVocabularyIfAbsent_unboundWords_preservesNullableArticleSemantics() = runBlocking {
+        listOf("don't", "don’t").forEach { word ->
+            vocabularyDao.insertVocabularyIfAbsent(VocabularyEntity(word = word, articleId = null))
+        }
+        assertEquals(2, vocabularyDao.getAllVocabulary().first().size)
     }
 
     /**

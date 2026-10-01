@@ -32,15 +32,15 @@ class TimeGrouper(
 
     fun group(
         words: List<VocabularyEntity>,
-        expandedGroups: Set<VocabularyGroupId>
+        expandedGroups: Set<VocabularyGroupId>,
+        now: Long = nowProvider(),
+        timeZone: TimeZone = timeZoneProvider()
     ): List<VocabularyGroup> {
         if (words.isEmpty()) {
             snapshot = null
             return emptyList()
         }
 
-        val now = nowProvider()
-        val timeZone = timeZoneProvider()
         val todayStart = startOfDay(now, timeZone)
         val yesterdayStart = (todayStart.clone() as Calendar).apply {
             add(Calendar.DAY_OF_MONTH, -1)

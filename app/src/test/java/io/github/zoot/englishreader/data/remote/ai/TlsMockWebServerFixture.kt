@@ -34,5 +34,13 @@ class TlsMockWebServerFixture {
         server.start()
     }
 
-    fun shutdown() = server.shutdown()
+    fun shutdown() {
+        try {
+            client.dispatcher.cancelAll()
+            server.shutdown()
+        } finally {
+            client.connectionPool.evictAll()
+            client.dispatcher.executorService.shutdown()
+        }
+    }
 }

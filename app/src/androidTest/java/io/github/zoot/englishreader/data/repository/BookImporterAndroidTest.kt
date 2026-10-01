@@ -1,7 +1,9 @@
 package io.github.zoot.englishreader.data.repository
 
+import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
+import android.content.ContextWrapper
 import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
@@ -18,8 +20,10 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -132,44 +136,65 @@ class BookImporterAndroidTest {
     }
 
     /**
-     * 真实 coroutine 取消：不是让 stream 主动抛 [CancellationException]，
-     * 而是 `job.cancel()`。
-     *
-     * 判据是三条同时成立：`CancellationException` 原样上抛（不被转成
-     * `ImportFailure`）、复制在中途中止、临时文件被删除。缺任何一条，
-     * 用户返回后后台仍在跑，或 cacheDir 里留下整本书的明文副本。
+     * 临时文件创建后、打开真实 MediaStore 源之前取消 Job，验证取消传播及文件清理。
+     * 此屏障不证明复制中途取消或阻塞 read 能被唤醒。
      */
     @Test
     fun importFromUri_jobCancelled_rethrowsAndCleansTemp() = runBlocking {
-        val baseline = tempFileCount()
-        // 40 章 × 200 句：足够大，保证取消发生在复制/解析中途而非之后。
-        val uri = insertIntoMediaStore(ReadiumEpubFixtures.largeEpub(chapters = 40, sentencesPerChapter = 200))
+        val uri = insertIntoMediaStore(ReadiumEpubFixtures.epub3WithNav())
+        val isolatedCache = File(context.cacheDir, "book-import-cancel-${System.nanoTime()}")
         try {
-            val started = CountDownLatch(1)
-            var caught: Throwable? = null
+            check(isolatedCache.mkdir())
+            val reachedResolver = CountDownLatch(1)
+            val releaseResolver = CountDownLatch(1)
+            val gatedContext = object : ContextWrapper(context) {
+                override fun getCacheDir(): File = isolatedCache
 
+                override fun getContentResolver(): ContentResolver {
+                    reachedResolver.countDown()
+                    check(releaseResolver.await(30, TimeUnit.SECONDS)) { "resolver gate not released" }
+                    return context.contentResolver
+                }
+            }
+            val gatedImporter = BookImporter(gatedContext, EpubBookParser(context))
+            var caught: Throwable? = null
             val job = launch(Dispatchers.IO) {
                 try {
-                    started.countDown()
-                    importer.importFromUri(uri)
+                    gatedImporter.importFromUri(uri)
                 } catch (e: Throwable) {
                     caught = e
                     throw e
                 }
             }
+            try {
+                assertTrue("import never reached resolver", reachedResolver.await(10, TimeUnit.SECONDS))
+                val tempFiles = requireNotNull(isolatedCache.listFiles())
+                assertEquals("temp must exist before cancellation", 1, tempFiles.size)
+                val temp = tempFiles.single()
+                assertTrue(temp.isFile && temp.name.startsWith("book-import-") && temp.extension == "epub")
+                assertFalse("import must still be pending", job.isCompleted)
 
-            assertTrue("import never started", started.await(10, TimeUnit.SECONDS))
-            job.cancel()
-            job.join()
+                job.cancel()
+                releaseResolver.countDown()
+                job.join()
 
-            assertTrue(
-                "expected CancellationException, got ${caught?.let { it::class.java.simpleName }}",
-                caught is CancellationException
-            )
-            // 取消后临时文件必须已删除——它含用户书籍明文。
-            assertEquals("temp file leaked on cancellation", baseline, tempFileCount())
+                assertTrue(
+                    "expected CancellationException, got ${caught?.let { it::class.java.simpleName }}",
+                    caught is CancellationException
+                )
+                assertFalse("observed temp file leaked on cancellation", temp.exists())
+                assertTrue("temp directory must be empty", requireNotNull(isolatedCache.listFiles()).isEmpty())
+            } finally {
+                job.cancel()
+                releaseResolver.countDown()
+                withContext(NonCancellable) { job.join() }
+            }
         } finally {
-            context.contentResolver.delete(uri, null, null)
+            try {
+                context.contentResolver.delete(uri, null, null)
+            } finally {
+                check(isolatedCache.deleteRecursively()) { "test cache cleanup failed" }
+            }
         }
     }
 

@@ -2281,6 +2281,22 @@ class ReadingViewModelTest {
     }
 
     @Test
+    fun openReadingSession_asciiWord_matchesTypographicApostropheAtOriginalOffset() = runTest {
+        val fixture = ReadingViewModelFixture()
+        val paragraph = "Please don’t stop."
+        coEvery { fixture.articleRepository.getArticleById(7L) } returns ArticleEntity(
+            id = 7L, title = "Contraction", content = "Opening.\n\n$paragraph"
+        )
+        val viewModel = fixture.create(SavedStateHandle(mapOf("word" to "don't")))
+        viewModel.openReadingSession(7L)
+
+        val anchor = requireNotNull(viewModel.pendingPositionTarget.value).position.anchor
+        assertEquals(1, anchor.paragraphIndex)
+        assertEquals(paragraph.indexOf("don’t"), anchor.characterOffset)
+        assertEquals(1, viewModel.highlightedParagraph.value)
+    }
+
+    @Test
     fun openReadingSession_wordAppearsInMultipleParagraphs_usesTheFirst() = runTest {
         val fixture = ReadingViewModelFixture()
         coEvery { fixture.articleRepository.getArticleById(7L) } returns ArticleEntity(

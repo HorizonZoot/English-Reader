@@ -10,6 +10,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import io.github.zoot.englishreader.util.WordLookupKey
 import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -400,7 +401,7 @@ class PronunciationAudioCache internal constructor(
      * 不区分。取 SHA-256 前 16 个 hex 字符 —— 64 bit，对几千条缓存碰撞概率可忽略。
      */
     private fun hash(word: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(word.toByteArray())
+        val digest = MessageDigest.getInstance("SHA-256").digest(WordLookupKey.normalize(word).toByteArray())
         return digest.take(8).joinToString("") { "%02x".format(it) }
     }
 

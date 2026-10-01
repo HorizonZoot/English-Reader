@@ -33,6 +33,7 @@ class DictionaryRepositoryEscapeRepairTest {
     private lateinit var dao: DictionaryDao
     private lateinit var prefs: SharedPreferences
     private val api = mockk<DictionaryApiService>()
+    private val mutationLock = DictionaryMutationLock()
 
     private val installedRows = listOf(
         DictionaryEntry(
@@ -93,6 +94,7 @@ class DictionaryRepositoryEscapeRepairTest {
         createRepository(trackingDao).ensureInitialized()
 
         assertEquals(1, trackingDao.decodeCalls)
+        assertEquals(1L, mutationLock.revision.value)
         assertInstalledRows(repairedRows)
         assertTrue(prefs.getBoolean(KEY_ESCAPES_REPAIRED, false))
     }
@@ -108,6 +110,7 @@ class DictionaryRepositoryEscapeRepairTest {
         createRepository(secondDao).ensureInitialized()
 
         assertEquals("the persistent marker must survive a new repository", 0, secondDao.decodeCalls)
+        assertEquals(1L, mutationLock.revision.value)
         assertInstalledRows(repairedRows)
         assertTrue(prefs.getBoolean(KEY_ESCAPES_REPAIRED, false))
     }
@@ -120,6 +123,7 @@ class DictionaryRepositoryEscapeRepairTest {
         firstRepository.ensureInitialized()
 
         assertEquals(1, failingDao.decodeCalls)
+        assertEquals(0L, mutationLock.revision.value)
         assertFalse(prefs.contains(KEY_ESCAPES_REPAIRED))
         assertInstalledRows(installedRows)
         assertEquals(OfflineLookupResult(installedRows[0]), firstRepository.lookupOffline(" HOOD "))
@@ -142,6 +146,7 @@ class DictionaryRepositoryEscapeRepairTest {
         val error = runCatching { repository.ensureInitialized() }.exceptionOrNull()
 
         assertTrue("repair cancellation must reach the caller", error is CancellationException)
+        assertEquals(0L, mutationLock.revision.value)
         assertEquals(1, trackingDao.decodeCalls)
         assertFalse(prefs.contains(KEY_ESCAPES_REPAIRED))
         assertInstalledRows(installedRows)
@@ -153,7 +158,15 @@ class DictionaryRepositoryEscapeRepairTest {
         assertTrue(prefs.getBoolean(KEY_ESCAPES_REPAIRED, false))
     }
 
-    private fun createRepository(dao: DictionaryDao) = DictionaryRepository(context, dao, api, DictionaryMutationLock())
+    @Test
+    fun ensureInitialized_cleanRows_doesNotPublishRevision() = runBlocking {
+        dao.replaceAll(repairedRows)
+        createRepository(dao).ensureInitialized()
+        assertEquals(0L, mutationLock.revision.value)
+        assertTrue(prefs.getBoolean(KEY_ESCAPES_REPAIRED, false))
+    }
+
+    private fun createRepository(dao: DictionaryDao) = DictionaryRepository(context, dao, api, mutationLock)
 
     private suspend fun assertInstalledRows(expected: List<DictionaryEntry>) {
         assertEquals(

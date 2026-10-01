@@ -9,6 +9,7 @@ import io.github.zoot.englishreader.data.dao.DictionaryDao
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.remote.dictionary.DictionaryApiService
 import io.github.zoot.englishreader.util.WordLemmatizer
+import io.github.zoot.englishreader.util.WordLookupKey
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,8 @@ class DictionaryRepository @Inject constructor(
     private val mutationLock: DictionaryMutationLock
 ) {
 
+    val revision = mutationLock.revision
+
     // 互斥锁：防止并发初始化导致 race condition
     private val initializationMutex = Mutex()
 
@@ -81,7 +84,7 @@ class DictionaryRepository @Inject constructor(
 
         return withContext(Dispatchers.IO) {
             try {
-                val cleanWord = word.trim().lowercase()
+                val cleanWord = WordLookupKey.normalize(word)
 
                 // 1) 先按原词精确查（覆盖绝大多数原形词，最快路径）
                 dictionaryDao.lookup(cleanWord)?.let {
@@ -134,7 +137,7 @@ class DictionaryRepository @Inject constructor(
      * 发布前必须二选一：MVP 默认不访问在线词典；或提供「在线查词」开关且默认关闭。
      * 此项与阶段 6 的 AI 接入无架构关系，不可合并处理。
      */
-    suspend fun lookupOnline(word: String) = dictionaryApiService.getWordDefinition(word)
+    suspend fun lookupOnline(word: String) = dictionaryApiService.getWordDefinition(WordLookupKey.normalize(word))
 
     /**
      * 从 assets 初始化离线词典
@@ -200,7 +203,10 @@ class DictionaryRepository @Inject constructor(
                         emptyInitAttempts = 0
 
                         // 原子性替换：@Transaction 保证 deleteAll + 分批插入要么全成功要么全回滚
-                        dictionaryDao.replaceAll(entries)
+                        mutationLock.commitMutation {
+                            dictionaryDao.replaceAll(entries)
+                            true
+                        }
                         prefs.edit().putInt(KEY_DICT_VERSION, DICT_VERSION).apply()
                         isInitialized = true  // 成功后才标记
                         Log.d("DictionaryRepository", "Dictionary initialized: ${entries.size} entries (v$DICT_VERSION)")
@@ -227,7 +233,11 @@ class DictionaryRepository @Inject constructor(
     private suspend fun repairLiteralEscapesOnce(prefs: android.content.SharedPreferences) {
         if (prefs.getBoolean(KEY_ESCAPES_REPAIRED, false)) return
         try {
-            val fixed = dictionaryDao.decodeLiteralEscapes()
+            var fixed = 0
+            mutationLock.commitMutation {
+                fixed = dictionaryDao.decodeLiteralEscapes()
+                fixed > 0
+            }
             prefs.edit().putBoolean(KEY_ESCAPES_REPAIRED, true).apply()
             if (fixed > 0) {
                 Log.d("DictionaryRepository", "Decoded literal escapes in $fixed dictionary entries")

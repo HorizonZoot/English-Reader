@@ -44,12 +44,15 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
 import io.github.zoot.englishreader.ui.screen.vocabulary.listKey
+import io.github.zoot.englishreader.ui.screen.vocabulary.observeVocabularyTime
+import io.github.zoot.englishreader.ui.screen.vocabulary.vocabularyTimeSignals
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.ui.theme.LocalSegmentedControlColors
 import io.github.zoot.englishreader.ui.theme.NeutralIconGray
@@ -83,6 +86,12 @@ fun VocabularyScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner, context, viewModel) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            observeVocabularyTime(vocabularyTimeSignals(context, lifecycleOwner.lifecycle))
+                .collect(viewModel::updateGroupingTime)
+        }
+    }
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE) viewModel.stopAudio()

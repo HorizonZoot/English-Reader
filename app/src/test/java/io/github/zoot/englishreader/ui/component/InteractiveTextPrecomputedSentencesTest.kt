@@ -243,6 +243,30 @@ class InteractiveTextPrecomputedSentencesTest {
     }
 
     @Test
+    fun selectedWord_asciiKey_highlightsCurlySurfaceAndExposesWholeLookupAction() {
+        val text = "‘DON’T’ don’tstop don't."
+        var lookedUp: String? = null
+        composeRule.setContent {
+            InteractiveText(
+                text = text,
+                fontSize = 16.sp,
+                selectedWord = "don't",
+                onSentenceClick = { _, _ -> },
+                onWordLongPress = { lookedUp = it }
+            )
+        }
+        val node = composeRule.onNodeWithContentDescription("Interactive reading text").fetchSemanticsNode()
+        val displayed = node.config[SemanticsProperties.Text].single()
+        assertEquals(text, displayed.text)
+        val expectedStart = text.lastIndexOf("don't")
+        assertEquals(listOf(1 to 6, expectedStart to expectedStart + 5), displayed.spanStyles
+            .filter { it.item.background != Color.Unspecified }.map { it.start to it.end })
+        val action = node.config[SemanticsActions.CustomActions].single { it.label.contains("DON’T") }
+        composeRule.runOnIdle { action.action() }
+        assertEquals("DON’T", lookedUp)
+    }
+
+    @Test
     fun selectedWord_sourceFragment_translatesExactRangeWithoutJoiningSentenceText() {
         val original = "Prefix. 'can't' and can't."
         val sourceStart = original.indexOf("'can't'")

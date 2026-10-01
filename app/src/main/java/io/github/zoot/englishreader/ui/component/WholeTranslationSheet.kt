@@ -50,6 +50,7 @@ import io.github.zoot.englishreader.model.WholeTranslationTaskStatus
 fun WholeTranslationSheet(
     state: WholeTranslationSheetState,
     onDismiss: () -> Unit,
+    onDone: () -> Unit,
     onSelectScope: (WholeTranslationScopeChoice) -> Unit,
     onStart: () -> Unit,
     onResume: () -> Unit,
@@ -69,6 +70,7 @@ fun WholeTranslationSheet(
         WholeTranslationContent(
             state = state,
             onDismiss = onDismiss,
+            onDone = onDone,
             onSelectScope = onSelectScope,
             onStart = onStart,
             onResume = onResume,
@@ -95,6 +97,7 @@ fun WholeTranslationSheet(
 internal fun WholeTranslationContent(
     state: WholeTranslationSheetState,
     onDismiss: () -> Unit,
+    onDone: () -> Unit,
     onSelectScope: (WholeTranslationScopeChoice) -> Unit,
     onStart: () -> Unit,
     onResume: () -> Unit,
@@ -139,7 +142,8 @@ internal fun WholeTranslationContent(
                     onResume = onResume,
                     onRetryFailed = onRetryFailed,
                     onCancelTask = onCancelTask,
-                    onDismiss = onDismiss
+                    onDismiss = onDismiss,
+                    onDone = onDone
                 )
                 is WholeTranslationSheetState.Rejected -> {
                     Text(
@@ -380,7 +384,8 @@ private fun TaskTracker(
     onResume: () -> Unit,
     onRetryFailed: () -> Unit,
     onCancelTask: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onDone: () -> Unit
 ) {
     val modes = state.segmentationModes.map { stringResource(segmentationLabel(it)) }.joinToString(" / ")
     if (modes.isNotEmpty()) Text(stringResource(R.string.whole_translation_fixed_modes, modes))
@@ -434,7 +439,7 @@ private fun TaskTracker(
             WholeTranslationPrimaryAction.RESUME -> R.string.whole_translation_resume to onResume
             WholeTranslationPrimaryAction.RETRY_FAILED -> R.string.whole_translation_retry_failed to onRetryFailed
             WholeTranslationPrimaryAction.CONTINUE_IN_BACKGROUND -> R.string.whole_translation_continue_background to onDismiss
-            WholeTranslationPrimaryAction.DONE -> R.string.whole_translation_done to onDismiss
+            WholeTranslationPrimaryAction.DONE -> R.string.whole_translation_done to onDone
             WholeTranslationPrimaryAction.CLOSE -> R.string.whole_translation_close to onDismiss
         }
         Button(

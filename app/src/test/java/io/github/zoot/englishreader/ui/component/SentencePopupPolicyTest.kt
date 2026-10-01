@@ -6,6 +6,27 @@ import org.junit.Test
 
 class SentencePopupPolicyTest {
     @Test
+    fun actionPopup_doesNotOwnFocusOrOutsideDismissal() {
+        val properties = sentencePopupProperties(SentencePopupMode.ACTIONS)
+
+        assertEquals(false, properties.focusable)
+        assertEquals(false, properties.dismissOnClickOutside)
+    }
+
+    @Test
+    fun resultPopupModes_keepFocusAndOutsideDismissal() {
+        listOf(
+            SentencePopupMode.TRANSLATION,
+            SentencePopupMode.EXPLANATION
+        ).forEach { mode ->
+            val properties = sentencePopupProperties(mode)
+
+            assertEquals(mode.name, true, properties.focusable)
+            assertEquals(mode.name, true, properties.dismissOnClickOutside)
+        }
+    }
+
+    @Test
     fun popupFadeDurations_matchExpectedMilliseconds() {
         assertEquals(120, SENTENCE_POPUP_FADE_IN_DURATION_MS)
         assertEquals(90, SENTENCE_POPUP_FADE_OUT_DURATION_MS)

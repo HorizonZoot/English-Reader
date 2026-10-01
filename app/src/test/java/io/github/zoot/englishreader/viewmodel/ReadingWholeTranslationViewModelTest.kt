@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.viewmodel
 
+import androidx.lifecycle.ViewModelStore
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
@@ -24,6 +25,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -647,22 +650,69 @@ class ReadingWholeTranslationViewModelTest {
     /** 换文章后，旧 sheet 的异步结果不得落到新文章上。 */
     @Test
     fun openWholeTranslation_articleChangesBeforeResolution_dropsStaleState() = runTest {
+        val store = ViewModelStore().apply { put("reading", viewModel) }
+        val releasePreview = CompletableDeferred<Unit>()
+        val releaseArticle = CompletableDeferred<Unit>()
+        val previewStarted = CompletableDeferred<Job>()
+        val articleStarted = CompletableDeferred<Unit>()
+        var previewReturned = false
         stubStandalone(ARTICLE_ID, "One.")
-        stubStandalone(OTHER_ID, "Other.")
-        viewModel.loadArticle(ARTICLE_ID)
-        advanceUntilIdle()
+        val otherArticle = ArticleEntity(OTHER_ID, "t", "Other.")
+        coEvery { fixture.articleRepository.getArticleById(OTHER_ID) } coAnswers {
+            articleStarted.complete(Unit)
+            releaseArticle.await()
+            otherArticle
+        }
+        coEvery { fixture.wholeTranslationRepository.preview(any()) } coAnswers {
+            val scope = firstArg<WholeTranslationScope>()
+            val plan = (TranslationBlockPlanner.plan(
+                ARTICLE_ID, "One.", TranslationSegmentationMode.AUTO
+            ) { text -> listOf(SentenceRange(0, text, 0, text.length)) }
+                as TranslationBlockPlanner.Result.Planned).plan
+            previewStarted.complete(requireNotNull(currentCoroutineContext()[Job]))
+            releasePreview.await()
+            previewReturned = true
+            WholeTranslationPreviewResult.Ready(WholeTranslationPreview(scope, listOf(plan), false))
+        }
+        try {
+            viewModel.loadArticle(ARTICLE_ID)
+            advanceUntilIdle()
+            assertEquals(ARTICLE_ID, viewModel.article.value?.id)
 
-        viewModel.openWholeTranslation()
-        // 在 open 的协程完成前切换文章
-        viewModel.loadArticle(OTHER_ID)
-        advanceUntilIdle()
+            viewModel.openWholeTranslation()
+            runCurrent()
+            assertTrue("old preview must be pending", previewStarted.isCompleted)
+            val previewJob = previewStarted.await()
+            assertFalse(previewJob.isCompleted)
+            assertFalse(previewReturned)
 
-        val state = viewModel.wholeTranslationState.value
-        assertTrue(
-            "stale ChoosingScope for the old article must not surface: $state",
-            state == WholeTranslationSheetState.Hidden ||
-                (state as? WholeTranslationSheetState.ChoosingScope)?.articleId != ARTICLE_ID
-        )
+            viewModel.loadArticle(OTHER_ID)
+            runCurrent()
+            assertTrue("new article load must be pending", articleStarted.isCompleted)
+            assertTrue(viewModel.isLoadingArticle.value)
+            assertEquals(ARTICLE_ID, viewModel.article.value?.id)
+            assertEquals(WholeTranslationSheetState.Hidden, viewModel.wholeTranslationState.value)
+
+            releasePreview.complete(Unit)
+            runCurrent()
+            assertTrue("old preview must return normally", previewReturned)
+            assertTrue(previewJob.isCompleted)
+            assertFalse(previewJob.isCancelled)
+            assertTrue(viewModel.isLoadingArticle.value)
+            assertEquals(ARTICLE_ID, viewModel.article.value?.id)
+            assertEquals(WholeTranslationSheetState.Hidden, viewModel.wholeTranslationState.value)
+
+            releaseArticle.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(OTHER_ID, viewModel.article.value?.id)
+            assertFalse(viewModel.isLoadingArticle.value)
+            assertEquals(WholeTranslationSheetState.Hidden, viewModel.wholeTranslationState.value)
+        } finally {
+            releasePreview.complete(Unit)
+            releaseArticle.complete(Unit)
+            store.clear()
+            runCurrent()
+        }
     }
 
     // ---- helpers ----

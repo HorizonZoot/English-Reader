@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.data.audio
 
+import io.github.zoot.englishreader.util.WordLookupKey
 import java.net.URLEncoder
 
 /**
@@ -17,7 +18,7 @@ object WordAudioUrl {
      * `type=2` 是美式发音，`type=1` 是英式。阅读页原本就用 2，保持不变。
      */
     fun forWord(word: String): String {
-        val encoded = URLEncoder.encode(word, "UTF-8")
+        val encoded = URLEncoder.encode(WordLookupKey.normalize(word), "UTF-8")
         return "https://dict.youdao.com/dictvoice?audio=$encoded&type=2"
     }
 }

@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
 import io.github.zoot.englishreader.data.audio.WordAudioUrl
+import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import io.github.zoot.englishreader.data.repository.ExcerptRepository
 import io.github.zoot.englishreader.data.entity.VocabularyWithSource
 import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
@@ -48,8 +50,69 @@ class VocabularyViewModel @Inject constructor(
     private val networkChecker: NetworkChecker,
     private val ttsPlayer: TtsPlayer,
     private val pronunciationAudioCache: PronunciationAudioCache,
-    private val settingsPreferences: SettingsPreferences
+    private val settingsPreferences: SettingsPreferences,
+    private val excerptRepository: ExcerptRepository
 ) : ViewModel() {
+
+    val excerpts = excerptRepository.observeAll()
+        .catch { error ->
+            if (error is CancellationException) throw error
+            _uiEvent.send(VocabularyUiEvent.ExcerptLoadFailed)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIPTION_TIMEOUT_MS), emptyList())
+
+    private val excerptDeletesInFlight = mutableSetOf<Long>()
+    private var sourceRequest: Job? = null
+    private val _excerptToOpen = MutableSharedFlow<ExcerptEntity>()
+    val excerptToOpen: SharedFlow<ExcerptEntity> = _excerptToOpen.asSharedFlow()
+
+    fun cancelExcerptNavigation() {
+        sourceRequest?.cancel()
+        sourceRequest = null
+    }
+
+    fun deleteExcerpt(excerpt: ExcerptEntity) {
+        if (!excerptDeletesInFlight.add(excerpt.id)) return
+        viewModelScope.launch {
+            try {
+                if (excerptRepository.delete(excerpt.id)) _uiEvent.send(VocabularyUiEvent.ExcerptDeleted(excerpt))
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                _uiEvent.send(VocabularyUiEvent.ExcerptDeleteFailed)
+            } finally {
+                excerptDeletesInFlight.remove(excerpt.id)
+            }
+        }
+    }
+
+    fun restoreExcerpt(excerpt: ExcerptEntity) {
+        viewModelScope.launch {
+            try {
+                excerptRepository.restore(excerpt)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                _uiEvent.send(VocabularyUiEvent.ExcerptRestoreFailed)
+            }
+        }
+    }
+
+    fun openExcerpt(excerpt: ExcerptEntity) {
+        cancelExcerptNavigation()
+        sourceRequest = viewModelScope.launch {
+            try {
+                val available = excerptRepository.hasSource(excerpt)
+                currentCoroutineContext().ensureActive()
+                if (available) _excerptToOpen.emit(excerpt)
+                else _uiEvent.send(VocabularyUiEvent.ExcerptSourceUnavailable)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                _uiEvent.send(VocabularyUiEvent.ExcerptLoadFailed)
+            }
+        }
+    }
 
     private val timeGrouper = TimeGrouper()
     private val alphabetGrouper = AlphabetGrouper()

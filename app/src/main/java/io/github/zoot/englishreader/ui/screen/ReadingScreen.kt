@@ -1,6 +1,13 @@
 package io.github.zoot.englishreader.ui.screen
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
+import io.github.zoot.englishreader.core.ExcerptRange
+import io.github.zoot.englishreader.data.entity.ExcerptEntity
+import io.github.zoot.englishreader.ui.component.ExcerptTextGeometry
+import io.github.zoot.englishreader.ui.component.excerptFocusOffset
+import io.github.zoot.englishreader.ui.component.visibleExcerptRange
+import io.github.zoot.englishreader.viewmodel.ExcerptSaveFeedback
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
@@ -142,6 +149,7 @@ fun ReadingScreen(
     val chapterContext by viewModel.chapterContext.collectAsStateWithLifecycle()
     val pendingPositionTarget by viewModel.pendingPositionTarget.collectAsStateWithLifecycle()
     val highlightedParagraph by viewModel.highlightedParagraph.collectAsStateWithLifecycle()
+    val highlightedExcerpt by viewModel.highlightedExcerpt.collectAsStateWithLifecycle()
     val readingMode by viewModel.readingMode.collectAsStateWithLifecycle()
     val ttsState by viewModel.readingTtsState.collectAsStateWithLifecycle()
     val voiceSettings by viewModel.voiceSettings.collectAsStateWithLifecycle()
@@ -199,6 +207,17 @@ fun ReadingScreen(
         onDispose { viewModel.dismissSentenceActions() }
     }
 
+    LaunchedEffect(viewModel) {
+        viewModel.excerptSaved.collect { result ->
+            snackbarHostState.showSnackbar(context.getString(when (result) {
+                ExcerptSaveFeedback.SAVED -> R.string.excerpt_saved
+                ExcerptSaveFeedback.ALREADY_EXISTS -> R.string.excerpt_already_saved
+                ExcerptSaveFeedback.SOURCE_CHANGED -> R.string.excerpt_source_unavailable
+                ExcerptSaveFeedback.FAILED -> R.string.excerpt_save_failed
+            }))
+        }
+    }
+
     LaunchedEffect(Unit) {
         viewModel.vocabularySaved.collect { result ->
             val message = when (result) {
@@ -241,6 +260,7 @@ fun ReadingScreen(
                 ReadingError.SAVE_PREFERENCE -> R.string.reading_preference_save_failed
                 ReadingError.LOAD_VOCABULARY -> R.string.reading_vocabulary_load_failed
                 ReadingError.CANCEL_TRANSLATION -> R.string.whole_translation_cancel_failed
+                ReadingError.EXCERPT_SOURCE_UNAVAILABLE -> R.string.excerpt_source_unavailable
             }))
         }
     }
@@ -404,6 +424,8 @@ fun ReadingScreen(
             pendingPositionTarget = pendingPositionTarget,
             onPositionTargetConsumed = viewModel::consumePositionTarget,
             highlightedParagraph = highlightedParagraph,
+            highlightedExcerpt = highlightedExcerpt,
+            onSaveExcerpt = viewModel::saveExcerpt,
             onSaveReadingPosition = { position -> viewModel.saveReadingPosition(position, renderedContent, renderedPublication) },
             ttsState = ttsState,
             ttsPositionTarget = ttsPositionTarget,
@@ -425,6 +447,8 @@ fun ReadingScreen(
         )
     }
 }
+
+private data class ReadingExcerptSelection(val paragraphIndex: Int, val range: ExcerptRange, val finished: Boolean)
 
 /** 无状态的生产 Scaffold，供路由层和 Compose 入口测试共用。 */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -488,7 +512,9 @@ fun ReadingScreenContent(
     onStopTts: () -> Unit = {},
     onEditArticle: ((Long) -> Unit)? = null,
     appliedLayout: AppliedTranslationLayout? = null,
-    onReadingPositionChanged: (ReadingPosition) -> Unit = {}
+    onReadingPositionChanged: (ReadingPosition) -> Unit = {},
+    onSaveExcerpt: ((ArticleEntity, Int, ExcerptRange) -> Unit)? = null,
+    highlightedExcerpt: ExcerptEntity? = null
 ) {
     val hasTranslation = !article?.translation.isNullOrBlank()
     val currentSelection = selectedSentence?.takeIf { it.articleId == article?.id }
@@ -496,6 +522,14 @@ fun ReadingScreenContent(
         article?.let {
             ParagraphAligner.align(it.content, it.translation, SentenceSplitter::split)
         }.orEmpty()
+    }
+    var excerptSelection by remember(article?.id, article?.content, fontSizeOption, readingMode, showTranslation) {
+        mutableStateOf<ReadingExcerptSelection?>(null)
+    }
+    val excerptGeometries = remember(article?.id, article?.content) { mutableMapOf<ReadingBlockKey, ExcerptTextGeometry>() }
+    BackHandler(enabled = excerptSelection != null) { excerptSelection = null }
+    LaunchedEffect(showReadingSettings, wordDetailsVisible, isLoading) {
+        if (showReadingSettings || wordDetailsVisible || isLoading) excerptSelection = null
     }
     var readingAnchor by rememberSaveable(article?.id, stateSaver = ReadingAnchorSaver) {
         mutableStateOf(ReadingAnchor(textKind = ReadingTextKind.TITLE))
@@ -759,6 +793,11 @@ fun ReadingScreenContent(
                         )
                     } else {
                         val listState = rememberLazyListState()
+                        LaunchedEffect(listState, readingMode) {
+                            snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+                                if (scrolling) excerptSelection = null
+                            }
+                        }
                         val layouts = remember(currentArticle.id) { mutableStateMapOf<ReadingBlockKey, TextLayoutResult>() }
                         val blocks = rememberReadingTextBlocks(currentArticle, paragraphs, fontSizeOption, showTranslation, appliedLayout)
                         val layoutKey = ReadingLayoutKey(
@@ -816,7 +855,7 @@ fun ReadingScreenContent(
                                 // 与高亮色相乘，所以这里不需要知道高亮色是什么。
                                 // 用动画而非布尔：到期熄灭时是渐隐，硬切会像页面闪了一下。
                                 val paragraphHighlight by animateFloatAsState(
-                                    targetValue = if (paragraphIndex == highlightedParagraph) 1f else 0f,
+                                    targetValue = if (paragraphIndex == highlightedParagraph && highlightedExcerpt == null) 1f else 0f,
                                     label = "paragraph-highlight"
                                 )
                                 val ownsResultPopup = popupMode != SentencePopupMode.ACTIONS &&
@@ -860,8 +899,14 @@ fun ReadingScreenContent(
                                         )
                                     }
                                 }
-                                DisposableEffect(block.key, interactiveEnabled) {
-                                    onDispose { if (interactiveEnabled) paragraphBounds.remove(block.key) }
+                                var excerptLayout by remember(block.key, visibleViewport) { mutableStateOf<TextLayoutResult?>(null) }
+                                DisposableEffect(block.key, interactiveEnabled, visibleViewport) {
+                                    onDispose {
+                                        if (interactiveEnabled) {
+                                            paragraphBounds.remove(block.key)
+                                            excerptGeometries.remove(block.key)
+                                        }
+                                    }
                                 }
                                 Box(
                                     modifier = Modifier
@@ -877,6 +922,7 @@ fun ReadingScreenContent(
                                         ttsState.sentenceIndex in paragraph.sentenceOffset until
                                         paragraph.sentenceOffset + paragraph.sentences.size
                                     ) stringResource(R.string.reading_tts_current_sentence, ttsState.sentenceIndex + 1) else null
+                                    val excerptSelectionEnabled = onSaveExcerpt != null
                                     InteractiveText(
                                         text = block.text,
                                         sourceStartOffset = block.textStartOffset,
@@ -884,7 +930,39 @@ fun ReadingScreenContent(
                                         fontFamily = FontFamily.Serif,
                                         visibleViewport = visibleViewport,
                                         enabled = interactiveEnabled,
+                                        excerptRange = excerptSelection?.takeIf { it.paragraphIndex == paragraphIndex }?.range
+                                            ?: highlightedExcerpt?.takeIf { it.paragraphIndex == paragraphIndex }
+                                                ?.let { ExcerptRange(it.startOffset, it.endOffset) },
+                                        onExcerptDrag = if (!excerptSelectionEnabled) null else { anchor, position, finished ->
+                                            val bounds = readingViewportBounds
+                                            val focus = bounds?.let { excerptFocusOffset(paragraphIndex, position, it, excerptGeometries.values) }
+                                            val range = focus?.let { ExcerptRange.fromDrag(paragraph.english, anchor, it) }
+                                            if (range != null) excerptSelection = ReadingExcerptSelection(paragraphIndex, range, finished)
+                                        },
+                                        onExcerptSelect = if (!excerptSelectionEnabled) null else { range ->
+                                            readingViewportBounds?.let { bounds ->
+                                                excerptGeometries[block.key]?.visibleExcerptRange(bounds)
+                                            }?.let { visible ->
+                                                val start = maxOf(range.startOffset, visible.startOffset)
+                                                val end = minOf(range.endOffset, visible.endOffset)
+                                                if (end > start) {
+                                                    dismissSentencePopup()
+                                                    onClearSelection()
+                                                    excerptSelection = ReadingExcerptSelection(
+                                                        paragraphIndex, ExcerptRange(start, end), true
+                                                    )
+                                                }
+                                            }
+                                        },
+                                        onTextCoordinates = { coordinates ->
+                                            val layout = excerptLayout
+                                            if (interactiveEnabled && layout != null) {
+                                                excerptGeometries[block.key] = ExcerptTextGeometry(paragraphIndex,
+                                                    block.textStartOffset, layout, coordinates, visibleViewport)
+                                            }
+                                        },
                                         onTextLayout = { layout ->
+                                            excerptLayout = layout
                                             if (visibleViewport == null) layouts.recordLayout(block.key, layout)
                                         },
                                         modifier = Modifier.fillMaxWidth().semantics {
@@ -914,6 +992,7 @@ fun ReadingScreenContent(
                                             }
                                         },
                                         onSentenceClick = { globalIndex, range ->
+                                            excerptSelection = null
                                             // InteractiveText 会先发布新的 UI 锚点。
                                             // 若锚点属于本次同一次点击就保留，否则关掉上一句的弹层。
                                             val anchorBelongsToTap = sentenceActionAnchor?.let { anchor ->
@@ -930,6 +1009,7 @@ fun ReadingScreenContent(
                                         onWordLongPress = onWordLongPress,
                                         onWordPressStart = onWordPressStart?.let { begin ->
                                             { target ->
+                                                excerptSelection = null
                                                 val word = target.word
                                                 val startOffset = target.wordStartOffset
                                                 val endOffset = target.wordEndOffset
@@ -953,6 +1033,7 @@ fun ReadingScreenContent(
                                             { target -> target.word?.let(release) }
                                         },
                                         onClearSelection = {
+                                            excerptSelection = null
                                             sentenceActionAnchor = null
                                             onDismissSentencePopup()
                                             onClearSelection()
@@ -1137,6 +1218,7 @@ fun ReadingScreenContent(
                                 },
                                 onRestored = restorePosition,
                                 onPageChanged = { anchor ->
+                                    excerptSelection = null
                                     sentenceActionAnchor = null
                                     wordSelectionAnchor = null
                                     popupMode = SentencePopupMode.ACTIONS
@@ -1155,6 +1237,28 @@ fun ReadingScreenContent(
                     text = stringResource(R.string.article_not_found),
                     modifier = Modifier.align(Alignment.Center)
                 )
+            }
+
+            val selectedExcerpt = excerptSelection
+            if (selectedExcerpt?.finished == true && article != null && onSaveExcerpt != null) {
+                Surface(
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).testTag("excerpt-actions"),
+                    shape = MaterialTheme.shapes.medium,
+                    tonalElevation = 6.dp,
+                    shadowElevation = 4.dp
+                ) {
+                    Row {
+                        TextButton(onClick = { excerptSelection = null }) {
+                            Text(stringResource(R.string.excerpt_cancel))
+                        }
+                        TextButton(onClick = {
+                            onSaveExcerpt(article, selectedExcerpt.paragraphIndex, selectedExcerpt.range)
+                            excerptSelection = null
+                        }, modifier = Modifier.testTag("excerpt-save")) {
+                            Text(stringResource(R.string.excerpt_save))
+                        }
+                    }
+                }
             }
 
             if (isLoadingDefinition) {

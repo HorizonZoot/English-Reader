@@ -32,12 +32,13 @@ class EnglishReaderDatabaseMigrationAndroidTest {
         migrationHelper.createDatabase(TEST_DATABASE_NAME, 3).close()
         migrationHelper.runMigrationsAndValidate(
             TEST_DATABASE_NAME,
-            7,
+            8,
             true,
             MIGRATION_3_4,
             MIGRATION_4_5,
             MIGRATION_5_6,
-            MIGRATION_6_7
+            MIGRATION_6_7,
+            MIGRATION_7_8
         ).close()
     }
 
@@ -521,6 +522,51 @@ class EnglishReaderDatabaseMigrationAndroidTest {
             assertEquals("layout must cascade when its article is deleted", 0, c.getInt(0))
         }
 
+        db.close()
+    }
+
+    @Test
+    fun migration7To8_preservesSourceAndVocabulary_andRetainsOrphanedExcerpt() {
+        migrationHelper.createDatabase(TEST_DATABASE_NAME, 7).apply {
+            execSQL("INSERT INTO articles (id, title, content, translation, createdAt) VALUES (10, 'Kept', 'Alpha. Alpha.', 'YiWen', 100)")
+            execSQL("INSERT INTO vocabulary (id, word, articleId, createdAt) VALUES (1, 'Alpha', 10, 100)")
+            execSQL("INSERT INTO reading_positions (articleId, paragraphIndex, textKind, characterOffset, updatedAt) VALUES (10, 0, 'ORIGINAL', 7, 200)")
+            close()
+        }
+        val db = migrationHelper.runMigrationsAndValidate(TEST_DATABASE_NAME, 8, true, MIGRATION_7_8)
+        db.query("SELECT title, content, translation FROM articles WHERE id = 10").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("Kept", cursor.getString(0))
+            assertEquals("Alpha. Alpha.", cursor.getString(1))
+            assertEquals("YiWen", cursor.getString(2))
+        }
+        db.query("SELECT word FROM vocabulary WHERE id = 1").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("Alpha", cursor.getString(0))
+        }
+        db.query("SELECT characterOffset FROM reading_positions WHERE articleId = 10").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(7, cursor.getInt(0))
+        }
+        db.execSQL("PRAGMA foreign_keys = ON")
+        val insert = "INSERT OR IGNORE INTO excerpts (articleId, originArticleId, sourceTitle, contentFingerprint, paragraphIndex, startOffset, endOffset, text, createdAt) "
+        db.execSQL(insert + "VALUES (10, 10, 'Kept', 'fp', 0, 0, 5, 'Alpha', 100)")
+        db.execSQL(insert + "VALUES (10, 10, 'Kept', 'fp', 0, 0, 5, 'Alpha', 101)")
+        db.execSQL(insert + "VALUES (10, 10, 'Kept', 'fp', 0, 7, 12, 'Alpha', 102)")
+        db.query("SELECT COUNT(*) FROM excerpts").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(2, cursor.getInt(0))
+        }
+        db.execSQL("DELETE FROM articles WHERE id = 10")
+        db.query("SELECT articleId, originArticleId, sourceTitle, text FROM excerpts ORDER BY startOffset").use { cursor ->
+            assertEquals(2, cursor.count)
+            while (cursor.moveToNext()) {
+                assertTrue(cursor.isNull(0))
+                assertEquals(10L, cursor.getLong(1))
+                assertEquals("Kept", cursor.getString(2))
+                assertEquals("Alpha", cursor.getString(3))
+            }
+        }
         db.close()
     }
 

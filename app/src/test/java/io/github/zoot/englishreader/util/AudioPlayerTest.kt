@@ -182,7 +182,8 @@ class AudioPlayerTest {
         val vocabularyTts = mockk<TtsPlayer>(relaxed = true)
         val vocabulary = VocabularyViewModel(
             mockk(relaxed = true), mockk(relaxed = true), audio,
-            mockk { every { isOnline() } returns true }, vocabularyTts, cache, settings
+            mockk { every { isOnline() } returns true }, vocabularyTts, cache, settings,
+            excerptRepository = mockk(relaxed = true)
         )
         val reading = ReadingViewModelFixture(audioPlayer = audio).create()
         val vocabularyStore = ViewModelStore().apply { put("vocabulary", vocabulary) }

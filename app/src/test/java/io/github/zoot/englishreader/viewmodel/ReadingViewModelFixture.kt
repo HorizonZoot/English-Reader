@@ -11,6 +11,7 @@ import io.github.zoot.englishreader.data.repository.AiExplanationRepository
 import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.data.repository.BookRepository
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
+import io.github.zoot.englishreader.data.repository.ExcerptRepository
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.data.repository.WholeTranslationRepository
 import io.github.zoot.englishreader.model.TtsReadingSettings
@@ -57,6 +58,7 @@ internal class ReadingViewModelFixture(
     val bookRepository: BookRepository = mockk(relaxed = true),
     val pronunciationAudioCache: PronunciationAudioCache = mockk(relaxed = true),
     val wholeTranslationRepository: WholeTranslationRepository = mockk(relaxed = true),
+    val excerptRepository: ExcerptRepository = mockk(relaxed = true),
     // 偏好流按 Flow 传入，而不是在装置内部固定成某种流类型：
     // `flowOf` 发射后即完成，`MutableStateFlow` 保持打开且可在用例中推进。
     // 需要驱动偏好变化的用例传入自己的 MutableStateFlow，其余用冷流默认值。
@@ -120,6 +122,7 @@ internal class ReadingViewModelFixture(
         bookRepository,
         pronunciationAudioCache,
         wholeTranslationRepository,
-        handle
+        handle,
+        excerptRepository = excerptRepository
     )
 }

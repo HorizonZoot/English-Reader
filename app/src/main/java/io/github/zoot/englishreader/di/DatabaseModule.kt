@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.di
 
 import android.content.Context
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
+import io.github.zoot.englishreader.data.dao.ExcerptDao
 import io.github.zoot.englishreader.data.dao.ArticleDao
 import io.github.zoot.englishreader.data.dao.BookDao
 import io.github.zoot.englishreader.data.dao.VocabularyDao
@@ -31,6 +32,9 @@ object DatabaseModule {
     fun provideDatabase(@ApplicationContext context: Context): EnglishReaderDatabase {
         return EnglishReaderDatabase.getInstance(context)
     }
+
+    @Provides
+    fun provideExcerptDao(database: EnglishReaderDatabase): ExcerptDao = database.excerptDao()
 
     @Provides
     fun provideArticleDao(database: EnglishReaderDatabase): ArticleDao {

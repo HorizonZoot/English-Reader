@@ -414,13 +414,14 @@ fun EnglishReaderNavigation() {
         composable(
             // word 是可选的：文章列表/目录/翻页进来时不带它，只有生词本「查看原文」才带，
             // 阅读页据此滚动到该词所在段落并临时点亮。
-            route = "reading/{articleId}?word={word}",
+            route = "reading/{articleId}?word={word}&excerptId={excerptId}",
             arguments = listOf(
                 navArgument("articleId") { type = NavType.LongType },
                 navArgument("word") {
                     type = NavType.StringType
                     defaultValue = ""
-                }
+                },
+                navArgument("excerptId") { type = NavType.LongType; defaultValue = 0L }
             )
         ) { backStackEntry ->
             val articleId = backStackEntry.arguments?.getLong("articleId") ?: 0L
@@ -458,6 +459,9 @@ fun EnglishReaderNavigation() {
                 // 词一并带过去，阅读页会滚到它所在的段落并短暂高亮。
                 onOpenArticle = { articleId, word ->
                     navController.navigate("reading/$articleId?word=${Uri.encode(word)}")
+                },
+                onOpenExcerpt = { articleId, excerptId ->
+                    navController.navigate("reading/$articleId?excerptId=$excerptId")
                 }
             )
         }

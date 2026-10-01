@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.viewmodel
 
+import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 
 /**
@@ -10,6 +11,11 @@ import io.github.zoot.englishreader.data.entity.VocabularyEntity
  * 而在一个 collector 里顺序 `showSnackbar` 天然串行。
  */
 sealed interface VocabularyUiEvent {
+    data class ExcerptDeleted(val excerpt: ExcerptEntity) : VocabularyUiEvent
+    data object ExcerptLoadFailed : VocabularyUiEvent
+    data object ExcerptDeleteFailed : VocabularyUiEvent
+    data object ExcerptRestoreFailed : VocabularyUiEvent
+    data object ExcerptSourceUnavailable : VocabularyUiEvent
 
     /**
      * 删除已经落库。

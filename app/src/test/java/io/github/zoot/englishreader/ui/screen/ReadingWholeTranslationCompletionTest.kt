@@ -105,6 +105,7 @@ class ReadingWholeTranslationCompletionTest {
             every { chapterContext } returns MutableStateFlow(null)
             every { pendingPositionTarget } returns MutableStateFlow(null)
             every { highlightedParagraph } returns MutableStateFlow(null)
+            every { highlightedExcerpt } returns MutableStateFlow(null)
             every { readingMode } returns MutableStateFlow(mode)
             every { readingTtsState } returns MutableStateFlow(ReadingTtsState())
             every { voiceSettings } returns MutableStateFlow(ReadingVoiceSettingsState())
@@ -113,6 +114,7 @@ class ReadingWholeTranslationCompletionTest {
             every { ttsPositionTarget } returns MutableStateFlow(null)
             every { ttsFailures } returns emptyFlow()
             every { vocabularySaved } returns emptyFlow()
+            every { excerptSaved } returns emptyFlow()
             every { definitionError } returns emptyFlow()
             every { readingErrors } returns emptyFlow()
             every { dismissWholeTranslation() } answers {

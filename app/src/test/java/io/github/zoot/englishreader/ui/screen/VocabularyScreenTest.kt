@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -21,6 +22,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import io.github.zoot.englishreader.R
+import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
@@ -64,6 +66,9 @@ class VocabularyScreenTest {
     private val vocabularyState = MutableStateFlow<List<VocabularyEntity>>(emptyList())
     private val loadingAudioWordIdState = MutableStateFlow<Long?>(null)
     private val openedArticles = mutableListOf<Pair<Long, String>>()
+    private val excerptsState = MutableStateFlow<List<ExcerptEntity>>(emptyList())
+    private val excerptToOpen = MutableSharedFlow<ExcerptEntity>(extraBufferCapacity = 1)
+    private val openedExcerpts = mutableListOf<Pair<Long, Long>>()
 
     /** 一次性事件用无重放的 SharedFlow 模拟 Channel：测试自行 tryEmit 触发界面反应。 */
     private val uiEvents = MutableSharedFlow<VocabularyUiEvent>(extraBufferCapacity = 4)
@@ -75,6 +80,8 @@ class VocabularyScreenTest {
         every { model.vocabulary } returns vocabularyState
         every { model.loadingAudioWordId } returns loadingAudioWordIdState
         every { model.uiEvent } returns uiEvents
+        every { model.excerpts } returns excerptsState
+        every { model.excerptToOpen } returns excerptToOpen
     }
 
     @Test
@@ -348,6 +355,61 @@ class VocabularyScreenTest {
         composeRule.runOnIdle { verify(exactly = 1) { viewModel.restoreVocabulary(word) } }
     }
 
+    @Test
+    fun excerptsTab_expandsCopiesAndReturnsToExistingWords() {
+        val excerpt = excerpt()
+        excerptsState.value = listOf(excerpt)
+        render(groups = listOf(group(VocabularyGroupId.Today, listOf(word(1L, "noticing")))))
+
+        composeRule.onNodeWithText("noticing").assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
+        composeRule.onNodeWithText(excerpt.text).assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.excerpt_expand)).performClick()
+        composeRule.onNodeWithText(string(R.string.excerpt_collapse)).assertIsDisplayed()
+        composeRule.runOnIdle { assertTrue(openedExcerpts.isEmpty()) }
+        composeRule.onNodeWithText(string(R.string.excerpt_copy)).performClick()
+        composeRule.runOnIdle {
+            val clipboard = RuntimeEnvironment.getApplication()
+                .getSystemService(android.content.ClipboardManager::class.java)
+            assertEquals(excerpt.text, clipboard.primaryClip?.getItemAt(0)?.text?.toString())
+        }
+        composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performClick()
+        verify(exactly = 1) { viewModel.openExcerpt(excerpt) }
+        composeRule.onNodeWithText(string(R.string.favorites_words)).performClick()
+        composeRule.onNodeWithText("noticing").assertIsDisplayed()
+    }
+
+    @Test
+    fun deletedExcerpt_snackbarDoesNotBlockNavigationAndUndoRestoresSnapshot() {
+        val excerpt = excerpt()
+        excerptsState.value = listOf(excerpt)
+        render(groups = emptyList())
+        composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
+        composeRule.onNodeWithText(string(R.string.excerpt_delete)).performClick()
+        verify(exactly = 1) { viewModel.deleteExcerpt(excerpt) }
+        composeRule.runOnIdle { uiEvents.tryEmit(VocabularyUiEvent.ExcerptDeleted(excerpt)) }
+        composeRule.onNodeWithText(string(R.string.excerpt_deleted)).assertIsDisplayed()
+        composeRule.runOnIdle { excerptToOpen.tryEmit(excerpt) }
+        composeRule.runOnIdle { assertEquals(listOf(42L to excerpt.id), openedExcerpts) }
+        composeRule.onNodeWithText(string(R.string.vocabulary_undo)).performClick()
+        composeRule.runOnIdle { verify(exactly = 1) { viewModel.restoreExcerpt(excerpt) } }
+    }
+
+    @Test
+    fun excerptSourceDeleted_showsApprovedMessageAndDisablesNavigation() {
+        excerptsState.value = listOf(excerpt().copy(articleId = null))
+        render(groups = emptyList())
+        composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
+        composeRule.onNodeWithText("无法获取来源，文章可能被删除").assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).assertIsNotEnabled()
+    }
+
+    private fun excerpt() = ExcerptEntity(
+        id = 3, articleId = 42, originArticleId = 42, sourceTitle = "Source title",
+        contentFingerprint = "fingerprint", paragraphIndex = 0, startOffset = 0,
+        endOffset = 16, text = "A  precise quote", createdAt = 0
+    )
+
     private fun group(id: VocabularyGroupId, words: List<VocabularyEntity>) =
         VocabularyGroup(id = id, words = words, isExpanded = true)
 
@@ -370,7 +432,8 @@ class VocabularyScreenTest {
             Box(modifier = Modifier.width(360.dp).fillMaxHeight()) {
                 VocabularyScreen(
                     onOpenArticle = onOpenArticle,
-                    viewModel = viewModel
+                    viewModel = viewModel,
+                    onOpenExcerpt = { articleId, excerptId -> openedExcerpts += articleId to excerptId }
                 )
             }
         }

@@ -138,7 +138,8 @@ class VocabularyViewModelTest {
             networkChecker = networkChecker,
             ttsPlayer = ttsPlayer,
             pronunciationAudioCache = pronunciationAudioCache,
-            settingsPreferences = settingsPreferences
+            settingsPreferences = settingsPreferences,
+            excerptRepository = mockk(relaxed = true)
         )
     }
 

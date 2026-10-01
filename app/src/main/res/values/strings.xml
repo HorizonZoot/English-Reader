@@ -317,7 +317,7 @@
 
     <!-- Bottom navigation -->
     <string name="nav_articles">文章</string>
-    <string name="nav_vocabulary">生词本</string>
+    <string name="nav_vocabulary">我的收藏</string>
 
     <!-- Vocabulary screen -->
     <string name="vocabulary_empty">还没有生词，去阅读文章吧～</string>
@@ -578,4 +578,23 @@
     <string name="article_editor_preview_count">整理后共 %1$d 个段落</string>
     <string name="article_editor_preview_notice">这里只预览换行变化，不会翻译或保存文章。应用到草稿后，仍需点击保存。</string>
     <string name="article_editor_apply_to_draft">应用到草稿</string>
+    <string name="favorites_words">单词</string>
+    <string name="favorites_excerpts">段落摘录</string>
+    <string name="excerpts_empty">还没有摘录。在原文长按后拖动，选中文字即可收藏。</string>
+    <string name="excerpt_save">收藏摘录</string>
+    <string name="excerpt_cancel">取消选择</string>
+    <string name="excerpt_copy">复制</string>
+    <string name="excerpt_expand">展开全文</string>
+    <string name="excerpt_collapse">收起</string>
+    <string name="accessibility_collect_excerpt">收藏当前可见句段</string>
+    <string name="excerpt_delete">删除</string>
+    <string name="excerpt_saved">已收藏摘录</string>
+    <string name="excerpt_already_saved">此处原文已收藏</string>
+    <string name="excerpt_save_failed">摘录保存失败，请重试</string>
+    <string name="excerpt_source_unavailable">来源已删除或正文已变化，无法可靠定位。摘录仍保留在我的收藏中。</string>
+    <string name="excerpt_source_deleted">无法获取来源，文章可能被删除</string>
+    <string name="excerpt_deleted">已删除摘录</string>
+    <string name="excerpt_load_failed">摘录加载失败，请重新打开收藏页</string>
+    <string name="excerpt_delete_failed">删除失败，摘录仍保留</string>
+    <string name="excerpt_restore_failed">撤销失败，摘录未恢复，请重试</string>
 </resources>

@@ -18,6 +18,8 @@ import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import io.github.zoot.englishreader.ui.screen.vocabulary.ExcerptsContent
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -75,9 +77,13 @@ private val SegmentInset = 2.dp
 @Composable
 fun VocabularyScreen(
     onOpenArticle: (articleId: Long, word: String) -> Unit,
-    viewModel: VocabularyViewModel = hiltViewModel()
+    viewModel: VocabularyViewModel = hiltViewModel(),
+    onOpenExcerpt: (articleId: Long, excerptId: Long) -> Unit = { _, _ -> }
 ) = ArticleUiTheme {
     val groups by viewModel.groups.collectAsStateWithLifecycle()
+    val excerpts by viewModel.excerpts.collectAsStateWithLifecycle()
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    val openExcerpt by rememberUpdatedState(onOpenExcerpt)
     val details by viewModel.details.collectAsStateWithLifecycle()
     val groupType by viewModel.groupType.collectAsStateWithLifecycle()
     val wordCount by viewModel.vocabulary.collectAsStateWithLifecycle()
@@ -94,12 +100,25 @@ fun VocabularyScreen(
     }
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) viewModel.stopAudio()
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                viewModel.stopAudio()
+                viewModel.cancelExcerptNavigation()
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             viewModel.stopAudio()
+            viewModel.cancelExcerptNavigation()
+        }
+    }
+    LaunchedEffect(viewModel, lifecycleOwner, selectedTab) {
+        if (selectedTab == 1) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                viewModel.excerptToOpen.collect { excerpt ->
+                    excerpt.articleId?.let { openExcerpt(it, excerpt.id) }
+                }
+            }
         }
     }
 
@@ -108,6 +127,17 @@ fun VocabularyScreen(
     LaunchedEffect(viewModel) {
         viewModel.uiEvent.collect { event ->
             when (event) {
+                is VocabularyUiEvent.ExcerptDeleted -> {
+                    val result = snackbarHostState.showSnackbar(
+                        context.getString(R.string.excerpt_deleted),
+                        context.getString(R.string.vocabulary_undo)
+                    )
+                    if (result == SnackbarResult.ActionPerformed) viewModel.restoreExcerpt(event.excerpt)
+                }
+                VocabularyUiEvent.ExcerptLoadFailed -> snackbarHostState.showSnackbar(context.getString(R.string.excerpt_load_failed))
+                VocabularyUiEvent.ExcerptDeleteFailed -> snackbarHostState.showSnackbar(context.getString(R.string.excerpt_delete_failed))
+                VocabularyUiEvent.ExcerptRestoreFailed -> snackbarHostState.showSnackbar(context.getString(R.string.excerpt_restore_failed))
+                VocabularyUiEvent.ExcerptSourceUnavailable -> snackbarHostState.showSnackbar(context.getString(R.string.excerpt_source_deleted))
                 // 「已删除 + 撤销」只在删除**确实落库后**才弹（事件由 ViewModel 在写库
                 // 返回后发出）。左滑是易误触的手势，而误删一条生词没有别的找回途径。
                 is VocabularyUiEvent.Deleted -> {
@@ -146,7 +176,13 @@ fun VocabularyScreen(
             VocabularyHeader(
                 wordCount = wordCount.size,
                 groupType = groupType,
-                onTypeSelected = viewModel::switchGroupType
+                onTypeSelected = viewModel::switchGroupType,
+                selectedTab = selectedTab,
+                onTabSelected = {
+                    viewModel.cancelExcerptNavigation()
+                    selectedTab = it
+                    viewModel.stopAudio()
+                }
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -157,7 +193,9 @@ fun VocabularyScreen(
                 .padding(padding),
             contentAlignment = Alignment.TopCenter
         ) {
-            if (groups.isEmpty()) {
+            if (selectedTab == 1) {
+                ExcerptsContent(excerpts, onOpenSource = viewModel::openExcerpt, onDelete = viewModel::deleteExcerpt)
+            } else if (groups.isEmpty()) {
                 VocabularyEmptyState()
             } else {
                 LazyColumn(
@@ -218,7 +256,9 @@ fun VocabularyScreen(
 private fun VocabularyHeader(
     wordCount: Int,
     groupType: GroupType,
-    onTypeSelected: (GroupType) -> Unit
+    onTypeSelected: (GroupType) -> Unit,
+    selectedTab: Int,
+    onTabSelected: (Int) -> Unit
 ) {
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
         Column(
@@ -239,7 +279,13 @@ private fun VocabularyHeader(
                 letterSpacing = (-0.4).sp,
                 modifier = Modifier.semantics { heading() }
             )
-            if (wordCount > 0) {
+            TabRow(selectedTabIndex = selectedTab) {
+                listOf(R.string.favorites_words, R.string.favorites_excerpts).forEachIndexed { index, label ->
+                    Tab(selected = selectedTab == index, onClick = { onTabSelected(index) },
+                        text = { Text(stringResource(label)) })
+                }
+            }
+            if (selectedTab == 0 && wordCount > 0) {
                 Text(
                     text = stringResource(R.string.vocabulary_total_count, wordCount),
                     style = MaterialTheme.typography.bodyLarge,
@@ -566,6 +612,12 @@ private fun WordRow(
                 sourceTitle = sourceTitle,
                 onClick = { onOpenArticle(articleId, word.word) }
             )
+        } else if (articleId == null || detail != null) {
+            Text(
+                stringResource(R.string.excerpt_source_deleted),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -575,9 +627,7 @@ private fun WordRow(
  *
  * 「查看原文」是纯文本链接——没有背景、没有圆角、不加粗，只有系统蓝。
  *
- * `articleId` 非空即代表文章仍存在——vocabulary 对 articles 是 CASCADE，
- * 文章被删时关联生词会一起消失（删书场景则由 `deleteBookCascade` 先把
- * `articleId` 置 NULL 保住生词，那种情况下这里不显示来源行）。
+ * 已确认来源存在时显示；来源解绑或 JOIN 无结果时由调用方提示来源缺失。
  */
 @Composable
 private fun SourceArticleRow(

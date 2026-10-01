@@ -5,6 +5,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.zoot.englishreader.data.entity.ArticleEntity
+import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.ai.AiExplanationInput
 import io.github.zoot.englishreader.data.local.ReadingMode
@@ -14,6 +15,9 @@ import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.data.repository.AiExplanationRepository
 import io.github.zoot.englishreader.data.repository.AiExplanationStartResult
 import io.github.zoot.englishreader.data.repository.AiExplanationOperationRegistry
+import io.github.zoot.englishreader.core.ExcerptRange
+import io.github.zoot.englishreader.data.repository.ExcerptRepository
+import io.github.zoot.englishreader.data.repository.ExcerptSaveResult
 import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.data.repository.BookRepository
 import io.github.zoot.englishreader.data.repository.VocabularyInsertResult
@@ -151,7 +155,9 @@ enum class VocabularySaveResult {
     FAILED
 }
 
-enum class ReadingError { LOAD, SAVE_POSITION, SAVE_PREFERENCE, LOAD_VOCABULARY, CANCEL_TRANSLATION }
+enum class ExcerptSaveFeedback { SAVED, ALREADY_EXISTS, SOURCE_CHANGED, FAILED }
+
+enum class ReadingError { LOAD, SAVE_POSITION, SAVE_PREFERENCE, LOAD_VOCABULARY, CANCEL_TRANSLATION, EXCERPT_SOURCE_UNAVAILABLE }
 
 /** 当前文章在书中的导航位置；独立文章没有章节上下文。 */
 
@@ -179,7 +185,8 @@ class ReadingViewModel @Inject constructor(
     private val bookRepository: BookRepository,
     private val pronunciationAudioCache: PronunciationAudioCache,
     private val wholeTranslationRepository: WholeTranslationRepository,
-    private val savedStateHandle: SavedStateHandle
+    private val savedStateHandle: SavedStateHandle,
+    private val excerptRepository: ExcerptRepository
 ) : ViewModel() {
 
     /**
@@ -344,6 +351,32 @@ class ReadingViewModel @Inject constructor(
     private val _vocabularySaved = Channel<VocabularySaveResult>(Channel.BUFFERED)
     val vocabularySaved: Flow<VocabularySaveResult> = _vocabularySaved.receiveAsFlow()
 
+    private val _excerptSaved = Channel<ExcerptSaveFeedback>(Channel.BUFFERED)
+    val excerptSaved = _excerptSaved.receiveAsFlow()
+
+    fun saveExcerpt(snapshot: ArticleEntity, paragraphIndex: Int, range: ExcerptRange) {
+        if (_isLoadingArticle.value || snapshot.id != requestedArticleId ||
+            snapshot.content != _article.value?.content
+        ) return
+        val generation = articleLoadGeneration
+        viewModelScope.launch {
+            val feedback = try {
+                when (excerptRepository.save(snapshot, paragraphIndex, range)) {
+                    ExcerptSaveResult.SAVED -> ExcerptSaveFeedback.SAVED
+                    ExcerptSaveResult.ALREADY_EXISTS -> ExcerptSaveFeedback.ALREADY_EXISTS
+                    ExcerptSaveResult.SOURCE_CHANGED -> ExcerptSaveFeedback.SOURCE_CHANGED
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                ExcerptSaveFeedback.FAILED
+            }
+            if (generation == articleLoadGeneration && snapshot.content == _article.value?.content) {
+                _excerptSaved.trySend(feedback)
+            }
+        }
+    }
+
     private val _wordDefinition = MutableStateFlow<WordDefinition?>(null)
     val wordDefinition: StateFlow<WordDefinition?> = _wordDefinition.asStateFlow()
 
@@ -444,10 +477,15 @@ class ReadingViewModel @Inject constructor(
      */
     private val _highlightedParagraph = MutableStateFlow<Int?>(null)
     val highlightedParagraph: StateFlow<Int?> = _highlightedParagraph.asStateFlow()
+    private val sourceExcerpt = MutableStateFlow<ExcerptEntity?>(null)
+    val highlightedExcerpt = combine(_highlightedParagraph, sourceExcerpt) { paragraph, excerpt ->
+        excerpt?.takeIf { it.paragraphIndex == paragraph }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     private var highlightJob: Job? = null
 
     /** 从生词本跳转时携带的词，由 [loadArticle] 消费一次后置空。 */
     private var pendingHighlightWord: String? = null
+    private var pendingExcerptId: Long? = null
     private var lookupWordJob: Job? = null
     private var wordSelectionGeneration = 0L
     private var explanationPreparationJob: Job? = null
@@ -472,6 +510,9 @@ class ReadingViewModel @Inject constructor(
         savedStateHandle[READING_ROUTE_ARTICLE] = articleId
         // 生词本「查看原文」带来的词。只在进入该路由时取一次，原地切章不再复用。
         pendingHighlightWord = savedStateHandle.get<String>(READING_ROUTE_WORD)?.takeIf { it.isNotBlank() }
+        if (savedStateHandle.get<Boolean>("excerpt_consumed") != true) {
+            pendingExcerptId = savedStateHandle.get<Long>("excerptId")?.takeIf { it > 0 }
+        }
         loadArticle(savedStateHandle.get<Long>(READING_CURRENT_ARTICLE) ?: articleId)
     }
 
@@ -519,9 +560,20 @@ class ReadingViewModel @Inject constructor(
                 val highlightWord = pendingHighlightWord
                 pendingHighlightWord = null
                 val wordAnchor = highlightWord?.let { findWordAnchor(loaded.content, it) }
-                wordAnchor?.let { highlightParagraph(it.paragraphIndex) }
+                val excerptId = pendingExcerptId
+                pendingExcerptId = null
+                val excerpt = excerptId?.let { excerptRepository.getById(it) }
+                if (generation != articleLoadGeneration || requestedArticleId != articleId) return@launch
+                if (excerptId != null) savedStateHandle["excerpt_consumed"] = true
+                val excerptAnchor = excerpt?.let { ExcerptRepository.sourceAnchor(it, articleId, loaded.content) }
+                if (excerptId != null && excerptAnchor == null) {
+                    _readingErrors.trySend(ReadingError.EXCERPT_SOURCE_UNAVAILABLE)
+                }
+                sourceExcerpt.value = excerpt?.takeIf { excerptAnchor != null }
+                val sourceAnchor = excerptAnchor ?: wordAnchor
+                sourceAnchor?.let { highlightParagraph(it.paragraphIndex) }
 
-                val position = wordAnchor?.let { ReadingPosition(articleId, it) }
+                val position = sourceAnchor?.let { ReadingPosition(articleId, it) }
                     ?: stored
                     ?: ReadingPosition(
                         articleId, ReadingAnchor(textKind = ReadingTextKind.TITLE)
@@ -529,7 +581,7 @@ class ReadingViewModel @Inject constructor(
                 // 位置先发布，内容随后可见；首帧的临时位置不得冲掉已保存的锚点。
                 _pendingPositionTarget.value = ReadingPositionTarget(
                     position = position,
-                    entry = if (entry == ReadingEntry.RESUME && stored == null && wordAnchor == null) {
+                    entry = if (entry == ReadingEntry.RESUME && stored == null && sourceAnchor == null) {
                         ReadingEntry.START
                     } else entry,
                     requestId = ++positionRequestId

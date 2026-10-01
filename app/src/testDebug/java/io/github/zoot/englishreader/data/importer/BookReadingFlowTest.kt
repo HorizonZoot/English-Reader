@@ -129,7 +129,8 @@ class BookReadingFlowTest {
             // wholeTranslationRepository。本测试不走全文翻译路径；relaxed mock 即可，
             // 其 findResumable 返回 null，openWholeTranslation 也不会被调用。
             mockk(relaxed = true),
-            SavedStateHandle()
+            SavedStateHandle(),
+            excerptRepository = mockk(relaxed = true)
         )
         viewModelStore.put("reading", viewModel)
     }

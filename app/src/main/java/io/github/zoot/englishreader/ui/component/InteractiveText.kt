@@ -16,7 +16,10 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.res.stringResource
+import io.github.zoot.englishreader.core.ExcerptRange
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.getTextLayoutResult
@@ -75,6 +78,10 @@ fun InteractiveText(
     onSentenceTargetLayoutChanged: ((InteractiveTextLongPressTarget) -> Unit)? = null,
     visibleViewport: ReadingTextViewport? = null,
     enabled: Boolean = true,
+    excerptRange: ExcerptRange? = null,
+    onExcerptDrag: ((anchorOffset: Int, windowPosition: Offset, finished: Boolean) -> Unit)? = null,
+    onExcerptSelect: ((ExcerptRange) -> Unit)? = null,
+    onTextCoordinates: (LayoutCoordinates) -> Unit = {},
     /**
      * 整段高亮的强度（0 = 不高亮，1 = 与句子选中同强度）。
      *
@@ -93,6 +100,10 @@ fun InteractiveText(
     // 回调快照：始终指向最新的 lambda，但不参与 remember/pointerInput 的 key，
     // 避免 ReadingScreen 每次重组新建 lambda 导致手势检测器和无障碍动作被反复重建。
     val currentOnTextLayout by rememberUpdatedState(onTextLayout)
+    val currentOnExcerptDrag by rememberUpdatedState(onExcerptDrag)
+    val currentOnExcerptSelect by rememberUpdatedState(onExcerptSelect)
+    val currentOnTextCoordinates by rememberUpdatedState(onTextCoordinates)
+    var textCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val currentOnSentenceClick by rememberUpdatedState(onSentenceClick)
     val currentOnWordLongPress by rememberUpdatedState(onWordLongPress)
     val currentOnClearSelection by rememberUpdatedState(onClearSelection)
@@ -174,6 +185,7 @@ fun InteractiveText(
     val playSentenceActionLabel = stringResource(R.string.accessibility_play_sentence_action)
     val translateSentenceActionLabel = stringResource(R.string.accessibility_translate_sentence_action)
     val explainSentenceActionLabel = stringResource(R.string.accessibility_explain_sentence_action)
+    val collectExcerptLabel = stringResource(R.string.accessibility_collect_excerpt)
 
     // 句子动作与单词动作各自独立限额（互不挤占），合计有上限避免超过系统对 CustomAccessibilityAction
     // 数量的限制被静默丢弃。key 只用稳定值（回调经 rememberUpdatedState 快照，不再作为 key）。
@@ -181,8 +193,8 @@ fun InteractiveText(
         visibleSentences, accessibilityWords, sentenceIndexOffset, sourceStartOffset, visibleViewport, enabled,
         highlightedSentenceIndex,
         highlightSentenceActionPrefix, extractWordActionPrefix,
-        playSentenceActionLabel, translateSentenceActionLabel, explainSentenceActionLabel,
-        onSentencePlay != null, onSentenceTranslate != null, onSentenceExplain != null
+        playSentenceActionLabel, translateSentenceActionLabel, explainSentenceActionLabel, collectExcerptLabel,
+        onSentencePlay != null, onSentenceTranslate != null, onSentenceExplain != null, onExcerptSelect != null
     ) {
         val selectedAccessibilitySentence = visibleSentences.firstOrNull { sentence ->
             sentence.index + sentenceIndexOffset == highlightedSentenceIndex
@@ -190,7 +202,7 @@ fun InteractiveText(
         val extraActionCount = if (selectedAccessibilitySentence == null) {
             0
         } else {
-            listOf(onSentencePlay, onSentenceTranslate, onSentenceExplain).count { it != null }
+            listOf(onSentencePlay, onSentenceTranslate, onSentenceExplain, onExcerptSelect).count { it != null }
         }
         val reservedPerCategory = (extraActionCount + 1) / 2
         val sentenceActions = visibleSentences
@@ -219,6 +231,16 @@ fun InteractiveText(
             if (!enabled) return@buildList
             addAll(sentenceActions)
             addAll(wordActions)
+            if (selectedAccessibilitySentence != null && currentOnExcerptSelect != null) {
+                add(CustomAccessibilityAction(collectExcerptLabel) {
+                    val start = maxOf(selectedAccessibilitySentence.startOffset, visibleStart + sourceStartOffset)
+                    val end = minOf(selectedAccessibilitySentence.endOffset, visibleEnd + sourceStartOffset)
+                    if (end <= start) false else {
+                        currentOnExcerptSelect?.invoke(ExcerptRange(start, end))
+                        true
+                    }
+                })
+            }
             if (selectedAccessibilitySentence != null && currentOnSentencePlay != null) {
                 add(CustomAccessibilityAction(playSentenceActionLabel) {
                     val target = createAccessibilityTarget(
@@ -332,7 +354,15 @@ fun InteractiveText(
         modifier = modifier
             .then(accessibilityModifier)
             .readingTextViewport(visibleViewport)
+            .onGloballyPositioned {
+                textCoordinates = it
+                currentOnTextCoordinates(it)
+            }
             .drawWithContent {
+                excerptRange?.let { range ->
+                    drawTextRangeBackground(textLayoutResult, range.startOffset - sourceStartOffset,
+                        range.endOffset - sourceStartOffset, highlightColor)
+                }
                 // 整段底纹画在文字**之前**：它是背景，盖在字上会把正文糊掉。
                 // 句子/单词的高亮仍是 AnnotatedString 的 SpanStyle，由 drawContent
                 // 连同文字一起画出，因此天然叠在这层之上。
@@ -434,40 +464,60 @@ fun InteractiveText(
                         return@awaitEachGesture
                     }
                     val wordRange = WordBoundaryDetector.getWordRangeAtOffset(text, charOffset)
-                    if (wordRange == null) {
+                    if (wordRange == null && currentOnExcerptDrag == null) {
                         waitForUpOrCancellation()
                         return@awaitEachGesture
                     }
                     val target = InteractiveTextLongPressTarget(
                         sentenceIndex = sentence.index + sentenceIndexOffset,
                         sentenceRange = sentence,
-                        word = wordRange.word,
+                        word = wordRange?.word,
                         anchorBounds = layout.getBoundingBox(charOffset).inViewport(visibleViewport),
                         sentenceBounds = layout.sentenceBounds(sentence, visibleViewport, sourceStartOffset),
-                        wordStartOffset = wordRange.startOffset + sourceStartOffset,
-                        wordEndOffset = wordRange.endOffset + sourceStartOffset,
+                        wordStartOffset = wordRange?.startOffset?.plus(sourceStartOffset),
+                        wordEndOffset = wordRange?.endOffset?.plus(sourceStartOffset),
                         glyphOffset = charOffset + sourceStartOffset
                     )
                     currentEvent.changes.firstOrNull { it.id == down.id }?.consume()
-                    currentOnWordPressStart?.invoke(target)
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Main)
-                        val change = event.changes.firstOrNull { it.id == down.id }
-                        if (change == null || change.isConsumed ||
-                            event.changes.any { it.id != down.id && it.pressed } ||
-                            change.position.x !in 0f..layout.size.width.toFloat() ||
-                            change.position.y !in (visibleViewport?.top ?: 0).toFloat()..
-                                (visibleViewport?.let { it.top + it.height } ?: layout.size.height).toFloat()
-                        ) {
-                            currentOnClearSelection()
-                            break
+                    if (wordRange != null) currentOnWordPressStart?.invoke(target)
+                    var draggingExcerpt = false
+                    var ended = false
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Main)
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change == null || change.isConsumed ||
+                                event.changes.any { it.id != down.id && it.pressed }
+                            ) break
+                            if (!draggingExcerpt && currentOnExcerptDrag != null &&
+                                (change.position - down.position).getDistance() > viewConfiguration.touchSlop
+                            ) {
+                                draggingExcerpt = true
+                                currentOnClearSelection()
+                            }
+                            if (draggingExcerpt) {
+                                val coordinates = textCoordinates?.takeIf { it.isAttached } ?: break
+                                change.consume()
+                                currentOnExcerptDrag?.invoke(charOffset + sourceStartOffset,
+                                    coordinates.localToWindow(change.position), !change.pressed)
+                            } else {
+                                if (change.position.x !in 0f..layout.size.width.toFloat() ||
+                                    change.position.y !in (visibleViewport?.top ?: 0).toFloat()..
+                                        (visibleViewport?.let { it.top + it.height } ?: layout.size.height).toFloat()
+                                ) break
+                                change.consume()
+                            }
+                            if (!change.pressed) {
+                                ended = true
+                                if (!draggingExcerpt && wordRange != null) {
+                                    val onRelease = currentOnWordPressRelease
+                                    if (onRelease != null) onRelease(target) else currentOnWordLongPress(wordRange.word)
+                                }
+                                break
+                            }
                         }
-                        change.consume()
-                        if (!change.pressed) {
-                            val onRelease = currentOnWordPressRelease
-                            if (onRelease != null) onRelease(target) else currentOnWordLongPress(wordRange.word)
-                            break
-                        }
+                    } finally {
+                        if (!ended) currentOnClearSelection()
                     }
                 }
             },

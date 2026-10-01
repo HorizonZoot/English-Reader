@@ -45,6 +45,20 @@ interface ArticleDao {
     )
     fun getStandaloneArticles(): Flow<List<ArticleSummary>>
 
+    /**
+     * 是否已有用户自己产生的数据，供首次引导识别升级前的老用户。
+     *
+     * 内置样本每个安装都会自动灌入，不能作为使用过的证据，所以只看样本 source 白名单以外的
+     * 文章（含 source 为空的旧数据）、书籍、生词和阅读位置。
+     */
+    @Query(
+        "SELECT EXISTS(SELECT 1 FROM books) " +
+            "OR EXISTS(SELECT 1 FROM vocabulary) " +
+            "OR EXISTS(SELECT 1 FROM reading_positions) " +
+            "OR EXISTS(SELECT 1 FROM articles WHERE source IS NULL OR source NOT IN (:sampleSources))"
+    )
+    suspend fun hasUserData(sampleSources: List<String>): Boolean
+
     @Query("SELECT * FROM articles WHERE id = :id")
     suspend fun getArticleById(id: Long): ArticleEntity?
 

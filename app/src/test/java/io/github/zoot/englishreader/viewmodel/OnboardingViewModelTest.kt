@@ -3,6 +3,7 @@ package io.github.zoot.englishreader.viewmodel
 import androidx.lifecycle.viewModelScope
 import app.cash.turbine.test
 import io.github.zoot.englishreader.data.local.SettingsPreferences
+import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -26,6 +27,54 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class OnboardingViewModelTest {
     @get:Rule val main = MainDispatcherRule(StandardTestDispatcher())
+    private val newInstall = mockk<ArticleRepository> {
+        coEvery { hasUserData() } returns false
+    }
+
+    @Test
+    fun startup_noFlagButUserData_skipsGuideAndPersistsCompletionOnce() = runTest {
+        val preferences = preferences(completed = false)
+        val existing = mockk<ArticleRepository> { coEvery { hasUserData() } returns true }
+        val model = OnboardingViewModel(preferences, existing)
+        model.events.test {
+            advanceUntilIdle()
+            assertEquals(OnboardingState.Ready, model.state.value)
+            expectNoEvents()
+        }
+        coVerify(exactly = 1) { preferences.completeOnboarding() }
+    }
+
+    @Test
+    fun startup_noFlagAndUserDataWriteFails_stillOpensAppWithoutError() = runTest {
+        val preferences = preferences(completed = false)
+        coEvery { preferences.completeOnboarding() } throws IOException("disk unavailable")
+        val existing = mockk<ArticleRepository> { coEvery { hasUserData() } returns true }
+        val model = OnboardingViewModel(preferences, existing)
+        model.events.test {
+            advanceUntilIdle()
+            assertEquals(OnboardingState.Ready, model.state.value)
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun startup_noFlagAndUserDataCheckFails_showsGuideWithoutWriting() = runTest {
+        val preferences = preferences(completed = false)
+        val broken = mockk<ArticleRepository> {
+            coEvery { hasUserData() } throws IllegalStateException("database unavailable")
+        }
+        val model = OnboardingViewModel(preferences, broken)
+        advanceUntilIdle()
+        assertEquals(OnboardingState.Guide(), model.state.value)
+        coVerify(exactly = 0) { preferences.completeOnboarding() }
+    }
+
+    @Test
+    fun startup_completedFlag_doesNotQueryUserData() = runTest {
+        OnboardingViewModel(preferences(completed = true), newInstall)
+        advanceUntilIdle()
+        coVerify(exactly = 0) { newInstall.hasUserData() }
+    }
 
     @Test
     fun startup_pendingRead_blocksEntryAndIgnoresFinishUntilFlagIsKnown() = runTest {
@@ -33,7 +82,7 @@ class OnboardingViewModelTest {
         val preferences = mockk<SettingsPreferences> {
             every { onboardingCompleted } returns completion
         }
-        val model = OnboardingViewModel(preferences)
+        val model = OnboardingViewModel(preferences, newInstall)
         assertEquals(OnboardingState.Loading, model.state.value)
         model.finish()
         advanceUntilIdle()
@@ -47,7 +96,7 @@ class OnboardingViewModelTest {
     @Test
     fun startup_completedFlag_opensAppWithoutGuideOrAnotherWrite() = runTest {
         val preferences = preferences(completed = true)
-        val model = OnboardingViewModel(preferences)
+        val model = OnboardingViewModel(preferences, newInstall)
         model.state.test {
             assertEquals(OnboardingState.Loading, awaitItem())
             advanceUntilIdle()
@@ -61,11 +110,11 @@ class OnboardingViewModelTest {
     @Test
     fun startup_unfinishedVisitAndNewInstance_showGuideWithoutPersistingCompletion() = runTest {
         val preferences = preferences(completed = false)
-        val first = OnboardingViewModel(preferences)
+        val first = OnboardingViewModel(preferences, newInstall)
         advanceUntilIdle()
         assertEquals(OnboardingState.Guide(), first.state.value)
         first.viewModelScope.cancel()
-        val restarted = OnboardingViewModel(preferences)
+        val restarted = OnboardingViewModel(preferences, newInstall)
         advanceUntilIdle()
         assertEquals(OnboardingState.Guide(), restarted.state.value)
         coVerify(exactly = 0) { preferences.completeOnboarding() }
@@ -76,7 +125,7 @@ class OnboardingViewModelTest {
         val write = CompletableDeferred<Unit>()
         val preferences = preferences(completed = false)
         coEvery { preferences.completeOnboarding() } coAnswers { write.await() }
-        val model = OnboardingViewModel(preferences)
+        val model = OnboardingViewModel(preferences, newInstall)
         advanceUntilIdle()
         model.finish()
         model.finish()
@@ -96,7 +145,7 @@ class OnboardingViewModelTest {
         val preferences = mockk<SettingsPreferences> {
             every { onboardingCompleted } returns flow { throw IOException("disk unavailable") }
         }
-        val model = OnboardingViewModel(preferences)
+        val model = OnboardingViewModel(preferences, newInstall)
         model.events.test {
             advanceUntilIdle()
             assertEquals(OnboardingState.Guide(), model.state.value)
@@ -111,7 +160,7 @@ class OnboardingViewModelTest {
     fun finish_writeFailure_allowsThisSessionAndReportsFailureOnlyOnce() = runTest {
         val preferences = preferences(completed = false)
         coEvery { preferences.completeOnboarding() } throws IOException("disk unavailable")
-        val model = OnboardingViewModel(preferences)
+        val model = OnboardingViewModel(preferences, newInstall)
         advanceUntilIdle()
         model.events.test {
             model.finish()
@@ -122,7 +171,7 @@ class OnboardingViewModelTest {
             expectNoEvents()
         }
         model.events.test { expectNoEvents() }
-        val restarted = OnboardingViewModel(preferences)
+        val restarted = OnboardingViewModel(preferences, newInstall)
         advanceUntilIdle()
         assertEquals(OnboardingState.Guide(), restarted.state.value)
         coVerify(exactly = 1) { preferences.completeOnboarding() }
@@ -133,7 +182,7 @@ class OnboardingViewModelTest {
         val preferences = mockk<SettingsPreferences> {
             every { onboardingCompleted } returns flow { throw CancellationException() }
         }
-        val model = OnboardingViewModel(preferences)
+        val model = OnboardingViewModel(preferences, newInstall)
         model.events.test {
             advanceUntilIdle()
             assertEquals(OnboardingState.Loading, model.state.value)
@@ -145,7 +194,7 @@ class OnboardingViewModelTest {
     fun finish_cancelledWrite_resetsBusyWithoutOpeningAppOrReportingFailure() = runTest {
         val preferences = preferences(completed = false)
         coEvery { preferences.completeOnboarding() } throws CancellationException()
-        val model = OnboardingViewModel(preferences)
+        val model = OnboardingViewModel(preferences, newInstall)
         advanceUntilIdle()
         model.events.test {
             model.finish()

@@ -18,6 +18,7 @@ import io.github.zoot.englishreader.model.ReadingArticleState
 import io.github.zoot.englishreader.model.ReadingPublication
 import io.github.zoot.englishreader.model.TranslationFingerprint
 import io.github.zoot.englishreader.util.ParagraphAligner
+import io.github.zoot.englishreader.util.TestDataGenerator
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -188,4 +189,7 @@ class ArticleRepository @Inject constructor(
     suspend fun refreshSampleArticles(sampleSources: List<String>, samples: List<ArticleEntity>) {
         articleDao.refreshSampleArticles(sampleSources, samples)
     }
+
+    /** 是否已有内置样本以外的用户数据，见 [ArticleDao.hasUserData]。 */
+    suspend fun hasUserData(): Boolean = articleDao.hasUserData(TestDataGenerator.SAMPLE_SOURCES)
 }

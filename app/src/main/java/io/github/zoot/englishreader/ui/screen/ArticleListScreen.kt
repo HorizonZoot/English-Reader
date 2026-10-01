@@ -28,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -56,6 +57,11 @@ import io.github.zoot.englishreader.viewmodel.ArticleListUiEvent
 import io.github.zoot.englishreader.viewmodel.ArticleListViewModel
 import io.github.zoot.englishreader.viewmodel.ImportState
 import io.github.zoot.englishreader.viewmodel.LibraryItem
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+
+internal const val LIBRARY_SEARCH_TAG = "library-search"
 
 /**
  * 文章列表界面
@@ -70,8 +76,14 @@ fun ArticleListScreen(
     val libraryItems by viewModel.libraryItems.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
-    LaunchedEffect(searchQuery.trim()) {
-        listState.scrollToItem(0)
+    // 只在关键词真正变化时回到顶部；跳过首次发射，否则从阅读页返回或旋屏时
+    // 会覆盖 rememberLazyListState 已恢复的滚动位置。
+    LaunchedEffect(viewModel, listState) {
+        viewModel.searchQuery
+            .map { it.trim() }
+            .distinctUntilChanged()
+            .drop(1)
+            .collect { listState.scrollToItem(0) }
     }
     val importState by viewModel.importState.collectAsStateWithLifecycle()
     val isImporting = importState is ImportState.Running
@@ -373,9 +385,10 @@ private fun LibraryHeader(
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
+                // 无障碍名称由 placeholder 提供；再设 contentDescription 会在有输入时重复朗读提示。
                 modifier = Modifier
                     .fillMaxWidth()
-                    .semantics { contentDescription = searchDescription },
+                    .testTag(LIBRARY_SEARCH_TAG),
                 placeholder = { Text(searchDescription) },
                 leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
                 trailingIcon = if (searchQuery.isNotEmpty()) {

@@ -4,11 +4,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasScrollToIndexAction
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.lifecycle.ViewModelStore
@@ -124,7 +128,29 @@ class LibrarySearchScreenTest {
         compose.onNodeWithText("A Quiet Walk").assertDoesNotExist()
     }
 
-    private fun render() {
+    @Test
+    fun scrollPosition_restoredOnRecreation_keptUntilQueryChanges() {
+        // createdAt 递增、列表倒序：index 0 是分组标题，index 30 对应 Article 10。
+        articles.value = (0 until 40).map { ArticleSummary(id = it + 100L, title = "Article $it", createdAt = it.toLong()) }
+        books.value = emptyList()
+        val viewModel = library()
+        val restoration = StateRestorationTester(compose)
+        restoration.setContent {
+            EnglishReaderTheme {
+                ArticleListScreen(onArticleClick = {}, onBookClick = {}, viewModel = viewModel)
+            }
+        }
+        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(30)
+        compose.onNodeWithText("Article 10").assertIsDisplayed()
+
+        restoration.emulateSavedInstanceStateRestore()
+        compose.onNodeWithText("Article 10").assertIsDisplayed()
+
+        search().performTextInput("article 3")
+        compose.onNodeWithText("Article 39").assertIsDisplayed()
+    }
+
+    private fun library(): ArticleListViewModel {
         val articleRepository = mockk<ArticleRepository> {
             every { getStandaloneArticles() } returns articles
             every { getAllArticles() } returns flow { error("Search must not load article bodies") }
@@ -132,10 +158,13 @@ class LibrarySearchScreenTest {
         val bookRepository = mockk<BookRepository> {
             every { getAllBooks() } returns books
         }
-        val viewModel = ArticleListViewModel(
+        return ArticleListViewModel(
             articleRepository, mockk(), bookRepository, mockk(), mockk()
-        )
-        store.put("library", viewModel)
+        ).also { store.put("library", it) }
+    }
+
+    private fun render() {
+        val viewModel = library()
         compose.setContent {
             EnglishReaderTheme {
                 if (showLibrary.value) {
@@ -149,5 +178,5 @@ class LibrarySearchScreenTest {
         }
     }
 
-    private fun search() = compose.onNodeWithContentDescription("搜索标题或作者")
+    private fun search() = compose.onNodeWithTag(LIBRARY_SEARCH_TAG)
 }

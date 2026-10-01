@@ -43,6 +43,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -69,7 +71,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.HasDefaultViewModelProviderFactory
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewmodel.CreationExtras
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import io.github.zoot.englishreader.R
@@ -110,7 +118,7 @@ fun OnboardingGate(
                 Text(stringResource(R.string.onboarding_loading), Modifier.padding(16.dp))
             }
             is OnboardingState.Guide -> {
-                Box(Modifier.fillMaxSize().clearAndSetSemantics {}) { background() }
+                Box(Modifier.fillMaxSize().clearAndSetSemantics {}) { GuideBackgroundScope(background) }
                 OnboardingScreen(
                     onFinish = viewModel::finish,
                     saving = current.saving,
@@ -123,9 +131,37 @@ fun OnboardingGate(
             SnackbarHost(
                 snackbarHostState,
                 modifier = Modifier.align(Alignment.BottomCenter).safeDrawingPadding()
+                    // Ready 时底部是 72dp 导航栏加上下各 8dp 外边距，提示需避开以免遮挡。
+                    .padding(bottom = if (state == OnboardingState.Ready) 88.dp else 0.dp)
             )
         }
     }
+}
+
+/**
+ * 背景书库只在引导期间存在。给它独立的 ViewModelStore 并在离开引导时清理，
+ * 否则其 ViewModel 会落在 Activity 作用域里，直到 Activity 销毁都不释放。
+ */
+@Composable
+private fun GuideBackgroundScope(content: @Composable () -> Unit) {
+    val parent = checkNotNull(LocalViewModelStoreOwner.current) { "No ViewModelStoreOwner" }
+    val owner = remember(parent) { ChildViewModelStoreOwner(parent) }
+    DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
+    CompositionLocalProvider(LocalViewModelStoreOwner provides owner, content = content)
+}
+
+private class ChildViewModelStoreOwner(private val parent: ViewModelStoreOwner) :
+    ViewModelStoreOwner, HasDefaultViewModelProviderFactory {
+    override val viewModelStore = ViewModelStore()
+
+    // 沿用父级（Activity 上即 Hilt）的工厂与 extras，hiltViewModel() 的创建路径不变。
+    override val defaultViewModelProviderFactory: ViewModelProvider.Factory
+        get() = (parent as? HasDefaultViewModelProviderFactory)?.defaultViewModelProviderFactory
+            ?: ViewModelProvider.NewInstanceFactory()
+
+    override val defaultViewModelCreationExtras: CreationExtras
+        get() = (parent as? HasDefaultViewModelProviderFactory)?.defaultViewModelCreationExtras
+            ?: CreationExtras.Empty
 }
 
 private enum class OnboardingPage(@StringRes val title: Int, @StringRes val body: Int, @StringRes val image: Int) {
@@ -145,6 +181,8 @@ fun OnboardingScreen(
     feedback: @Composable () -> Unit = {}
 ) {
     var pageIndex by rememberSaveable { mutableIntStateOf(0) }
+    // 与 OnboardingContent 内的 BackHandler 分属 Activity 与 Dialog 两个 dispatcher：
+    // 弹窗窗口尚未取得焦点或返回事件经 Activity 分发时，仍须由这里拦截。
     BackHandler { if (!saving) onFinish() }
     Dialog(
         onDismissRequest = { if (!saving) onFinish() },
@@ -189,7 +227,7 @@ internal fun OnboardingContent(
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 TextButton(onClick = onFinish, enabled = !saving, modifier = Modifier.heightIn(min = 48.dp)) {
-                    Text(stringResource(R.string.onboarding_skip))
+                    Text(stringResource(if (replay) R.string.onboarding_close else R.string.onboarding_skip))
                 }
             }
             Text(

@@ -10,6 +10,7 @@
     <string name="onboarding_loading">正在读取使用引导状态…</string>
     <string name="onboarding_page_position">第 %1$d / %2$d 页</string>
     <string name="onboarding_skip">跳过</string>
+    <string name="onboarding_close">关闭</string>
     <string name="onboarding_previous">上一步</string>
     <string name="onboarding_next">下一步</string>
     <string name="onboarding_start">开始使用</string>

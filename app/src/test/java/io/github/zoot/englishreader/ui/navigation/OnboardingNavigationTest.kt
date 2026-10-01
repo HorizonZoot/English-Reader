@@ -87,7 +87,7 @@ class OnboardingNavigationTest {
     fun settingsReplay_skipBackAndFinalAction_returnToSettingsWithoutWritingOrResettingCompletion() {
         lateinit var nav: NavHostController
         lateinit var back: OnBackPressedDispatcher
-        startup = OnboardingViewModel(SettingsPreferences(store))
+        startup = OnboardingViewModel(SettingsPreferences(store), mockk())
         compose.setContent {
             back = LocalOnBackPressedDispatcherOwner.current!!.onBackPressedDispatcher
             EnglishReaderTheme {
@@ -114,7 +114,10 @@ class OnboardingNavigationTest {
             compose.onNodeWithText(position(1)).assertIsDisplayed()
             compose.runOnIdle { assertEquals(ONBOARDING_REPLAY_ROUTE, nav.currentDestination?.route) }
             when (exit) {
-                0 -> compose.onNodeWithText(text(R.string.onboarding_skip)).performClick()
+                0 -> {
+                    compose.onNodeWithText(text(R.string.onboarding_skip)).assertDoesNotExist()
+                    compose.onNodeWithText(text(R.string.onboarding_close)).performClick()
+                }
                 1 -> {
                     compose.onNodeWithText(text(R.string.onboarding_next)).performClick()
                     compose.runOnIdle { back.onBackPressed() }

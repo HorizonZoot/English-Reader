@@ -131,7 +131,7 @@ class OnboardingGateTest {
     }
 
     private fun render() {
-        model = OnboardingViewModel(preferences)
+        model = OnboardingViewModel(preferences, mockk { coEvery { hasUserData() } returns false })
         compose.setContent {
             back = LocalOnBackPressedDispatcherOwner.current!!.onBackPressedDispatcher
             EnglishReaderTheme {

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.github.zoot.englishreader.data.local.SettingsPreferences
+import io.github.zoot.englishreader.data.repository.ArticleRepository
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -25,7 +26,8 @@ enum class OnboardingEvent { READ_FAILED, SAVE_FAILED }
 
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
-    private val settingsPreferences: SettingsPreferences
+    private val settingsPreferences: SettingsPreferences,
+    private val articleRepository: ArticleRepository
 ) : ViewModel() {
     private val _state = MutableStateFlow<OnboardingState>(OnboardingState.Loading)
     val state = _state.asStateFlow()
@@ -34,16 +36,44 @@ class OnboardingViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            try {
-                val completed = settingsPreferences.onboardingCompleted.first()
-                currentCoroutineContext().ensureActive()
-                _state.value = if (completed) OnboardingState.Ready else OnboardingState.Guide()
+            val completed = try {
+                settingsPreferences.onboardingCompleted.first()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 _state.value = OnboardingState.Guide()
                 _events.send(OnboardingEvent.READ_FAILED)
+                return@launch
             }
+            currentCoroutineContext().ensureActive()
+            _state.value = when {
+                completed -> OnboardingState.Ready
+                isExistingUser() -> {
+                    rememberExistingUser()
+                    OnboardingState.Ready
+                }
+                else -> OnboardingState.Guide()
+            }
+        }
+    }
+
+    // 升级前的版本没有完成标记；已有自己数据的老用户视为看过引导，不再拦截。
+    private suspend fun isExistingUser(): Boolean = try {
+        articleRepository.hasUserData()
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        // 无法判断时按新用户处理：多看一次引导可以跳过，漏看则无法补救。
+        false
+    }
+
+    private suspend fun rememberExistingUser() {
+        try {
+            settingsPreferences.completeOnboarding()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // 写入失败不影响本次放行；下次启动仍会按已有数据识别为老用户。
         }
     }
 

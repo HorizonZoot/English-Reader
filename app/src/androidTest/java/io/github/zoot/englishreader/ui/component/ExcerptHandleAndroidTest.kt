@@ -14,6 +14,8 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -33,6 +35,9 @@ class ExcerptHandleAndroidTest {
     private var selected = ExcerptRange(6, 16)
     private var saved: ExcerptRange? = null
     private lateinit var layout: TextLayoutResult
+    private lateinit var textCoordinates: LayoutCoordinates
+    private lateinit var readingBounds: Rect
+    private var density = 1f
 
     private fun show() {
         composeRule.setContent {
@@ -40,12 +45,17 @@ class ExcerptHandleAndroidTest {
             var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
             var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
             var bounds by remember { mutableStateOf<Rect?>(null) }
+            density = LocalDensity.current.density
             MaterialTheme {
-                Box(Modifier.fillMaxSize().onGloballyPositioned { bounds = it.boundsInWindow() }) {
+                Box(Modifier.fillMaxSize().testTag("excerpt-reading-area").onGloballyPositioned {
+                    bounds = it.boundsInWindow()
+                    readingBounds = it.boundsInWindow()
+                }) {
                     InteractiveText(
                         text = text, fontSize = 18.sp, modifier = Modifier.width(280.dp),
                         onSentenceClick = { _, _ -> }, onWordLongPress = {}, excerptRange = selection,
-                        onTextLayout = { textLayout = it; layout = it }, onTextCoordinates = { coordinates = it }
+                        onTextLayout = { textLayout = it; layout = it },
+                        onTextCoordinates = { coordinates = it; textCoordinates = it }
                     )
                     val current = selection
                     val readingBounds = bounds
@@ -72,6 +82,47 @@ class ExcerptHandleAndroidTest {
                 }
             }
         }
+    }
+
+    private fun visibleKnob(start: Boolean): Offset {
+        val offset = if (start) selected.startOffset else selected.endOffset - 1
+        val glyph = layout.getBoundingBox(offset).translate(textCoordinates.localToWindow(Offset.Zero))
+        return excerptHandleGeometry(glyph, start, readingBounds, 24f * density, 7f * density)
+            .knob.center - readingBounds.topLeft
+    }
+
+    @Test
+    fun startHandle_overlappingTargets_dragVisibleKnobAdjustsStartNotEnd() {
+        selected = ExcerptRange(0, 2)
+        show()
+        composeRule.waitForIdle()
+        val start = composeRule.onNodeWithTag("excerpt-start-handle").fetchSemanticsNode().boundsInRoot
+        val end = composeRule.onNodeWithTag("excerpt-end-handle").fetchSemanticsNode().boundsInRoot
+        assertTrue(start.overlaps(end))
+        assertEquals(48f * density, start.width, 1f)
+        val knob = visibleKnob(true)
+        val delta = layout.getBoundingBox(1).topLeft - layout.getBoundingBox(0).topLeft
+        composeRule.onNodeWithTag("excerpt-reading-area").performTouchInput {
+            down(knob)
+            moveBy(delta)
+            up()
+        }
+        composeRule.runOnIdle { assertEquals(ExcerptRange(1, 2), selected) }
+    }
+
+    @Test
+    fun endHandle_overlappingTargets_dragVisibleKnobAdjustsEndNotStart() {
+        selected = ExcerptRange(0, 1)
+        show()
+        composeRule.waitForIdle()
+        val knob = visibleKnob(false)
+        val delta = layout.getBoundingBox(2).bottomRight - layout.getBoundingBox(0).bottomRight
+        composeRule.onNodeWithTag("excerpt-reading-area").performTouchInput {
+            down(knob)
+            moveBy(delta)
+            up()
+        }
+        composeRule.runOnIdle { assertEquals(ExcerptRange(0, 3), selected) }
     }
 
     @Test

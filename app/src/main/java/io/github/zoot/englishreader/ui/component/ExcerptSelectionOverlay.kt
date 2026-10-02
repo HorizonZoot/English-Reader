@@ -17,6 +17,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -46,11 +47,13 @@ internal fun ExcerptSelectionOverlay(
 ) {
     var dragging by remember { mutableStateOf(false) }
     val density = LocalDensity.current
-    val handleRadius = with(density) { 24.dp.toPx() }
-    val centers = excerptHandleCenters(geometry, readingBounds, handleRadius, with(density) { 8.dp.toPx() })
+    val touchRadius = with(density) { 24.dp.toPx() }
+    val knobRadius = with(density) { 7.dp.toPx() }
+    val start = excerptHandleGeometry(geometry.start, true, readingBounds, touchRadius, knobRadius)
+    val end = excerptHandleGeometry(geometry.end, false, readingBounds, touchRadius, knobRadius)
     Box(Modifier.fillMaxSize()) {
         if (!dragging) {
-            val localBounds = excerptControlsBounds(geometry, centers, handleRadius).translate(-readingBounds.topLeft)
+            val localBounds = excerptControlsBounds(geometry, start, end).translate(-readingBounds.topLeft)
             Popup(
                 popupPositionProvider = SentencePopupPositionProvider(
                     localAnchor = localBounds,
@@ -78,26 +81,23 @@ internal fun ExcerptSelectionOverlay(
                 }
             }
         }
-        ExcerptHandle(true, geometry.start, centers.first, readingBounds, onMove, onNudge, { dragging = it }, onCancel)
-        ExcerptHandle(false, geometry.end, centers.second, readingBounds, onMove, onNudge, { dragging = it }, onCancel)
+        ExcerptHandle(start, end, readingBounds, onMove, onNudge, { dragging = it }, onCancel)
+        ExcerptHandle(end, start, readingBounds, onMove, onNudge, { dragging = it }, onCancel)
     }
 }
 
 @Composable
 private fun ExcerptHandle(
-    startHandle: Boolean,
-    glyph: Rect,
-    center: Offset,
+    handle: ExcerptHandleGeometry,
+    other: ExcerptHandleGeometry,
     readingBounds: Rect,
     onMove: (Boolean, Offset) -> Unit,
     onNudge: (Boolean, Int) -> Boolean,
     onDragging: (Boolean) -> Unit,
     onCancel: () -> Unit
 ) {
-    val density = LocalDensity.current
-    val radius = with(density) { 24.dp.toPx() }
-    val focus = Offset(if (startHandle) glyph.left else glyph.right, glyph.center.y)
-    val local = center - readingBounds.topLeft - Offset(radius, radius)
+    val startHandle = handle.startHandle
+    val local = handle.touchBounds.topLeft - readingBounds.topLeft
     val color = MaterialTheme.colorScheme.primary
     val label = stringResource(if (startHandle) R.string.excerpt_start_handle else R.string.excerpt_end_handle)
     val previous = stringResource(R.string.excerpt_handle_backward)
@@ -106,7 +106,8 @@ private fun ExcerptHandle(
     val nudge by rememberUpdatedState(onNudge)
     val cancel by rememberUpdatedState(onCancel)
     val dragging by rememberUpdatedState(onDragging)
-    val currentFocus by rememberUpdatedState(focus)
+    val currentHandle by rememberUpdatedState(handle)
+    val otherHandle by rememberUpdatedState(other)
     var coordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     Box(
         Modifier.offset { IntOffset(local.x.roundToInt(), local.y.roundToInt()) }
@@ -125,7 +126,9 @@ private fun ExcerptHandle(
                     val down = awaitFirstDown()
                     val initialCoordinates = coordinates?.takeIf { it.isAttached } ?: return@awaitEachGesture
                     val downInWindow = initialCoordinates.localToWindow(down.position)
-                    val initialFocus = currentFocus
+                    // Overlapping 48dp targets dispatch to the closest visible knob, not the top sibling.
+                    val selectedHandle = excerptHandleAt(downInWindow, currentHandle, otherHandle)
+                    val initialFocus = Offset(selectedHandle.tip.x, selectedHandle.glyph.center.y)
                     down.consume()
                     dragging(true)
                     var ended = false
@@ -137,7 +140,7 @@ private fun ExcerptHandle(
                             val currentCoordinates = coordinates?.takeIf { it.isAttached } ?: break
                             val delta = currentCoordinates.localToWindow(change.position) - downInWindow
                             change.consume()
-                            if (delta != Offset.Zero) move(startHandle, initialFocus + delta)
+                            if (delta != Offset.Zero) move(selectedHandle.startHandle, initialFocus + delta)
                             if (!change.pressed) {
                                 ended = true
                                 break
@@ -151,49 +154,70 @@ private fun ExcerptHandle(
             }
     ) {
         Canvas(Modifier.fillMaxSize()) {
-            val knob = Offset(size.width / 2, size.height / 2)
-            val tip = Offset(focus.x, glyph.bottom) - center + knob
-            drawLine(color, tip, knob, strokeWidth = 2.dp.toPx())
-            drawCircle(color, radius = 8.dp.toPx(), center = knob)
+            val knob = handle.knob.translate(-handle.touchBounds.topLeft)
+            val tip = handle.tip - handle.touchBounds.topLeft
+            drawCircle(color, radius = knob.width / 2, center = knob.center)
+            drawRect(
+                color,
+                topLeft = Offset(minOf(tip.x, knob.center.x), minOf(tip.y, knob.center.y)),
+                size = Size(knob.width / 2, knob.height / 2)
+            )
         }
     }
+}
+
+internal data class ExcerptHandleGeometry(
+    val startHandle: Boolean,
+    val glyph: Rect,
+    val knob: Rect,
+    val touchBounds: Rect
+) {
+    val tip: Offset
+        get() = Offset(
+            if (startHandle) glyph.left else glyph.right,
+            if (knob.bottom <= glyph.top) glyph.top else glyph.bottom
+        )
 }
 
 internal fun excerptControlsBounds(
     geometry: ExcerptSelectionGeometry,
-    centers: Pair<Offset, Offset>,
-    radius: Float
+    start: ExcerptHandleGeometry,
+    end: ExcerptHandleGeometry
 ): Rect = Rect(
-    minOf(geometry.bounds.left, centers.first.x - radius, centers.second.x - radius),
-    minOf(geometry.bounds.top, centers.first.y - radius, centers.second.y - radius),
-    maxOf(geometry.bounds.right, centers.first.x + radius, centers.second.x + radius),
-    maxOf(geometry.bounds.bottom, centers.first.y + radius, centers.second.y + radius)
+    minOf(geometry.bounds.left, start.touchBounds.left, end.touchBounds.left),
+    minOf(geometry.bounds.top, start.touchBounds.top, end.touchBounds.top),
+    maxOf(geometry.bounds.right, start.touchBounds.right, end.touchBounds.right),
+    maxOf(geometry.bounds.bottom, start.touchBounds.bottom, end.touchBounds.bottom)
 )
 
-internal fun excerptHandleCenters(
-    geometry: ExcerptSelectionGeometry,
+internal fun excerptHandleGeometry(
+    glyph: Rect,
+    startHandle: Boolean,
     bounds: Rect,
-    radius: Float,
-    gap: Float
-): Pair<Offset, Offset> {
-    val left = bounds.left + radius
-    val right = maxOf(left, bounds.right - radius)
-    fun center(glyph: Rect, start: Boolean) = Offset(
-        (if (start) glyph.left - radius else glyph.right + radius).coerceIn(left, right),
-        (glyph.bottom + gap + radius).coerceIn(bounds.top + radius, maxOf(bounds.top + radius, bounds.bottom - radius))
+    touchRadius: Float,
+    knobRadius: Float
+): ExcerptHandleGeometry {
+    val diameter = knobRadius * 2
+    val x = if (startHandle) glyph.left else glyph.right
+    val extendsLeft = if (startHandle) x - diameter >= bounds.left else x + diameter > bounds.right
+    val left = if (extendsLeft) x - diameter else x
+    val top = if (glyph.bottom + diameter <= bounds.bottom) glyph.bottom else glyph.top - diameter
+    val knob = Rect(left, top, left + diameter, top + diameter)
+    val center = Offset(
+        knob.center.x.coerceIn(bounds.left + touchRadius, maxOf(bounds.left + touchRadius, bounds.right - touchRadius)),
+        knob.center.y.coerceIn(bounds.top + touchRadius, maxOf(bounds.top + touchRadius, bounds.bottom - touchRadius))
     )
-    var start = center(geometry.start, true)
-    var end = center(geometry.end, false)
-    val diameter = radius * 2
-    if (kotlin.math.abs(start.y - end.y) < diameter && kotlin.math.abs(end.x - start.x) < diameter && right - left >= diameter) {
-        val leftCenter = ((start.x + end.x - diameter) / 2).coerceIn(left, right - diameter)
-        if (start.x <= end.x) {
-            start = start.copy(x = leftCenter)
-            end = end.copy(x = leftCenter + diameter)
-        } else {
-            end = end.copy(x = leftCenter)
-            start = start.copy(x = leftCenter + diameter)
-        }
-    }
-    return start to end
+    return ExcerptHandleGeometry(
+        startHandle, glyph, knob,
+        Rect(center - Offset(touchRadius, touchRadius), Size(touchRadius * 2, touchRadius * 2))
+    )
 }
+
+internal fun excerptHandleAt(
+    position: Offset,
+    handle: ExcerptHandleGeometry,
+    other: ExcerptHandleGeometry
+): ExcerptHandleGeometry = if (
+    other.touchBounds.contains(position) &&
+    (position - other.knob.center).getDistanceSquared() < (position - handle.knob.center).getDistanceSquared()
+) other else handle

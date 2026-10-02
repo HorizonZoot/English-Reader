@@ -4,6 +4,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -15,6 +18,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import java.text.DateFormat
@@ -24,7 +30,9 @@ import java.util.Date
 internal fun ExcerptsContent(
     excerpts: List<ExcerptEntity>,
     onOpenSource: (ExcerptEntity) -> Unit,
-    onDelete: (ExcerptEntity) -> Unit
+    onDelete: (ExcerptEntity) -> Unit,
+    playback: ExcerptPlaybackState? = null,
+    onTogglePlayback: (ExcerptEntity) -> Unit = {}
 ) {
     val clipboard = LocalClipboardManager.current
     val dateFormat = remember { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT) }
@@ -52,7 +60,30 @@ internal fun ExcerptsContent(
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
                             .clickable(onClickLabel = expandLabel) { expanded = !expanded }
                     )
-                    TextButton(onClick = { expanded = !expanded }) { Text(expandLabel) }
+                    val active = playback?.takeIf { it.excerptId == excerpt.id }
+                    val playbackDescription = stringResource(
+                        if (active?.loading == true) R.string.excerpt_audio_loading
+                        else if (active != null) R.string.excerpt_audio_playing
+                        else R.string.excerpt_play
+                    )
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { expanded = !expanded }, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
+                            Text(expandLabel)
+                        }
+                        TextButton(
+                            onClick = { onTogglePlayback(excerpt) },
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("excerpt-play-${excerpt.id}")
+                                .semantics { stateDescription = playbackDescription }
+                        ) {
+                            if (active?.loading == true) {
+                                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(if (active != null) Icons.Default.Stop else Icons.Default.PlayArrow, contentDescription = null)
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(if (active != null) R.string.excerpt_stop else R.string.excerpt_play))
+                        }
+                    }
                     Spacer(Modifier.height(8.dp))
                     Text(
                         text = excerpt.sourceTitle,

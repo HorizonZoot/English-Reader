@@ -38,7 +38,8 @@ internal fun excerptFocusOffset(
     paragraphIndex: Int,
     position: Offset,
     readingBounds: Rect,
-    geometries: Collection<ExcerptTextGeometry>
+    geometries: Collection<ExcerptTextGeometry>,
+    caret: Boolean = false
 ): Int? {
     val candidates = geometries.filter { it.paragraphIndex == paragraphIndex && it.coordinates.isAttached }
         .mapNotNull { geometry -> geometry.visibleBounds(readingBounds)?.let { geometry to it } }
@@ -50,10 +51,42 @@ internal fun excerptFocusOffset(
     val point = Offset(position.x.coerceIn(bounds.left, bounds.right - 0.01f),
         position.y.coerceIn(bounds.top, bounds.bottom - 0.01f))
     val local = geometry.coordinates.windowToLocal(point)
-    val start = geometry.viewport?.startOffset ?: 0
-    val end = geometry.viewport?.endOffset ?: geometry.layout.layoutInput.text.length
-    if (end <= start) return null
-    val caret = geometry.layout.getOffsetForPosition(local).coerceIn(start, end - 1)
-    val offset = if (caret > start && geometry.layout.getBoundingBox(caret - 1).contains(local)) caret - 1 else caret
-    return geometry.sourceStartOffset + offset
+    val visible = geometry.visibleExcerptRange(readingBounds) ?: return null
+    val start = visible.startOffset - geometry.sourceStartOffset
+    val end = visible.endOffset - geometry.sourceStartOffset
+    val offset = geometry.layout.getOffsetForPosition(local).coerceIn(start, if (caret) end else end - 1)
+    if (caret) return geometry.sourceStartOffset + offset
+    val glyph = if (offset > start && geometry.layout.getBoundingBox(offset - 1).contains(local)) offset - 1 else offset
+    return geometry.sourceStartOffset + glyph
+}
+
+internal data class ExcerptSelectionGeometry(val start: Rect, val end: Rect, val bounds: Rect)
+
+internal fun excerptSelectionGeometry(
+    paragraphIndex: Int,
+    range: ExcerptRange,
+    readingBounds: Rect,
+    geometries: Collection<ExcerptTextGeometry>
+): ExcerptSelectionGeometry? {
+    val candidates = geometries.filter { it.paragraphIndex == paragraphIndex && it.coordinates.isAttached }
+    fun endpoint(offset: Int): Rect? {
+        val geometry = candidates.firstOrNull {
+            val visible = it.visibleExcerptRange(readingBounds)
+            visible != null && offset in visible.startOffset until visible.endOffset
+        } ?: return null
+        return geometry.layout.getBoundingBox(offset - geometry.sourceStartOffset)
+            .translate(geometry.coordinates.localToWindow(Offset.Zero)).intersect(readingBounds)
+    }
+    val start = endpoint(range.startOffset) ?: return null
+    val end = endpoint(range.endOffset - 1) ?: return null
+    val rects = candidates.flatMap { geometry ->
+        val bounds = geometry.visibleBounds(readingBounds) ?: return@flatMap emptyList()
+        textRangeBackgroundRects(geometry.layout, range.startOffset - geometry.sourceStartOffset,
+            range.endOffset - geometry.sourceStartOffset).map {
+            it.translate(geometry.coordinates.localToWindow(Offset.Zero)).intersect(bounds)
+        }.filter { it.width > 0 && it.height > 0 }
+    }
+    if (rects.isEmpty()) return null
+    return ExcerptSelectionGeometry(start, end, Rect(rects.minOf { it.left }, rects.minOf { it.top },
+        rects.maxOf { it.right }, rects.maxOf { it.bottom }))
 }

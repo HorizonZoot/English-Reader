@@ -108,6 +108,9 @@ class VocabularyGestureAndroidTest {
         every { viewModel.groupType } returns MutableStateFlow(GroupType.ByTime)
         every { viewModel.vocabulary } returns MutableStateFlow(listOf(word))
         every { viewModel.loadingAudioWordId } returns MutableStateFlow(null)
+        every { viewModel.excerpts } returns MutableStateFlow(emptyList())
+        every { viewModel.excerptPlayback } returns MutableStateFlow(null)
+        every { viewModel.excerptToOpen } returns kotlinx.coroutines.flow.MutableSharedFlow()
         every { viewModel.uiEvent } returns emptyFlow()
         composeRule.setContent {
             Box(modifier = Modifier.width(360.dp).fillMaxHeight()) {

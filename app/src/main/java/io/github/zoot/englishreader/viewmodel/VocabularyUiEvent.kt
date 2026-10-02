@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.viewmodel
 
+import io.github.zoot.englishreader.util.TtsFailureReason
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 
@@ -15,6 +16,7 @@ sealed interface VocabularyUiEvent {
     data object ExcerptLoadFailed : VocabularyUiEvent
     data object ExcerptDeleteFailed : VocabularyUiEvent
     data object ExcerptRestoreFailed : VocabularyUiEvent
+    data class ExcerptAudioFailed(val reason: TtsFailureReason) : VocabularyUiEvent
     data object ExcerptSourceUnavailable : VocabularyUiEvent
 
     /**

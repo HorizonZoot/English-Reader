@@ -67,6 +67,7 @@ class VocabularyScreenTest {
     private val loadingAudioWordIdState = MutableStateFlow<Long?>(null)
     private val openedArticles = mutableListOf<Pair<Long, String>>()
     private val excerptsState = MutableStateFlow<List<ExcerptEntity>>(emptyList())
+    private val excerptPlaybackState = MutableStateFlow<io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState?>(null)
     private val excerptToOpen = MutableSharedFlow<ExcerptEntity>(extraBufferCapacity = 1)
     private val openedExcerpts = mutableListOf<Pair<Long, Long>>()
 
@@ -81,6 +82,7 @@ class VocabularyScreenTest {
         every { model.loadingAudioWordId } returns loadingAudioWordIdState
         every { model.uiEvent } returns uiEvents
         every { model.excerpts } returns excerptsState
+        every { model.excerptPlayback } returns excerptPlaybackState
         every { model.excerptToOpen } returns excerptToOpen
     }
 
@@ -402,6 +404,27 @@ class VocabularyScreenTest {
         composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
         composeRule.onNodeWithText("无法获取来源，文章可能被删除").assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).assertIsNotEnabled()
+    }
+
+    @Test
+    fun excerptPlayback_preparingAndPlaying_haveStopActionEvenWithoutSource() {
+        val excerpt = excerpt().copy(articleId = null)
+        excerptsState.value = listOf(excerpt)
+        render(groups = emptyList())
+        composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
+        composeRule.onNodeWithText(string(R.string.excerpt_play)).performClick()
+        verify(exactly = 1) { viewModel.toggleExcerptPlayback(excerpt) }
+        composeRule.runOnIdle {
+            excerptPlaybackState.value = io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState(excerpt.id, loading = true)
+        }
+        composeRule.onNodeWithText(string(R.string.excerpt_stop)).assertIsDisplayed().performClick()
+        verify(exactly = 2) { viewModel.toggleExcerptPlayback(excerpt) }
+        composeRule.runOnIdle {
+            excerptPlaybackState.value = io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState(excerpt.id, loading = false)
+        }
+        composeRule.onNodeWithText(string(R.string.excerpt_stop)).assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.favorites_words)).performClick()
+        verify(atLeast = 1) { viewModel.stopAudio() }
     }
 
     private fun excerpt() = ExcerptEntity(

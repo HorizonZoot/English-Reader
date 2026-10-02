@@ -23,6 +23,28 @@ class ExcerptRangeTest {
     }
 
     @Test
+    fun adjustHandle_clampsToVisibleRangeAndNeverCrossesOtherHandle() {
+        val text = "0123456789"
+        val visible = ExcerptRange(2, 8)
+        val selection = ExcerptRange(3, 7)
+        assertEquals(ExcerptRange(2, 7), selection.adjustHandle(text, -99, true, visible))
+        assertEquals(ExcerptRange(6, 7), selection.adjustHandle(text, 99, true, visible))
+        assertEquals(ExcerptRange(3, 4), selection.adjustHandle(text, -99, false, visible))
+        assertEquals(ExcerptRange(3, 8), selection.adjustHandle(text, 99, false, visible))
+    }
+
+    @Test
+    fun adjustHandle_surrogatePair_keepsBothCodeUnits() {
+        val text = "A😀BC"
+        val visible = ExcerptRange(0, text.length)
+        assertEquals(ExcerptRange(1, 5), visible.adjustHandle(text, 2, true, visible))
+        assertEquals(ExcerptRange(0, 3), visible.adjustHandle(text, 2, false, visible))
+        val emoji = ExcerptRange(1, 3)
+        assertEquals(emoji, emoji.adjustHandle(text, 3, true, visible))
+        assertEquals(emoji, emoji.adjustHandle(text, 1, false, visible))
+    }
+
+    @Test
     fun fromDrag_invalidOffset_rejectsInsteadOfExpandingToAnotherParagraph() {
         assertNull(ExcerptRange.fromDrag("", 0, 0))
         assertNull(ExcerptRange.fromDrag("Alpha", -1, 2))

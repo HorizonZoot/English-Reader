@@ -22,6 +22,10 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
 import io.github.zoot.englishreader.util.WordLookupKey
 import io.github.zoot.englishreader.util.AudioPlayer
 import io.github.zoot.englishreader.util.NetworkChecker
+import io.github.zoot.englishreader.core.excerptSpeechChunks
+import io.github.zoot.englishreader.util.TtsFailureReason
+import io.github.zoot.englishreader.util.TtsPlaybackResult
+import kotlinx.coroutines.CompletableDeferred
 import io.github.zoot.englishreader.util.TtsPlayer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -39,6 +43,8 @@ import kotlinx.coroutines.sync.withLock
 import java.util.TimeZone
 import javax.inject.Inject
 
+data class ExcerptPlaybackState(val excerptId: Long, val loading: Boolean)
+
 /**
  * 生词本 ViewModel
  */
@@ -53,6 +59,10 @@ class VocabularyViewModel @Inject constructor(
     private val settingsPreferences: SettingsPreferences,
     private val excerptRepository: ExcerptRepository
 ) : ViewModel() {
+
+    private val _excerptPlayback = MutableStateFlow<ExcerptPlaybackState?>(null)
+    val excerptPlayback: StateFlow<ExcerptPlaybackState?> = _excerptPlayback.asStateFlow()
+    private var excerptPlaybackJob: Job? = null
 
     val excerpts = excerptRepository.observeAll()
         .catch { error ->
@@ -72,6 +82,7 @@ class VocabularyViewModel @Inject constructor(
     }
 
     fun deleteExcerpt(excerpt: ExcerptEntity) {
+        if (_excerptPlayback.value?.excerptId == excerpt.id) stopAudio()
         if (!excerptDeletesInFlight.add(excerpt.id)) return
         viewModelScope.launch {
             try {
@@ -99,6 +110,7 @@ class VocabularyViewModel @Inject constructor(
     }
 
     fun openExcerpt(excerpt: ExcerptEntity) {
+        stopAudio()
         cancelExcerptNavigation()
         sourceRequest = viewModelScope.launch {
             try {
@@ -362,10 +374,55 @@ class VocabularyViewModel @Inject constructor(
         }
     }
 
+    fun toggleExcerptPlayback(excerpt: ExcerptEntity) {
+        val wasPlaying = _excerptPlayback.value?.excerptId == excerpt.id
+        stopAudio(preserveTtsPreparation = true)
+        if (wasPlaying) return
+        val generation = audioGeneration
+        _excerptPlayback.value = ExcerptPlaybackState(excerpt.id, loading = true)
+        excerptPlaybackJob = viewModelScope.launch {
+            try {
+                val settings = settingsPreferences.ttsReadingSettings.first()
+                val allowNetwork = settingsPreferences.allowNetworkTts.first()
+                currentCoroutineContext().ensureActive()
+                for (chunk in excerptSpeechChunks(excerpt.text)) {
+                    if (chunk.isBlank()) continue
+                    val completed = CompletableDeferred<TtsFailureReason?>()
+                    ttsPlayer.speakReading(chunk, settings, allowNetwork) { result ->
+                        if (generation == audioGeneration && !completed.isCompleted) {
+                            when (result) {
+                                is TtsPlaybackResult.Started -> _excerptPlayback.value = ExcerptPlaybackState(excerpt.id, loading = false)
+                                is TtsPlaybackResult.Finished -> completed.complete(null)
+                                is TtsPlaybackResult.Failed -> completed.complete(result.reason)
+                            }
+                        }
+                    }
+                    val failure = completed.await()
+                    if (failure != null) {
+                        _uiEvent.send(VocabularyUiEvent.ExcerptAudioFailed(failure))
+                        break
+                    }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == audioGeneration) _uiEvent.send(VocabularyUiEvent.AudioUnavailable)
+            } finally {
+                if (generation == audioGeneration) {
+                    _excerptPlayback.value = null
+                    ttsPlayer.stop()
+                }
+            }
+        }
+    }
+
     fun stopAudio() = stopAudio(preserveTtsPreparation = false)
 
     private fun stopAudio(preserveTtsPreparation: Boolean) {
         audioGeneration++
+        excerptPlaybackJob?.cancel()
+        excerptPlaybackJob = null
+        _excerptPlayback.value = null
         playAudioJob?.cancel()
         playAudioJob = null
         fallbackJob?.cancel()

@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import io.github.zoot.englishreader.core.ExcerptRange
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
+import io.github.zoot.englishreader.ui.component.ExcerptSelectionOverlay
+import io.github.zoot.englishreader.ui.component.excerptSelectionGeometry
 import io.github.zoot.englishreader.ui.component.ExcerptTextGeometry
 import io.github.zoot.englishreader.ui.component.excerptFocusOffset
 import io.github.zoot.englishreader.ui.component.visibleExcerptRange
@@ -523,10 +525,10 @@ fun ReadingScreenContent(
             ParagraphAligner.align(it.content, it.translation, SentenceSplitter::split)
         }.orEmpty()
     }
-    var excerptSelection by remember(article?.id, article?.content, fontSizeOption, readingMode, showTranslation) {
+    var excerptSelection by remember(article?.id, article?.content, article?.translation, fontSizeOption, readingMode, showTranslation) {
         mutableStateOf<ReadingExcerptSelection?>(null)
     }
-    val excerptGeometries = remember(article?.id, article?.content) { mutableMapOf<ReadingBlockKey, ExcerptTextGeometry>() }
+    val excerptGeometries = remember(article?.id, article?.content) { mutableStateMapOf<ReadingBlockKey, ExcerptTextGeometry>() }
     BackHandler(enabled = excerptSelection != null) { excerptSelection = null }
     LaunchedEffect(showReadingSettings, wordDetailsVisible, isLoading) {
         if (showReadingSettings || wordDetailsVisible || isLoading) excerptSelection = null
@@ -561,6 +563,9 @@ fun ReadingScreenContent(
     val readingView = LocalView.current
     val readingViewLocation = remember(readingView) { IntArray(2) }
     val density = LocalDensity.current
+    LaunchedEffect(readingViewportSize, density.density, density.fontScale) {
+        excerptSelection = null
+    }
     val layoutDirection = LocalLayoutDirection.current
     val safeInsets = SentencePopupSafeInsets(
         left = WindowInsets.safeDrawing.getLeft(density, layoutDirection),
@@ -1240,24 +1245,46 @@ fun ReadingScreenContent(
             }
 
             val selectedExcerpt = excerptSelection
-            if (selectedExcerpt?.finished == true && article != null && onSaveExcerpt != null) {
-                Surface(
-                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp).testTag("excerpt-actions"),
-                    shape = MaterialTheme.shapes.medium,
-                    tonalElevation = 6.dp,
-                    shadowElevation = 4.dp
-                ) {
-                    Row {
-                        TextButton(onClick = { excerptSelection = null }) {
-                            Text(stringResource(R.string.excerpt_cancel))
-                        }
-                        TextButton(onClick = {
-                            onSaveExcerpt(article, selectedExcerpt.paragraphIndex, selectedExcerpt.range)
-                            excerptSelection = null
-                        }, modifier = Modifier.testTag("excerpt-save")) {
-                            Text(stringResource(R.string.excerpt_save))
-                        }
+            val excerptViewport = readingViewportBounds
+            if (selectedExcerpt?.finished == true && article != null && onSaveExcerpt != null && excerptViewport != null) {
+                val geometries = excerptGeometries.values.filter { it.paragraphIndex == selectedExcerpt.paragraphIndex }
+                val geometry = excerptSelectionGeometry(selectedExcerpt.paragraphIndex, selectedExcerpt.range, excerptViewport, geometries)
+                if (geometry != null) {
+                    val paragraphText = paragraphs[selectedExcerpt.paragraphIndex].english
+                    fun adjustExcerpt(offset: Int, isStart: Boolean): Boolean {
+                        val current = excerptSelection ?: return false
+                        val visibleRanges = geometries.mapNotNull { it.visibleExcerptRange(excerptViewport) }
+                        if (visibleRanges.isEmpty()) return false
+                        val visible = ExcerptRange(visibleRanges.minOf { it.startOffset }, visibleRanges.maxOf { it.endOffset })
+                        if (current.range.startOffset < visible.startOffset || current.range.endOffset > visible.endOffset) return false
+                        val updated = current.range.adjustHandle(paragraphText, offset, isStart, visible)
+                        excerptSelection = current.copy(range = updated)
+                        return updated != current.range
                     }
+                    ExcerptSelectionOverlay(
+                        geometry = geometry,
+                        readingBounds = excerptViewport,
+                        safeInsets = safeInsets,
+                        onMove = { isStart, point ->
+                            excerptFocusOffset(selectedExcerpt.paragraphIndex, point, excerptViewport, geometries, caret = true)?.let {
+                                adjustExcerpt(it, isStart)
+                            }
+                        },
+                        onNudge = { isStart, direction ->
+                            val range = excerptSelection?.range
+                            if (range != null) {
+                                val current = if (isStart) range.startOffset else range.endOffset
+                                if (current + direction in 0..paragraphText.length) {
+                                    adjustExcerpt(paragraphText.offsetByCodePoints(current, direction), isStart)
+                                } else false
+                            } else false
+                        },
+                        onCancel = { excerptSelection = null },
+                        onSave = {
+                            excerptSelection?.let { onSaveExcerpt(article, it.paragraphIndex, it.range) }
+                            excerptSelection = null
+                        }
+                    )
                 }
             }
 

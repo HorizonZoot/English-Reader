@@ -581,6 +581,14 @@
     <string name="favorites_words">单词</string>
     <string name="favorites_excerpts">段落摘录</string>
     <string name="excerpts_empty">还没有摘录。在原文长按后拖动，选中文字即可收藏。</string>
+    <string name="excerpt_play">朗读摘录</string>
+    <string name="excerpt_stop">停止朗读</string>
+    <string name="excerpt_audio_loading">正在准备朗读</string>
+    <string name="excerpt_audio_playing">正在朗读</string>
+    <string name="excerpt_start_handle">调整摘录起点</string>
+    <string name="excerpt_end_handle">调整摘录终点</string>
+    <string name="excerpt_handle_backward">向前调整一个字符</string>
+    <string name="excerpt_handle_forward">向后调整一个字符</string>
     <string name="excerpt_save">收藏摘录</string>
     <string name="excerpt_cancel">取消选择</string>
     <string name="excerpt_copy">复制</string>

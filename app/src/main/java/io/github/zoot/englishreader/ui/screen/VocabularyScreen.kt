@@ -19,6 +19,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import io.github.zoot.englishreader.ui.component.messageRes
 import io.github.zoot.englishreader.ui.screen.vocabulary.ExcerptsContent
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -81,6 +82,7 @@ fun VocabularyScreen(
     onOpenExcerpt: (articleId: Long, excerptId: Long) -> Unit = { _, _ -> }
 ) = ArticleUiTheme {
     val groups by viewModel.groups.collectAsStateWithLifecycle()
+    val excerptPlayback by viewModel.excerptPlayback.collectAsStateWithLifecycle()
     val excerpts by viewModel.excerpts.collectAsStateWithLifecycle()
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     val openExcerpt by rememberUpdatedState(onOpenExcerpt)
@@ -134,6 +136,7 @@ fun VocabularyScreen(
                     )
                     if (result == SnackbarResult.ActionPerformed) viewModel.restoreExcerpt(event.excerpt)
                 }
+                is VocabularyUiEvent.ExcerptAudioFailed -> snackbarHostState.showSnackbar(context.getString(event.reason.messageRes()))
                 VocabularyUiEvent.ExcerptLoadFailed -> snackbarHostState.showSnackbar(context.getString(R.string.excerpt_load_failed))
                 VocabularyUiEvent.ExcerptDeleteFailed -> snackbarHostState.showSnackbar(context.getString(R.string.excerpt_delete_failed))
                 VocabularyUiEvent.ExcerptRestoreFailed -> snackbarHostState.showSnackbar(context.getString(R.string.excerpt_restore_failed))
@@ -194,7 +197,13 @@ fun VocabularyScreen(
             contentAlignment = Alignment.TopCenter
         ) {
             if (selectedTab == 1) {
-                ExcerptsContent(excerpts, onOpenSource = viewModel::openExcerpt, onDelete = viewModel::deleteExcerpt)
+                ExcerptsContent(
+                    excerpts,
+                    onOpenSource = viewModel::openExcerpt,
+                    onDelete = viewModel::deleteExcerpt,
+                    playback = excerptPlayback,
+                    onTogglePlayback = viewModel::toggleExcerptPlayback
+                )
             } else if (groups.isEmpty()) {
                 VocabularyEmptyState()
             } else {

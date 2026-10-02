@@ -12,6 +12,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputChange
@@ -360,6 +361,16 @@ fun InteractiveText(
             }
             .drawWithContent {
                 excerptRange?.let { range ->
+                    val layout = textLayoutResult
+                    if (layout != null) {
+                        textRangeBackgroundRects(layout, range.startOffset - sourceStartOffset,
+                            range.endOffset - sourceStartOffset).forEach { rect ->
+                            drawRect(underlineColor.copy(alpha = 0.10f),
+                                topLeft = rect.topLeft + Offset(0f, 1.dp.toPx()), size = rect.size)
+                            drawRect(underlineColor.copy(alpha = 0.65f), topLeft = rect.topLeft,
+                                size = rect.size, style = Stroke(1.dp.toPx()))
+                        }
+                    }
                     drawTextRangeBackground(textLayoutResult, range.startOffset - sourceStartOffset,
                         range.endOffset - sourceStartOffset, highlightColor)
                 }

@@ -95,6 +95,10 @@ import io.github.zoot.englishreader.ui.component.WholeTranslationSheet
 import io.github.zoot.englishreader.model.WholeTranslationSheetState
 import io.github.zoot.englishreader.ui.component.InteractiveText
 import io.github.zoot.englishreader.ui.component.InteractiveTextLongPressTarget
+import io.github.zoot.englishreader.ui.component.ContextMeaningDialog
+import io.github.zoot.englishreader.model.ContextWordSelection
+import io.github.zoot.englishreader.data.entity.ContextCardEntity
+import io.github.zoot.englishreader.viewmodel.ContextSaveFeedback
 import io.github.zoot.englishreader.ui.component.SentenceActionAnchor
 import io.github.zoot.englishreader.ui.component.SentenceActionPopup
 import io.github.zoot.englishreader.ui.component.SentencePopupMode
@@ -143,7 +147,8 @@ fun ReadingScreen(
     val isLoadingDefinition by viewModel.isLoadingDefinition.collectAsStateWithLifecycle()
     val isLoadingAudio by viewModel.isLoadingAudio.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoadingArticle.collectAsStateWithLifecycle()
-    val vocabularyWords by viewModel.vocabularyWords.collectAsStateWithLifecycle()
+    val contextCardSaved by viewModel.contextCardSaved.collectAsStateWithLifecycle()
+    val contextMeaningDraft by viewModel.contextMeaningDraft.collectAsStateWithLifecycle()
     val fontSizeOption by viewModel.fontSizeOption.collectAsStateWithLifecycle()
     val themeOption by viewModel.themeOption.collectAsStateWithLifecycle()
     val aiSheetState by viewModel.aiSheetState.collectAsStateWithLifecycle()
@@ -152,6 +157,7 @@ fun ReadingScreen(
     val pendingPositionTarget by viewModel.pendingPositionTarget.collectAsStateWithLifecycle()
     val highlightedParagraph by viewModel.highlightedParagraph.collectAsStateWithLifecycle()
     val highlightedExcerpt by viewModel.highlightedExcerpt.collectAsStateWithLifecycle()
+    val highlightedContextCard by viewModel.highlightedContextCard.collectAsStateWithLifecycle()
     val readingMode by viewModel.readingMode.collectAsStateWithLifecycle()
     val ttsState by viewModel.readingTtsState.collectAsStateWithLifecycle()
     val voiceSettings by viewModel.voiceSettings.collectAsStateWithLifecycle()
@@ -231,6 +237,17 @@ fun ReadingScreen(
         }
     }
 
+    LaunchedEffect(viewModel) {
+        viewModel.contextSaved.collect { result ->
+            snackbarHostState.showSnackbar(context.getString(when (result) {
+                ContextSaveFeedback.SAVED -> R.string.context_saved
+                ContextSaveFeedback.ALREADY_EXISTS -> R.string.context_already_saved
+                ContextSaveFeedback.SOURCE_CHANGED -> R.string.context_selection_unavailable
+                ContextSaveFeedback.FAILED -> R.string.context_save_failed
+            }))
+        }
+    }
+
     LaunchedEffect(Unit) {
         viewModel.definitionError.collect { errorType ->
             val message = when (errorType) {
@@ -263,6 +280,7 @@ fun ReadingScreen(
                 ReadingError.LOAD_VOCABULARY -> R.string.reading_vocabulary_load_failed
                 ReadingError.CANCEL_TRANSLATION -> R.string.whole_translation_cancel_failed
                 ReadingError.EXCERPT_SOURCE_UNAVAILABLE -> R.string.excerpt_source_unavailable
+                ReadingError.CONTEXT_SOURCE_UNAVAILABLE -> R.string.context_source_unavailable
             }))
         }
     }
@@ -347,7 +365,7 @@ fun ReadingScreen(
                 onDismiss = { ttsFailure = null; viewModel.stopAudio() }
             )
         }
-        wordDefinition?.let { definition ->
+        wordDefinition?.takeIf { contextMeaningDraft == null }?.let { definition ->
             WordDetailsBottomSheet(
                 word = definition.word,
                 phonetic = definition.phonetic,
@@ -356,13 +374,32 @@ fun ReadingScreen(
                 inflectedForm = definition.inflectedForm,
                 alternates = definition.alternates,
                 onDismiss = { viewModel.clearWordDefinition() },
-                onAddToVocabulary = { form -> viewModel.saveVocabulary(form) },
+                onAddToVocabulary = viewModel::requestContextMeaning,
                 onPlayAudio = {
                     viewModel.playWordAudio(definition.inflectedForm ?: definition.word, definition.audioUrl)
                 },
                 isLoadingAudio = isLoadingAudio,
-                isInVocabulary = { form -> vocabularyWords.contains(WordLookupKey.normalize(form)) },
+                isInVocabulary = { contextCardSaved },
                 onVisibleTopChanged = { top -> wordSheetTopOnScreen = top }
+            )
+        }
+
+        contextMeaningDraft?.let { draft ->
+            val selection = draft.selection
+            val start = selection.wordStartOffset - selection.sentence.startOffset
+            val end = selection.wordEndOffset - selection.sentence.startOffset
+            ContextMeaningDialog(
+                word = selection.sentence.text.substring(start, end),
+                sentence = selection.sentence.text,
+                targetStart = start,
+                targetEnd = end,
+                choices = draft.choices,
+                value = draft.meaning,
+                saving = draft.saving,
+                editing = false,
+                onValueChange = viewModel::updateContextMeaning,
+                onConfirm = viewModel::confirmContextMeaning,
+                onDismiss = viewModel::dismissContextMeaning
             )
         }
 
@@ -395,8 +432,8 @@ fun ReadingScreen(
             },
             onSentenceSelected = viewModel::selectSentence,
             onWordLongPress = viewModel::lookupWord,
-            onWordPressStart = viewModel::beginWordSelection,
-            onWordPressRelease = viewModel::lookupWord,
+            onContextWordPressStart = viewModel::beginContextWordSelection,
+            onContextWordPressRelease = viewModel::lookupContextWord,
             onClearSelection = viewModel::clearSelection,
             // 保留给 TalkBack 的句子动作；指针长按已专用于查词。
             onSentenceAccessibilityTarget = { _, target ->
@@ -427,6 +464,7 @@ fun ReadingScreen(
             onPositionTargetConsumed = viewModel::consumePositionTarget,
             highlightedParagraph = highlightedParagraph,
             highlightedExcerpt = highlightedExcerpt,
+            highlightedContextCard = highlightedContextCard,
             onSaveExcerpt = viewModel::saveExcerpt,
             onSaveReadingPosition = { position -> viewModel.saveReadingPosition(position, renderedContent, renderedPublication) },
             ttsState = ttsState,
@@ -516,7 +554,10 @@ fun ReadingScreenContent(
     appliedLayout: AppliedTranslationLayout? = null,
     onReadingPositionChanged: (ReadingPosition) -> Unit = {},
     onSaveExcerpt: ((ArticleEntity, Int, ExcerptRange) -> Unit)? = null,
-    highlightedExcerpt: ExcerptEntity? = null
+    highlightedExcerpt: ExcerptEntity? = null,
+    highlightedContextCard: ContextCardEntity? = null,
+    onContextWordPressStart: ((ContextWordSelection) -> Unit)? = null,
+    onContextWordPressRelease: ((ContextWordSelection) -> Unit)? = null
 ) {
     val hasTranslation = !article?.translation.isNullOrBlank()
     val currentSelection = selectedSentence?.takeIf { it.articleId == article?.id }
@@ -860,7 +901,7 @@ fun ReadingScreenContent(
                                 // 与高亮色相乘，所以这里不需要知道高亮色是什么。
                                 // 用动画而非布尔：到期熄灭时是渐隐，硬切会像页面闪了一下。
                                 val paragraphHighlight by animateFloatAsState(
-                                    targetValue = if (paragraphIndex == highlightedParagraph && highlightedExcerpt == null) 1f else 0f,
+                                    targetValue = if (paragraphIndex == highlightedParagraph && highlightedExcerpt == null && highlightedContextCard == null) 1f else 0f,
                                     label = "paragraph-highlight"
                                 )
                                 val ownsResultPopup = popupMode != SentencePopupMode.ACTIONS &&
@@ -937,7 +978,9 @@ fun ReadingScreenContent(
                                         enabled = interactiveEnabled,
                                         excerptRange = excerptSelection?.takeIf { it.paragraphIndex == paragraphIndex }?.range
                                             ?: highlightedExcerpt?.takeIf { it.paragraphIndex == paragraphIndex }
-                                                ?.let { ExcerptRange(it.startOffset, it.endOffset) },
+                                                ?.let { ExcerptRange(it.startOffset, it.endOffset) }
+                                            ?: highlightedContextCard?.takeIf { it.paragraphIndex == paragraphIndex }
+                                                ?.let { ExcerptRange(it.sentenceStartOffset + it.targetStartOffset, it.sentenceStartOffset + it.targetEndOffset) },
                                         onExcerptDrag = if (!excerptSelectionEnabled) null else { anchor, position, finished ->
                                             val bounds = readingViewportBounds
                                             val focus = bounds?.let { excerptFocusOffset(paragraphIndex, position, it, excerptGeometries.values) }
@@ -1012,7 +1055,23 @@ fun ReadingScreenContent(
                                             onSentenceSelected(currentArticle.id, globalIndex, range)
                                         },
                                         onWordLongPress = onWordLongPress,
-                                        onWordPressStart = onWordPressStart?.let { begin ->
+                                        onWordAccessibilityTarget = onContextWordPressRelease?.let { release ->
+                                            { target ->
+                                                target.contextSelection(currentArticle, paragraphIndex)?.let { selection ->
+                                                    excerptSelection = null
+                                                    sentenceActionAnchor = null
+                                                    onDismissSentencePopup()
+                                                    wordSelectionAnchor = WordSelectionAnchor(
+                                                        paragraphIndex, selection.wordStartOffset, selection.wordEndOffset,
+                                                        target.anchorBounds, selection.wordStartOffset
+                                                    )
+                                                    wordSheetCorrectionConsumed = false
+                                                    onContextWordPressStart?.invoke(selection)
+                                                    release(selection)
+                                                }
+                                            }
+                                        },
+                                        onWordPressStart = if (onWordPressStart == null && onContextWordPressStart == null) null else {
                                             { target ->
                                                 excerptSelection = null
                                                 val word = target.word
@@ -1030,12 +1089,18 @@ fun ReadingScreenContent(
                                                     sentenceActionAnchor = null
                                                     popupMode = SentencePopupMode.ACTIONS
                                                     onDismissSentencePopup()
-                                                    begin(word)
+                                                    if (onContextWordPressStart != null) {
+                                                        target.contextSelection(currentArticle, paragraphIndex)?.let(onContextWordPressStart)
+                                                    } else onWordPressStart?.invoke(word)
                                                 }
                                             }
                                         },
-                                        onWordPressRelease = onWordPressRelease?.let { release ->
-                                            { target -> target.word?.let(release) }
+                                        onWordPressRelease = if (onWordPressRelease == null && onContextWordPressRelease == null) null else {
+                                            { target ->
+                                                if (onContextWordPressRelease != null) {
+                                                    target.contextSelection(currentArticle, paragraphIndex)?.let(onContextWordPressRelease)
+                                                } else target.word?.let { onWordPressRelease?.invoke(it) }
+                                            }
                                         },
                                         onClearSelection = {
                                             excerptSelection = null
@@ -1314,6 +1379,12 @@ internal fun AiSheetState.forSelection(selection: SelectedSentence): AiSheetStat
         snapshot.endOffset == selection.endOffset &&
         snapshot.normalizedText == selection.normalizedText
     return if (matches) this else AiSheetState.Hidden
+}
+
+private fun InteractiveTextLongPressTarget.contextSelection(article: ArticleEntity, paragraphIndex: Int): ContextWordSelection? {
+    val start = wordStartOffset ?: return null
+    val end = wordEndOffset ?: return null
+    return ContextWordSelection(article, paragraphIndex, sentenceRange, start, end)
 }
 
 private fun InteractiveTextLongPressTarget.matches(selection: SelectedSentence): Boolean =

@@ -4,6 +4,10 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import io.github.zoot.englishreader.data.dao.ContextCardDao
+import io.github.zoot.englishreader.data.entity.ContextCardEntity
+import io.github.zoot.englishreader.data.entity.ContextReviewItemEntity
+import io.github.zoot.englishreader.data.entity.ContextReviewSessionEntity
 import io.github.zoot.englishreader.data.dao.ExcerptDao
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.dao.ArticleDao
@@ -53,13 +57,17 @@ import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
         TranslationTaskArticleEntity::class,
         TranslationSegmentEntity::class,
         ArticleTranslationStateEntity::class,
-        ExcerptEntity::class
+        ExcerptEntity::class,
+        ContextCardEntity::class,
+        ContextReviewSessionEntity::class,
+        ContextReviewItemEntity::class
     ],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 abstract class EnglishReaderDatabase : RoomDatabase() {
 
+    abstract fun contextCardDao(): ContextCardDao
     abstract fun excerptDao(): ExcerptDao
     abstract fun articleDao(): ArticleDao
     abstract fun vocabularyDao(): VocabularyDao
@@ -91,7 +99,8 @@ abstract class EnglishReaderDatabase : RoomDatabase() {
                     MIGRATION_4_5,
                     MIGRATION_5_6,
                     MIGRATION_6_7,
-                    MIGRATION_7_8
+                    MIGRATION_7_8,
+                    MIGRATION_8_9
                 )
                 .build()
         }

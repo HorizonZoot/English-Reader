@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
 import io.github.zoot.englishreader.data.audio.WordAudioUrl
+import io.github.zoot.englishreader.data.entity.ContextCardEntity
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.repository.ExcerptRepository
@@ -40,6 +41,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.time.Instant
 import java.util.TimeZone
 import javax.inject.Inject
 
@@ -162,6 +164,108 @@ class VocabularyViewModel @Inject constructor(
     val expandedGroups: StateFlow<Set<VocabularyGroupId>> = _expandedGroups.asStateFlow()
 
     private val groupingTime = MutableStateFlow(VocabularyGroupingTime.current())
+    private val contextRefresh = MutableStateFlow(0)
+    private val _contextEditor = MutableStateFlow<ContextMeaningEdit?>(null)
+    val contextEditor = _contextEditor.asStateFlow()
+    private val contextDeletesInFlight = mutableSetOf<Long>()
+    private var contextSourceRequest: Job? = null
+    private val _contextToOpen = MutableSharedFlow<ContextCardEntity>()
+    val contextToOpen = _contextToOpen.asSharedFlow()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val contextLibrary = contextRefresh.flatMapLatest {
+        combine(vocabularyRepository.observeContextCards(), vocabularyRepository.observeContextReview()) { cards, round ->
+            ContextLibraryState(cards = cards, round = round, loading = false)
+        }.onStart { emit(ContextLibraryState()) }
+            .catch { error ->
+                if (error is CancellationException) throw error
+                emit(ContextLibraryState(loading = false, failed = true))
+            }
+    }.combine(groupingTime) { library, time ->
+        library.copy(today = Instant.ofEpochMilli(time.nowMillis).atZone(time.zoneId).toLocalDate().toEpochDay())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIPTION_TIMEOUT_MS), ContextLibraryState())
+
+    fun retryContextLibrary() { contextRefresh.value++ }
+
+    fun editContextMeaning(card: ContextCardEntity) {
+        _contextEditor.value = ContextMeaningEdit(card, card.meaning)
+    }
+
+    fun updateContextMeaning(meaning: String) {
+        _contextEditor.value?.takeUnless { it.saving }?.let { _contextEditor.value = it.copy(meaning = meaning) }
+    }
+
+    fun dismissContextEditor() {
+        if (_contextEditor.value?.saving != true) _contextEditor.value = null
+    }
+
+    fun confirmContextMeaning() {
+        val edit = _contextEditor.value?.takeUnless { it.saving || it.meaning.isBlank() } ?: return
+        _contextEditor.value = edit.copy(saving = true)
+        viewModelScope.launch {
+            try {
+                val saved = vocabularyRepository.editContextMeaning(edit.card, edit.meaning)
+                currentCoroutineContext().ensureActive()
+                if (_contextEditor.value?.requestId != edit.requestId) return@launch
+                if (saved) {
+                    _contextEditor.value = null
+                    _uiEvent.send(VocabularyUiEvent.ContextMeaningSaved)
+                } else {
+                    _contextEditor.value = edit
+                    _uiEvent.send(VocabularyUiEvent.ContextCardChanged)
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (_contextEditor.value?.requestId == edit.requestId) {
+                    _contextEditor.value = edit
+                    _uiEvent.send(VocabularyUiEvent.ContextSaveFailed)
+                }
+            } finally {
+                _contextEditor.value?.takeIf { it.requestId == edit.requestId && it.saving }?.let {
+                    _contextEditor.value = it.copy(saving = false)
+                }
+            }
+        }
+    }
+
+    fun deleteContextCard(card: ContextCardEntity) {
+        if (!contextDeletesInFlight.add(card.id)) return
+        if (_contextEditor.value?.card?.id == card.id) _contextEditor.value = null
+        viewModelScope.launch {
+            try {
+                if (vocabularyRepository.deleteContextCard(card.id)) _uiEvent.send(VocabularyUiEvent.ContextDeleted)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                _uiEvent.send(VocabularyUiEvent.ContextDeleteFailed)
+            } finally {
+                contextDeletesInFlight.remove(card.id)
+            }
+        }
+    }
+
+    fun cancelContextNavigation() {
+        contextSourceRequest?.cancel()
+        contextSourceRequest = null
+    }
+
+    fun openContextSource(card: ContextCardEntity) {
+        stopAudio()
+        cancelContextNavigation()
+        contextSourceRequest = viewModelScope.launch {
+            try {
+                val available = vocabularyRepository.hasContextSource(card)
+                currentCoroutineContext().ensureActive()
+                if (available) _contextToOpen.emit(card)
+                else _uiEvent.send(VocabularyUiEvent.ContextSourceUnavailable)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                _uiEvent.send(VocabularyUiEvent.ContextSourceUnavailable)
+            }
+        }
+    }
 
     fun updateGroupingTime(time: VocabularyGroupingTime) {
         groupingTime.value = time

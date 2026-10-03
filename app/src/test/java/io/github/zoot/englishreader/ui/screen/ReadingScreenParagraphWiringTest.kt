@@ -6,9 +6,12 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
+import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.core.SentenceRange
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.local.FontSizeOption
+import io.github.zoot.englishreader.model.ContextWordSelection
 import io.github.zoot.englishreader.model.SelectedSentence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -16,6 +19,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
@@ -103,22 +107,88 @@ class ReadingScreenParagraphWiringTest {
         }
     }
 
-    private fun renderArticle(onSentenceSelected: (Int, SentenceRange) -> Unit) {
+    @Test
+    fun contextWordAction_secondOccurrenceInLaterParagraph_reportsExactSourceToBothCallbacks() {
+        val sourceArticle = article.copy(
+            content = "Intro.\n\nBefore. Their lives shape lives."
+        )
+        val callbacks = mutableListOf<Pair<String, ContextWordSelection>>()
+        renderArticle(
+            sourceArticle = sourceArticle,
+            onContextWordPressStart = { callbacks.add("begin" to it) },
+            onContextWordPressRelease = { callbacks.add("release" to it) }
+        )
+
+        val label = RuntimeEnvironment.getApplication().getString(R.string.context_word_accessibility, "lives", 27)
+        performParagraphAction(paragraph = 1, label = label)
+
+        composeRule.runOnIdle {
+            val expected = ContextWordSelection(
+                article = sourceArticle,
+                paragraphIndex = 1,
+                sentence = SentenceRange(1, "Their lives shape lives.", 8, 32),
+                wordStartOffset = 26,
+                wordEndOffset = 31
+            )
+            assertEquals(listOf("begin" to expected, "release" to expected), callbacks)
+        }
+    }
+
+    @Test
+    fun contextWordAction_bilingualDisplay_preservesOriginalSentenceAndWordOffsets() {
+        val translation = "先前的一句。他们的生活塑造其他人的生活。"
+        val sourceArticle = article.copy(
+            content = "Before. Their lives shape lives.",
+            translation = translation
+        )
+        val callbacks = mutableListOf<Pair<String, ContextWordSelection>>()
+        renderArticle(
+            sourceArticle = sourceArticle,
+            showTranslation = true,
+            onContextWordPressStart = { callbacks.add("begin" to it) },
+            onContextWordPressRelease = { callbacks.add("release" to it) }
+        )
+        composeRule.onNodeWithText(translation).assertExists()
+
+        val label = RuntimeEnvironment.getApplication().getString(R.string.context_word_accessibility, "lives", 27)
+        performParagraphAction(paragraph = 0, label = label)
+
+        composeRule.runOnIdle {
+            val expected = ContextWordSelection(
+                article = sourceArticle,
+                paragraphIndex = 0,
+                sentence = SentenceRange(1, "Their lives shape lives.", 8, 32),
+                wordStartOffset = 26,
+                wordEndOffset = 31
+            )
+            assertEquals(listOf("begin" to expected, "release" to expected), callbacks)
+        }
+    }
+
+    private fun renderArticle(
+        sourceArticle: ArticleEntity = article,
+        showTranslation: Boolean = false,
+        onContextWordPressStart: ((ContextWordSelection) -> Unit)? = null,
+        onContextWordPressRelease: ((ContextWordSelection) -> Unit)? = null,
+        onSentenceSelected: (Int, SentenceRange) -> Unit = { _, _ -> }
+    ) {
         composeRule.setContent {
             ReadingScreenContent(
-                article = article,
+                article = sourceArticle,
                 selectedSentence = null as SelectedSentence?,
                 selectedWord = null,
                 isLoadingDefinition = false,
                 isLoading = false,
                 fontSizeOption = FontSizeOption.DEFAULT,
-                showTranslation = false,
+                showTranslation = showTranslation,
                 snackbarHostState = remember { SnackbarHostState() },
                 onToggleTranslation = {},
                 onBack = {},
                 onExplainSentence = {},
                 onSentenceSelected = { _, index, range -> onSentenceSelected(index, range) },
                 onWordLongPress = {},
+                onContextWordPressStart = onContextWordPressStart,
+                onContextWordPressRelease = onContextWordPressRelease,
                 onClearSelection = {}
             )
         }

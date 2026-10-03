@@ -28,6 +28,8 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
+import io.github.zoot.englishreader.viewmodel.ContextLibraryState
+import io.github.zoot.englishreader.viewmodel.ContextMeaningEdit
 import io.github.zoot.englishreader.viewmodel.VocabularyUiEvent
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
 import io.mockk.every
@@ -84,6 +86,9 @@ class VocabularyScreenTest {
         every { model.excerpts } returns excerptsState
         every { model.excerptPlayback } returns excerptPlaybackState
         every { model.excerptToOpen } returns excerptToOpen
+        every { model.contextLibrary } returns MutableStateFlow(ContextLibraryState(loading = false))
+        every { model.contextEditor } returns MutableStateFlow<ContextMeaningEdit?>(null)
+        every { model.contextToOpen } returns MutableSharedFlow()
     }
 
     @Test
@@ -154,6 +159,7 @@ class VocabularyScreenTest {
         composeRule.onNodeWithText(
             string(R.string.vocabulary_source_article, "The Future of AI")
         ).assertIsDisplayed()
+        composeRule.runOnIdle { events.clear() }
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performClick()
 
         // 词一并带过去：阅读页要靠它滚动到并高亮该词所在的段落。
@@ -460,6 +466,7 @@ class VocabularyScreenTest {
                 )
             }
         }
+        composeRule.onNodeWithText(string(R.string.context_legacy_words)).performClick()
     }
 
     private fun string(resourceId: Int, vararg args: Any): String =

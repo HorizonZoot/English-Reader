@@ -55,6 +55,7 @@ import io.github.zoot.englishreader.model.TtsSystemAction
 import io.github.zoot.englishreader.ui.screen.ArticleListScreen
 import io.github.zoot.englishreader.ui.screen.ArticleEditorScreen
 import io.github.zoot.englishreader.ui.screen.AiProfileConfigScreen
+import io.github.zoot.englishreader.ui.screen.ContextReviewScreen
 import io.github.zoot.englishreader.ui.screen.BookTocScreen
 import io.github.zoot.englishreader.ui.screen.OnboardingGate
 import io.github.zoot.englishreader.ui.navigation.ONBOARDING_REPLAY_ROUTE
@@ -414,14 +415,15 @@ fun EnglishReaderNavigation() {
         composable(
             // word 是可选的：文章列表/目录/翻页进来时不带它，只有生词本「查看原文」才带，
             // 阅读页据此滚动到该词所在段落并临时点亮。
-            route = "reading/{articleId}?word={word}&excerptId={excerptId}",
+            route = "reading/{articleId}?word={word}&excerptId={excerptId}&contextCardId={contextCardId}",
             arguments = listOf(
                 navArgument("articleId") { type = NavType.LongType },
                 navArgument("word") {
                     type = NavType.StringType
                     defaultValue = ""
                 },
-                navArgument("excerptId") { type = NavType.LongType; defaultValue = 0L }
+                navArgument("excerptId") { type = NavType.LongType; defaultValue = 0L },
+                navArgument("contextCardId") { type = NavType.LongType; defaultValue = 0L }
             )
         ) { backStackEntry ->
             val articleId = backStackEntry.arguments?.getLong("articleId") ?: 0L
@@ -462,6 +464,21 @@ fun EnglishReaderNavigation() {
                 },
                 onOpenExcerpt = { articleId, excerptId ->
                     navController.navigate("reading/$articleId?excerptId=$excerptId")
+                },
+                onStartContextReview = {
+                    navController.navigate("context-review") { launchSingleTop = true }
+                },
+                onOpenContext = { articleId, contextCardId ->
+                    navController.navigate("reading/$articleId?contextCardId=$contextCardId")
+                }
+            )
+        }
+
+        composable("context-review") {
+            ContextReviewScreen(
+                onBack = { navController.popBackStack() },
+                onOpenContext = { articleId, contextCardId ->
+                    navController.navigate("reading/$articleId?contextCardId=$contextCardId")
                 }
             )
         }

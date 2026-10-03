@@ -12,6 +12,12 @@ import io.github.zoot.englishreader.data.entity.VocabularyEntity
  * 而在一个 collector 里顺序 `showSnackbar` 天然串行。
  */
 sealed interface VocabularyUiEvent {
+    data object ContextMeaningSaved : VocabularyUiEvent
+    data object ContextCardChanged : VocabularyUiEvent
+    data object ContextSaveFailed : VocabularyUiEvent
+    data object ContextDeleted : VocabularyUiEvent
+    data object ContextDeleteFailed : VocabularyUiEvent
+    data object ContextSourceUnavailable : VocabularyUiEvent
     data class ExcerptDeleted(val excerpt: ExcerptEntity) : VocabularyUiEvent
     data object ExcerptLoadFailed : VocabularyUiEvent
     data object ExcerptDeleteFailed : VocabularyUiEvent

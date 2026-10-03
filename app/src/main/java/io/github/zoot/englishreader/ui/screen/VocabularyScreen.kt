@@ -19,7 +19,9 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import io.github.zoot.englishreader.ui.component.ContextMeaningDialog
 import io.github.zoot.englishreader.ui.component.messageRes
+import io.github.zoot.englishreader.ui.screen.vocabulary.ContextCardsContent
 import io.github.zoot.englishreader.ui.screen.vocabulary.ExcerptsContent
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -79,12 +81,18 @@ private val SegmentInset = 2.dp
 fun VocabularyScreen(
     onOpenArticle: (articleId: Long, word: String) -> Unit,
     viewModel: VocabularyViewModel = hiltViewModel(),
-    onOpenExcerpt: (articleId: Long, excerptId: Long) -> Unit = { _, _ -> }
+    onOpenExcerpt: (articleId: Long, excerptId: Long) -> Unit = { _, _ -> },
+    onStartContextReview: () -> Unit = {},
+    onOpenContext: ((articleId: Long, contextCardId: Long) -> Unit)? = null
 ) = ArticleUiTheme {
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val excerptPlayback by viewModel.excerptPlayback.collectAsStateWithLifecycle()
     val excerpts by viewModel.excerpts.collectAsStateWithLifecycle()
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var showContextCards by rememberSaveable { mutableStateOf(true) }
+    val contextLibrary by viewModel.contextLibrary.collectAsStateWithLifecycle()
+    val contextEditor by viewModel.contextEditor.collectAsStateWithLifecycle()
+    val openContext by rememberUpdatedState(onOpenContext)
     val openExcerpt by rememberUpdatedState(onOpenExcerpt)
     val details by viewModel.details.collectAsStateWithLifecycle()
     val groupType by viewModel.groupType.collectAsStateWithLifecycle()
@@ -105,6 +113,7 @@ fun VocabularyScreen(
             if (event == Lifecycle.Event.ON_PAUSE) {
                 viewModel.stopAudio()
                 viewModel.cancelExcerptNavigation()
+                viewModel.cancelContextNavigation()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -112,6 +121,7 @@ fun VocabularyScreen(
             lifecycleOwner.lifecycle.removeObserver(observer)
             viewModel.stopAudio()
             viewModel.cancelExcerptNavigation()
+            viewModel.cancelContextNavigation()
         }
     }
     LaunchedEffect(viewModel, lifecycleOwner, selectedTab) {
@@ -124,11 +134,27 @@ fun VocabularyScreen(
         }
     }
 
+    LaunchedEffect(viewModel, lifecycleOwner, selectedTab, showContextCards) {
+        if (selectedTab == 0 && showContextCards) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                viewModel.contextToOpen.collect { card ->
+                    card.articleId?.let { openContext?.invoke(it, card.id) }
+                }
+            }
+        }
+    }
+
     // 单一 collector 顺序消费所有一次性事件：showSnackbar 挂起到消息消失，
     // 因此连续事件天然串行，不会互相抢占 Snackbar 宿主。
     LaunchedEffect(viewModel) {
         viewModel.uiEvent.collect { event ->
             when (event) {
+                VocabularyUiEvent.ContextMeaningSaved -> snackbarHostState.showSnackbar(context.getString(R.string.context_meaning_saved))
+                VocabularyUiEvent.ContextCardChanged -> snackbarHostState.showSnackbar(context.getString(R.string.context_card_changed))
+                VocabularyUiEvent.ContextSaveFailed -> snackbarHostState.showSnackbar(context.getString(R.string.context_save_failed))
+                VocabularyUiEvent.ContextDeleted -> snackbarHostState.showSnackbar(context.getString(R.string.context_deleted))
+                VocabularyUiEvent.ContextDeleteFailed -> snackbarHostState.showSnackbar(context.getString(R.string.context_delete_failed))
+                VocabularyUiEvent.ContextSourceUnavailable -> snackbarHostState.showSnackbar(context.getString(R.string.context_source_unavailable))
                 is VocabularyUiEvent.ExcerptDeleted -> {
                     val result = snackbarHostState.showSnackbar(
                         context.getString(R.string.excerpt_deleted),
@@ -181,8 +207,15 @@ fun VocabularyScreen(
                 groupType = groupType,
                 onTypeSelected = viewModel::switchGroupType,
                 selectedTab = selectedTab,
+                showContextCards = showContextCards,
+                onContextSelected = {
+                    viewModel.cancelContextNavigation()
+                    viewModel.stopAudio()
+                    showContextCards = it
+                },
                 onTabSelected = {
                     viewModel.cancelExcerptNavigation()
+                    viewModel.cancelContextNavigation()
                     selectedTab = it
                     viewModel.stopAudio()
                 }
@@ -203,6 +236,15 @@ fun VocabularyScreen(
                     onDelete = viewModel::deleteExcerpt,
                     playback = excerptPlayback,
                     onTogglePlayback = viewModel::toggleExcerptPlayback
+                )
+            } else if (showContextCards) {
+                ContextCardsContent(
+                    contextLibrary,
+                    onReview = onStartContextReview,
+                    onEdit = viewModel::editContextMeaning,
+                    onDelete = viewModel::deleteContextCard,
+                    onRetry = viewModel::retryContextLibrary,
+                    onOpenSource = if (onOpenContext != null) viewModel::openContextSource else null
                 )
             } else if (groups.isEmpty()) {
                 VocabularyEmptyState()
@@ -253,6 +295,21 @@ fun VocabularyScreen(
             }
         }
     }
+    contextEditor?.let { edit ->
+        ContextMeaningDialog(
+            word = edit.card.word,
+            sentence = edit.card.sentence,
+            targetStart = edit.card.targetStartOffset,
+            targetEnd = edit.card.targetEndOffset,
+            choices = emptyList(),
+            value = edit.meaning,
+            saving = edit.saving,
+            editing = true,
+            onValueChange = viewModel::updateContextMeaning,
+            onConfirm = viewModel::confirmContextMeaning,
+            onDismiss = viewModel::dismissContextEditor
+        )
+    }
 }
 
 /**
@@ -267,6 +324,8 @@ private fun VocabularyHeader(
     groupType: GroupType,
     onTypeSelected: (GroupType) -> Unit,
     selectedTab: Int,
+    showContextCards: Boolean,
+    onContextSelected: (Boolean) -> Unit,
     onTabSelected: (Int) -> Unit
 ) {
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
@@ -294,7 +353,23 @@ private fun VocabularyHeader(
                         text = { Text(stringResource(label)) })
                 }
             }
-            if (selectedTab == 0 && wordCount > 0) {
+            if (selectedTab == 0) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = showContextCards,
+                        onClick = { onContextSelected(true) },
+                        label = { Text(stringResource(R.string.context_cards_title)) },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                    )
+                    FilterChip(
+                        selected = !showContextCards,
+                        onClick = { onContextSelected(false) },
+                        label = { Text(stringResource(R.string.context_legacy_words)) },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                    )
+                }
+            }
+            if (selectedTab == 0 && !showContextCards && wordCount > 0) {
                 Text(
                     text = stringResource(R.string.vocabulary_total_count, wordCount),
                     style = MaterialTheme.typography.bodyLarge,

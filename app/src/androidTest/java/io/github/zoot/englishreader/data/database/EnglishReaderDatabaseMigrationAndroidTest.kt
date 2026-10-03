@@ -32,13 +32,14 @@ class EnglishReaderDatabaseMigrationAndroidTest {
         migrationHelper.createDatabase(TEST_DATABASE_NAME, 3).close()
         migrationHelper.runMigrationsAndValidate(
             TEST_DATABASE_NAME,
-            8,
+            9,
             true,
             MIGRATION_3_4,
             MIGRATION_4_5,
             MIGRATION_5_6,
             MIGRATION_6_7,
-            MIGRATION_7_8
+            MIGRATION_7_8,
+            MIGRATION_8_9
         ).close()
     }
 
@@ -565,6 +566,48 @@ class EnglishReaderDatabaseMigrationAndroidTest {
                 assertEquals(10L, cursor.getLong(1))
                 assertEquals("Kept", cursor.getString(2))
                 assertEquals("Alpha", cursor.getString(3))
+            }
+        }
+        db.close()
+    }
+
+    @Test
+    fun migration8To9_preservesLegacySnapshotsAndStartsWithNoContextCards() {
+        migrationHelper.createDatabase(TEST_DATABASE_NAME, 8).apply {
+            execSQL("INSERT INTO articles (id, title, content, translation, createdAt) VALUES (10, 'Kept', 'The bank is quiet.', 'YiWen', 100)")
+            execSQL("INSERT INTO vocabulary (id, word, articleId, createdAt, definitions) VALUES (1, 'bank', 10, 100, 'legacy definition')")
+            execSQL("INSERT INTO excerpts (id, articleId, originArticleId, sourceTitle, contentFingerprint, paragraphIndex, startOffset, endOffset, text, createdAt) VALUES (1, 10, 10, 'Kept', 'fp', 0, 0, 18, 'The bank is quiet.', 100)")
+            execSQL("INSERT INTO reading_positions (articleId, paragraphIndex, textKind, characterOffset, updatedAt) VALUES (10, 0, 'ORIGINAL', 4, 200)")
+            execSQL("INSERT INTO explanation_cache (cacheKey, explanation, createdAt) VALUES ('k1', 'paid explanation', 100)")
+            close()
+        }
+        val db = migrationHelper.runMigrationsAndValidate(TEST_DATABASE_NAME, 9, true, MIGRATION_8_9)
+        db.query("SELECT title, content, translation FROM articles WHERE id = 10").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("Kept", cursor.getString(0))
+            assertEquals("The bank is quiet.", cursor.getString(1))
+            assertEquals("YiWen", cursor.getString(2))
+        }
+        db.query("SELECT definitions FROM vocabulary WHERE id = 1").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("legacy definition", cursor.getString(0))
+        }
+        db.query("SELECT text FROM excerpts WHERE id = 1").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("The bank is quiet.", cursor.getString(0))
+        }
+        db.query("SELECT characterOffset FROM reading_positions WHERE articleId = 10").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(4, cursor.getInt(0))
+        }
+        db.query("SELECT explanation FROM explanation_cache WHERE cacheKey = 'k1'").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals("paid explanation", cursor.getString(0))
+        }
+        for (table in listOf("context_cards", "context_review_session", "context_review_items")) {
+            db.query("SELECT COUNT(*) FROM $table").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(0, cursor.getInt(0))
             }
         }
         db.close()

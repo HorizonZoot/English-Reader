@@ -6,6 +6,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
+import io.github.zoot.englishreader.data.entity.ContextCardEntity
+import io.github.zoot.englishreader.model.ContextCardSaveResult
+import io.github.zoot.englishreader.model.ContextMeaningDraft
+import io.github.zoot.englishreader.model.ContextWordSelection
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.ai.AiExplanationInput
 import io.github.zoot.englishreader.data.local.ReadingMode
@@ -88,6 +92,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
+import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -156,8 +161,9 @@ enum class VocabularySaveResult {
 }
 
 enum class ExcerptSaveFeedback { SAVED, ALREADY_EXISTS, SOURCE_CHANGED, FAILED }
+enum class ContextSaveFeedback { SAVED, ALREADY_EXISTS, SOURCE_CHANGED, FAILED }
 
-enum class ReadingError { LOAD, SAVE_POSITION, SAVE_PREFERENCE, LOAD_VOCABULARY, CANCEL_TRANSLATION, EXCERPT_SOURCE_UNAVAILABLE }
+enum class ReadingError { LOAD, SAVE_POSITION, SAVE_PREFERENCE, LOAD_VOCABULARY, CANCEL_TRANSLATION, EXCERPT_SOURCE_UNAVAILABLE, CONTEXT_SOURCE_UNAVAILABLE }
 
 /** 当前文章在书中的导航位置；独立文章没有章节上下文。 */
 
@@ -346,6 +352,115 @@ class ReadingViewModel @Inject constructor(
     private val _selectedWord = MutableStateFlow<String?>(null)
     val selectedWord: StateFlow<String?> = _selectedWord.asStateFlow()
 
+    private var contextSelection: ContextWordSelection? = null
+    private var contextSelectionGeneration = 0L
+    private val _contextCardSaved = MutableStateFlow(false)
+    val contextCardSaved = _contextCardSaved.asStateFlow()
+    private val _contextMeaningDraft = MutableStateFlow<ContextMeaningDraft?>(null)
+    val contextMeaningDraft = _contextMeaningDraft.asStateFlow()
+    private val _contextSaved = Channel<ContextSaveFeedback>(Channel.BUFFERED)
+    val contextSaved = _contextSaved.receiveAsFlow()
+
+    fun beginContextWordSelection(selection: ContextWordSelection) {
+        if (!isCurrentContextSource(selection)) return
+        val word = selection.sentence.text.substring(
+            selection.wordStartOffset - selection.sentence.startOffset,
+            selection.wordEndOffset - selection.sentence.startOffset
+        )
+        beginWordSelection(word)
+        contextSelection = selection
+        val generation = contextSelectionGeneration
+        viewModelScope.launch {
+            try {
+                val saved = vocabularyRepository.findContextCard(selection) != null
+                if (generation == contextSelectionGeneration && isCurrentContextSource(selection)) {
+                    _contextCardSaved.value = _contextCardSaved.value || saved
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == contextSelectionGeneration) _readingErrors.trySend(ReadingError.LOAD_VOCABULARY)
+            }
+        }
+    }
+
+    fun lookupContextWord(selection: ContextWordSelection) {
+        if (!isCurrentContextSource(selection)) return
+        if (contextSelection != selection) beginContextWordSelection(selection)
+        lookupWordDefinition(selection.sentence.text.substring(
+            selection.wordStartOffset - selection.sentence.startOffset,
+            selection.wordEndOffset - selection.sentence.startOffset
+        ))
+    }
+
+    private fun isCurrentContextSource(selection: ContextWordSelection): Boolean =
+        !_isLoadingArticle.value && selection.article.id == requestedArticleId &&
+            selection.article.id == _article.value?.id && selection.article.content == _article.value?.content &&
+            VocabularyRepository.isValidSelection(selection)
+
+    fun requestContextMeaning(dictionaryWord: String) {
+        val selection = contextSelection ?: return
+        if (!isCurrentContextSource(selection) || _contextMeaningDraft.value != null) return
+        if (_contextCardSaved.value) {
+            _contextSaved.trySend(ContextSaveFeedback.ALREADY_EXISTS)
+            return
+        }
+        val definition = _wordDefinition.value
+        val choices = if (definition?.word == dictionaryWord) {
+            definition.chineseDefinitions + definition.englishDefinitions
+        } else {
+            definition?.alternates?.firstOrNull { it.word == dictionaryWord }?.let {
+                it.chineseDefinitions + it.englishDefinitions
+            }.orEmpty()
+        }
+        _contextMeaningDraft.value = ContextMeaningDraft(
+            UUID.randomUUID().toString(), selection, dictionaryWord,
+            choices.map(String::trim).filter(String::isNotEmpty).distinct()
+        )
+    }
+
+    fun updateContextMeaning(meaning: String) {
+        val draft = _contextMeaningDraft.value ?: return
+        if (!draft.saving) _contextMeaningDraft.value = draft.copy(meaning = meaning)
+    }
+
+    fun dismissContextMeaning() {
+        if (_contextMeaningDraft.value?.saving != true) _contextMeaningDraft.value = null
+    }
+
+    fun confirmContextMeaning() {
+        val draft = _contextMeaningDraft.value ?: return
+        if (draft.saving || draft.meaning.isBlank() || !isCurrentContextSource(draft.selection)) return
+        _contextMeaningDraft.value = draft.copy(saving = true)
+        val generation = contextSelectionGeneration
+        viewModelScope.launch {
+            try {
+                val feedback = when (vocabularyRepository.saveContextCard(draft.selection, draft.dictionaryWord, draft.meaning)) {
+                    ContextCardSaveResult.SAVED -> ContextSaveFeedback.SAVED
+                    ContextCardSaveResult.ALREADY_EXISTS -> ContextSaveFeedback.ALREADY_EXISTS
+                    ContextCardSaveResult.SOURCE_CHANGED -> ContextSaveFeedback.SOURCE_CHANGED
+                    ContextCardSaveResult.INVALID_MEANING -> ContextSaveFeedback.FAILED
+                }
+                if (generation != contextSelectionGeneration || _contextMeaningDraft.value?.id != draft.id) return@launch
+                if (feedback == ContextSaveFeedback.SAVED || feedback == ContextSaveFeedback.ALREADY_EXISTS) {
+                    _contextCardSaved.value = true
+                    _contextMeaningDraft.value = null
+                }
+                _contextSaved.trySend(feedback)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                if (generation == contextSelectionGeneration && _contextMeaningDraft.value?.id == draft.id) {
+                    _contextSaved.trySend(ContextSaveFeedback.FAILED)
+                }
+            } finally {
+                if (_contextMeaningDraft.value?.id == draft.id) {
+                    _contextMeaningDraft.value = _contextMeaningDraft.value?.copy(saving = false)
+                }
+            }
+        }
+    }
+
     // 保存结果是 one-shot event。使用 buffered Channel 保留旋屏等 collector 空窗期间产生的
     // 结果；默认 MutableSharedFlow(replay = 0) 在没有订阅者时会直接丢弃事件。
     private val _vocabularySaved = Channel<VocabularySaveResult>(Channel.BUFFERED)
@@ -486,6 +601,11 @@ class ReadingViewModel @Inject constructor(
     /** 从生词本跳转时携带的词，由 [loadArticle] 消费一次后置空。 */
     private var pendingHighlightWord: String? = null
     private var pendingExcerptId: Long? = null
+    private var pendingContextCardId: Long? = null
+    private val sourceContextCard = MutableStateFlow<ContextCardEntity?>(null)
+    val highlightedContextCard = combine(_highlightedParagraph, sourceContextCard) { paragraph, card ->
+        card?.takeIf { it.paragraphIndex == paragraph }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     private var lookupWordJob: Job? = null
     private var wordSelectionGeneration = 0L
     private var explanationPreparationJob: Job? = null
@@ -512,6 +632,9 @@ class ReadingViewModel @Inject constructor(
         pendingHighlightWord = savedStateHandle.get<String>(READING_ROUTE_WORD)?.takeIf { it.isNotBlank() }
         if (savedStateHandle.get<Boolean>("excerpt_consumed") != true) {
             pendingExcerptId = savedStateHandle.get<Long>("excerptId")?.takeIf { it > 0 }
+        }
+        if (savedStateHandle.get<Boolean>("context_consumed") != true) {
+            pendingContextCardId = savedStateHandle.get<Long>("contextCardId")?.takeIf { it > 0 }
         }
         loadArticle(savedStateHandle.get<Long>(READING_CURRENT_ARTICLE) ?: articleId)
     }
@@ -570,7 +693,17 @@ class ReadingViewModel @Inject constructor(
                     _readingErrors.trySend(ReadingError.EXCERPT_SOURCE_UNAVAILABLE)
                 }
                 sourceExcerpt.value = excerpt?.takeIf { excerptAnchor != null }
-                val sourceAnchor = excerptAnchor ?: wordAnchor
+                val contextCardId = pendingContextCardId
+                pendingContextCardId = null
+                val contextCard = contextCardId?.let { vocabularyRepository.getContextCard(it) }
+                if (generation != articleLoadGeneration || requestedArticleId != articleId) return@launch
+                if (contextCardId != null) savedStateHandle["context_consumed"] = true
+                val contextAnchor = contextCard?.let { VocabularyRepository.contextSourceAnchor(it, articleId, loaded.content) }
+                if (contextCardId != null && contextAnchor == null) {
+                    _readingErrors.trySend(ReadingError.CONTEXT_SOURCE_UNAVAILABLE)
+                }
+                sourceContextCard.value = contextCard?.takeIf { contextAnchor != null }
+                val sourceAnchor = if (contextCardId != null) contextAnchor else excerptAnchor ?: wordAnchor
                 sourceAnchor?.let { highlightParagraph(it.paragraphIndex) }
 
                 val position = sourceAnchor?.let { ReadingPosition(articleId, it) }
@@ -763,6 +896,10 @@ class ReadingViewModel @Inject constructor(
     }
 
     private fun invalidateWordLookup() {
+        contextSelectionGeneration++
+        contextSelection = null
+        _contextMeaningDraft.value = null
+        _contextCardSaved.value = false
         wordSelectionGeneration++
         lookupWordJob?.cancel()
         lookupWordJob = null
@@ -1578,6 +1715,11 @@ class ReadingViewModel @Inject constructor(
      * 查询单词定义（离线优先）
      */
     fun lookupWord(word: String) {
+        invalidateWordLookup()
+        lookupWordDefinition(word)
+    }
+
+    private fun lookupWordDefinition(word: String) {
         val generation = ++wordSelectionGeneration
         lookupWordJob?.cancel()
         val articleId = requestedArticleId
@@ -1671,7 +1813,7 @@ class ReadingViewModel @Inject constructor(
                 } else {
                     if (isCurrentRequest()) {
                         _definitionError.trySend(DictionaryErrorType.WORD_NOT_FOUND)
-                        _selectedWord.value = null
+                        showManualContextDefinition()
                     }
                 }
             } catch (e: Exception) {
@@ -1687,7 +1829,7 @@ class ReadingViewModel @Inject constructor(
                 }
                 if (isCurrentRequest()) {
                     _definitionError.trySend(errorType)
-                    _selectedWord.value = null
+                    showManualContextDefinition()
                 }
             } finally {
                 if (isCurrentRequest()) {
@@ -1695,6 +1837,20 @@ class ReadingViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    private fun showManualContextDefinition() {
+        val selection = contextSelection
+        if (selection == null || !isCurrentContextSource(selection)) {
+            _selectedWord.value = null
+            return
+        }
+        val word = selection.sentence.text.substring(
+            selection.wordStartOffset - selection.sentence.startOffset,
+            selection.wordEndOffset - selection.sentence.startOffset
+        )
+        _wordDefinition.value = WordDefinition(word, null, emptyList(), emptyList())
+        _selectedWord.value = word.lowercase()
     }
 
     /** 进入单词长按的「按住」阶段：只高亮，不查词也不发音。 */
@@ -1892,6 +2048,7 @@ class ReadingViewModel @Inject constructor(
         highlightJob?.cancel()
         highlightJob = null
         _highlightedParagraph.value = null
+        sourceContextCard.value = null
     }
 
     /**

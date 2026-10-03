@@ -91,7 +91,8 @@ fun InteractiveText(
      * 调用方不需要知道高亮色是什么。
      */
     paragraphHighlight: Float = 0f,
-    onTextLayout: (TextLayoutResult) -> Unit = {}
+    onTextLayout: (TextLayoutResult) -> Unit = {},
+    onWordAccessibilityTarget: ((InteractiveTextLongPressTarget) -> Unit)? = null
 ) {
     if (text.isEmpty()) {
         BasicText(text = "", style = TextStyle(fontSize = fontSize))
@@ -107,6 +108,7 @@ fun InteractiveText(
     var textCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
     val currentOnSentenceClick by rememberUpdatedState(onSentenceClick)
     val currentOnWordLongPress by rememberUpdatedState(onWordLongPress)
+    val currentOnWordAccessibilityTarget by rememberUpdatedState(onWordAccessibilityTarget)
     val currentOnClearSelection by rememberUpdatedState(onClearSelection)
     val currentOnSentencePlay by rememberUpdatedState(onSentencePlay)
     val currentOnSentenceTranslate by rememberUpdatedState(onSentenceTranslate)
@@ -170,8 +172,9 @@ fun InteractiveText(
     }
 
     // 限制可访问词汇数量，防止超过 MaxAccessibilityWordActions 导致系统截断
-    val accessibilityWords = remember(text, visibleStart, visibleEnd) {
-        extractAccessibilityWords(text, startOffset = visibleStart, endOffset = visibleEnd)
+    val accessibilityWords = remember(text, visibleStart, visibleEnd, onWordAccessibilityTarget != null) {
+        extractAccessibilityWordRanges(text, startOffset = visibleStart, endOffset = visibleEnd,
+            deduplicate = onWordAccessibilityTarget == null)
     }
 
     val accessibilityContentDescription = stringResource(
@@ -187,6 +190,7 @@ fun InteractiveText(
     val translateSentenceActionLabel = stringResource(R.string.accessibility_translate_sentence_action)
     val explainSentenceActionLabel = stringResource(R.string.accessibility_explain_sentence_action)
     val collectExcerptLabel = stringResource(R.string.accessibility_collect_excerpt)
+    val contextWordActionFormat = stringResource(R.string.context_word_accessibility)
 
     // 句子动作与单词动作各自独立限额（互不挤占），合计有上限避免超过系统对 CustomAccessibilityAction
     // 数量的限制被静默丢弃。key 只用稳定值（回调经 rememberUpdatedState 快照，不再作为 key）。
@@ -194,7 +198,8 @@ fun InteractiveText(
         visibleSentences, accessibilityWords, sentenceIndexOffset, sourceStartOffset, visibleViewport, enabled,
         highlightedSentenceIndex,
         highlightSentenceActionPrefix, extractWordActionPrefix,
-        playSentenceActionLabel, translateSentenceActionLabel, explainSentenceActionLabel, collectExcerptLabel,
+        playSentenceActionLabel, translateSentenceActionLabel, explainSentenceActionLabel, collectExcerptLabel, contextWordActionFormat,
+        onWordAccessibilityTarget != null,
         onSentencePlay != null, onSentenceTranslate != null, onSentenceExplain != null, onExcerptSelect != null
     ) {
         val selectedAccessibilitySentence = visibleSentences.firstOrNull { sentence ->
@@ -219,12 +224,30 @@ fun InteractiveText(
         }
         val wordActions = accessibilityWords
             .take(MaxAccessibilityWordActions - extraActionCount / 2)
-            .map { word ->
+            .map { range ->
             CustomAccessibilityAction(
-                label = "$extractWordActionPrefix $word",
+                label = if (onWordAccessibilityTarget == null) "$extractWordActionPrefix ${range.word}"
+                    else contextWordActionFormat.format(range.word, range.startOffset + sourceStartOffset + 1),
                 action = {
-                    currentOnWordLongPress(word)
-                    true
+                    val callback = currentOnWordAccessibilityTarget
+                    if (callback == null) {
+                        currentOnWordLongPress(range.word)
+                        true
+                    } else {
+                        val start = range.startOffset + sourceStartOffset
+                        val sentence = sentences.firstOrNull { start >= it.startOffset && start < it.endOffset }
+                        val target = sentence?.let {
+                            createAccessibilityTarget(text, it, sentenceIndexOffset, textLayoutResult,
+                                visibleViewport, sourceStartOffset)
+                        }
+                        if (target == null) false else {
+                            callback(target.copy(word = range.word,
+                                anchorBounds = textLayoutResult?.getBoundingBox(range.startOffset)?.inViewport(visibleViewport)
+                                    ?: target.anchorBounds, wordStartOffset = start,
+                                wordEndOffset = range.endOffset + sourceStartOffset, glyphOffset = start))
+                            true
+                        }
+                    }
                 },
             )
         }
@@ -619,8 +642,17 @@ internal fun extractAccessibilityWords(
     maxWords: Int = MaxAccessibilityWordActions,
     startOffset: Int = 0,
     endOffset: Int = text.length,
-): List<String> {
-    val words = mutableListOf<String>()
+): List<String> = extractAccessibilityWordRanges(text, maxWords, startOffset, endOffset, deduplicate = true)
+    .map { it.word }
+
+internal fun extractAccessibilityWordRanges(
+    text: String,
+    maxWords: Int = MaxAccessibilityWordActions,
+    startOffset: Int = 0,
+    endOffset: Int = text.length,
+    deduplicate: Boolean = false
+): List<WordBoundaryDetector.WordRange> {
+    val words = mutableListOf<WordBoundaryDetector.WordRange>()
     val seenWords = mutableSetOf<String>()
     var offset = startOffset
 
@@ -632,8 +664,8 @@ internal fun extractAccessibilityWords(
         }
 
         val normalizedWord = WordLookupKey.normalize(range.word)
-        if (seenWords.add(normalizedWord)) {
-            words += range.word
+        if (!deduplicate || seenWords.add(normalizedWord)) {
+            words += range
         }
 
         offset = range.endOffset

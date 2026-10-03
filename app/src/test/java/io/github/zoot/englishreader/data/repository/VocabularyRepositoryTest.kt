@@ -17,7 +17,7 @@ class VocabularyRepositoryTest {
     @Before
     fun setup() {
         dao = mockk()
-        repository = VocabularyRepository(dao)
+        repository = VocabularyRepository(dao, mockk(), mockk())
     }
 
     @Test

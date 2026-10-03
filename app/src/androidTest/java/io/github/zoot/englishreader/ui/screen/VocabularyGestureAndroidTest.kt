@@ -13,6 +13,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.moveBy
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.unit.dp
@@ -22,6 +23,8 @@ import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
+import io.github.zoot.englishreader.R
+import io.github.zoot.englishreader.viewmodel.ContextLibraryState
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
 import io.mockk.every
 import io.mockk.mockk
@@ -112,11 +115,16 @@ class VocabularyGestureAndroidTest {
         every { viewModel.excerptPlayback } returns MutableStateFlow(null)
         every { viewModel.excerptToOpen } returns kotlinx.coroutines.flow.MutableSharedFlow()
         every { viewModel.uiEvent } returns emptyFlow()
+        every { viewModel.contextLibrary } returns MutableStateFlow(ContextLibraryState(loading = false))
+        every { viewModel.contextEditor } returns MutableStateFlow(null)
+        every { viewModel.contextToOpen } returns kotlinx.coroutines.flow.MutableSharedFlow()
         composeRule.setContent {
             Box(modifier = Modifier.width(360.dp).fillMaxHeight()) {
                 VocabularyScreen(onOpenArticle = { _, _ -> }, viewModel = viewModel)
             }
         }
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        composeRule.onNodeWithText(context.getString(R.string.context_legacy_words)).performClick()
         composeRule.waitForIdle()
     }
 }

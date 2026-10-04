@@ -116,7 +116,6 @@ class VocabularyGestureAndroidTest {
         every { viewModel.excerptToOpen } returns kotlinx.coroutines.flow.MutableSharedFlow()
         every { viewModel.uiEvent } returns emptyFlow()
         every { viewModel.contextLibrary } returns MutableStateFlow(ContextLibraryState(loading = false))
-        every { viewModel.contextEditor } returns MutableStateFlow(null)
         every { viewModel.contextToOpen } returns kotlinx.coroutines.flow.MutableSharedFlow()
         composeRule.setContent {
             Box(modifier = Modifier.width(360.dp).fillMaxHeight()) {

@@ -5,6 +5,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasTestTag
@@ -26,6 +27,7 @@ import io.github.zoot.englishreader.util.contextRound
 import io.github.zoot.englishreader.viewmodel.ContextReviewEvent
 import io.github.zoot.englishreader.viewmodel.ContextReviewSource
 import io.github.zoot.englishreader.viewmodel.ContextReviewUiState
+import io.github.zoot.englishreader.viewmodel.StudyPronunciationDetails
 import io.github.zoot.englishreader.viewmodel.ContextReviewViewModel
 import io.mockk.every
 import io.mockk.mockk
@@ -49,15 +51,22 @@ class ContextReviewScreenTest {
     private val revealed = mutableListOf<String>()
     private val grades = mutableListOf<Pair<String, ContextGrade>>()
     private val sources = mutableListOf<String>()
+    private val skipped = mutableListOf<String>()
     private var nextRounds = 0
 
     private fun render(onOpenSource: ((String) -> Unit)? = { sources.add(it) }) {
         compose.setContent {
             ArticleUiTheme {
                 ContextReviewContent(state.value, SnackbarHostState(), {}, revealed::add,
-                    { token, grade -> grades += token to grade }, { nextRounds++ }, {}, onOpenSource)
+                    { token, grade -> grades += token to grade }, { nextRounds++ }, {}, onOpenSource,
+                    onSkipMissingAnswer = skipped::add)
             }
         }
+    }
+
+    private fun reviewNode(tag: String): SemanticsNodeInteraction {
+        compose.onNodeWithTag("context-review").performScrollToNode(hasTestTag(tag))
+        return compose.onNodeWithTag(tag)
     }
 
     private fun screenViewModel(sourceEvents: MutableSharedFlow<ContextReviewSource>) =
@@ -67,7 +76,9 @@ class ContextReviewScreenTest {
             )
             every { model.uiEvent } returns MutableSharedFlow<ContextReviewEvent>()
             every { model.contextToOpen } returns sourceEvents
-            every { model.consumeContextSource(any()) } answers { firstArg<ContextReviewSource>().entry.card }
+            every { model.pronunciationDetails } returns MutableStateFlow(StudyPronunciationDetails())
+            every { model.loadingAudioKey } returns MutableStateFlow(null)
+            every { model.consumeContextSource(any()) } answers { firstArg<ContextReviewSource>().entry.studyWord() }
         }
 
     @Test
@@ -157,7 +168,9 @@ class ContextReviewScreenTest {
         render()
         compose.onNodeWithTag("context-review-answer").performScrollTo().assertIsDisplayed()
         compose.onNodeWithTag("context-review-reveal").assertDoesNotExist()
-        compose.onNodeWithTag("context-review-source").performScrollTo().assertIsDisplayed().performClick()
+        compose.onNodeWithTag("study-review-skip").assertDoesNotExist()
+        compose.onNodeWithTag("study-review-edit").assertDoesNotExist()
+        reviewNode("context-review-source").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(listOf("item-1"), sources) }
         ContextGrade.entries.forEach {
             compose.onNodeWithTag("context-review").performScrollToNode(hasTestTag("context-grade-${it.name}"))
@@ -179,7 +192,7 @@ class ContextReviewScreenTest {
             compose.onNodeWithTag("context-review").performScrollToNode(hasTestTag("context-grade-${it.name}"))
             compose.onNodeWithTag("context-grade-${it.name}").performScrollTo().assertIsNotEnabled()
         }
-        compose.onNodeWithTag("context-review-source").performScrollTo().assertIsNotEnabled()
+        reviewNode("context-review-source").assertIsNotEnabled()
     }
 
     @Test
@@ -187,8 +200,37 @@ class ContextReviewScreenTest {
         state.value = ContextReviewUiState(round = contextRound(listOf(contextEntry(revealed = true))), busy = false)
         render(onOpenSource = null)
         compose.onNodeWithTag("context-review-answer").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithTag("context-grade-REMEMBERED").performScrollTo().assertIsDisplayed()
+        reviewNode("context-grade-REMEMBERED").assertIsDisplayed()
         compose.onNodeWithTag("context-review-source", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun missingAnswer_revealedTurnDisablesGradesAndOffersSkipWithoutEditor() {
+        val entry = contextEntry(revealed = true)
+        state.value = ContextReviewUiState(
+            round = contextRound(listOf(entry.copy(item = entry.item.copy(meaningSnapshot = "")))),
+            busy = false
+        )
+        render()
+        compose.onNodeWithTag("context-review-answer").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(RuntimeEnvironment.getApplication().getString(R.string.study_answer_missing)).assertIsDisplayed()
+        compose.onNodeWithTag("study-review-edit").assertDoesNotExist()
+        compose.onNodeWithTag("context-meaning-input").assertDoesNotExist()
+        ContextGrade.entries.forEach { reviewNode("context-grade-${it.name}").assertIsNotEnabled() }
+        reviewNode("study-review-skip").assertIsDisplayed().performClick()
+        compose.runOnIdle {
+            assertEquals(listOf("item-1"), skipped)
+            assertTrue(grades.isEmpty())
+            state.value = state.value.copy(busy = true)
+        }
+        reviewNode("study-review-skip").assertIsNotEnabled()
+        compose.runOnIdle {
+            state.value = ContextReviewUiState(
+                round = contextRound(listOf(entry.copy(item = entry.item.copy(meaningSnapshot = "", revealed = false)))),
+                busy = false
+            )
+        }
+        compose.onNodeWithTag("study-review-skip").assertDoesNotExist()
     }
 
     @Test
@@ -209,7 +251,7 @@ class ContextReviewScreenTest {
     fun nextUnrevealedTurn_removesAnswerAndSourceDescendants() {
         state.value = ContextReviewUiState(round = contextRound(listOf(contextEntry(revealed = true))), busy = false)
         render()
-        compose.onNodeWithTag("context-review-source").performScrollTo().assertIsDisplayed()
+        reviewNode("context-review-source").assertIsDisplayed()
         compose.runOnIdle {
             state.value = ContextReviewUiState(round = contextRound(listOf(contextEntry(id = 2))), busy = false)
         }

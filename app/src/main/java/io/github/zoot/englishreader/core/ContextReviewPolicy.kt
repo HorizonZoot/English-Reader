@@ -2,6 +2,8 @@ package io.github.zoot.englishreader.core
 
 enum class ContextGrade { FORGOTTEN, FUZZY, REMEMBERED }
 
+enum class VocabularyStudyMode { LEARN, DUE }
+
 data class ContextReviewSchedule(val dueDay: Long, val pendingStep: Int, val intervalDays: Int)
 
 object ContextReviewPolicy {

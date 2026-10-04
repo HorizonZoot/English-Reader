@@ -32,14 +32,15 @@ class EnglishReaderDatabaseMigrationAndroidTest {
         migrationHelper.createDatabase(TEST_DATABASE_NAME, 3).close()
         migrationHelper.runMigrationsAndValidate(
             TEST_DATABASE_NAME,
-            9,
+            10,
             true,
             MIGRATION_3_4,
             MIGRATION_4_5,
             MIGRATION_5_6,
             MIGRATION_6_7,
             MIGRATION_7_8,
-            MIGRATION_8_9
+            MIGRATION_8_9,
+            MIGRATION_9_10
         ).close()
     }
 
@@ -611,6 +612,91 @@ class EnglishReaderDatabaseMigrationAndroidTest {
             }
         }
         db.close()
+    }
+
+    @Test
+    fun migration9To10_preservesOldWordsSchedulesAndRevealedRetry() {
+        val snapshots = linkedMapOf<String, List<List<String?>>>()
+        migrationHelper.createDatabase(TEST_DATABASE_NAME, 9).apply {
+            execSQL("INSERT INTO articles (id, title, content, createdAt) VALUES (7, 'Source', 'The bank.', 1)")
+            execSQL("INSERT INTO vocabulary (id, word, articleId, createdAt, phonetic, definitions, definitionSource) VALUES (1, 'bank', 7, 5, '/bank/', 'saved answer', 'offline')")
+            execSQL("INSERT INTO vocabulary (id, word, articleId, createdAt) VALUES (2, 'orphan', NULL, 6)")
+            execSQL("""
+                INSERT INTO context_cards (id, articleId, originArticleId, sourceTitle, contentFingerprint,
+                    paragraphIndex, sentenceStartOffset, sentenceEndOffset, sentence,
+                    targetStartOffset, targetEndOffset, word, dictionaryWord, meaning,
+                    createdAt, updatedAt, dueDay, pendingStep, intervalDays, lastReviewedAt, answerRevision)
+                VALUES (1, 7, 7, 'Source', 'fp', 0, 0, 9, 'The bank.', 4, 8, 'bank', 'bank',
+                    'current answer', 1, 99, 30000, 2, 7, 98, 3)
+            """.trimIndent())
+            execSQL("INSERT INTO context_review_session VALUES (1, 'round', 20000, 100, 1, 4)")
+            execSQL("""
+                INSERT INTO context_review_items VALUES
+                    ('history', 'round', 1, 2, 'old answer', 0, 0, 0, 1, 'FORGOTTEN', 101, 20000, 1, 0, 0),
+                    ('retry', 'round', 1, 3, 'current answer', 1, 1, 4, 1, NULL, NULL, NULL, NULL, NULL, 0)
+            """.trimIndent())
+            for (table in listOf("articles", "vocabulary", "context_cards", "context_review_session", "context_review_items")) {
+                query("SELECT * FROM $table ORDER BY 1").use { cursor ->
+                    val columns = cursor.columnNames.joinToString(",")
+                    snapshots["SELECT $columns FROM $table ORDER BY 1"] = buildList {
+                        while (cursor.moveToNext()) add((0 until cursor.columnCount).map { cursor.getString(it) })
+                    }
+                }
+            }
+            close()
+        }
+        val db = migrationHelper.runMigrationsAndValidate(TEST_DATABASE_NAME, 10, true, MIGRATION_9_10)
+        try {
+            snapshots.forEach { (query, expected) ->
+                db.query(query).use { cursor ->
+                    val actual = buildList {
+                        while (cursor.moveToNext()) add((0 until cursor.columnCount).map { cursor.getString(it) })
+                    }
+                    assertEquals(query, expected, actual)
+                }
+            }
+            db.query("SELECT studyMeaning, answerRevision, dueDay, lastReviewedAt, intervalDays, pendingStep FROM vocabulary").use { cursor ->
+                assertEquals(2, cursor.count)
+                while (cursor.moveToNext()) {
+                    assertTrue(cursor.isNull(0))
+                    assertEquals(0L, cursor.getLong(1))
+                    assertEquals(0L, cursor.getLong(2))
+                    assertTrue(cursor.isNull(3))
+                    assertEquals(0, cursor.getInt(4))
+                    assertEquals(0, cursor.getInt(5))
+                }
+            }
+            db.query("SELECT mode FROM context_review_session").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("DUE", cursor.getString(0))
+            }
+            db.query("SELECT cardId, vocabularyId, updatesSchedule FROM context_review_items").use { cursor ->
+                assertEquals(2, cursor.count)
+                while (cursor.moveToNext()) {
+                    assertEquals(1L, cursor.getLong(0))
+                    assertTrue(cursor.isNull(1))
+                    assertEquals(1, cursor.getInt(2))
+                }
+            }
+            db.execSQL("PRAGMA foreign_keys = ON")
+            val insertLegacy = "INSERT INTO context_review_items (itemToken, sessionToken, cardId, vocabularyId, answerRevision, meaningSnapshot, position, isRetry, eligibleAfterCount, revealed, skipped) "
+            db.execSQL(insertLegacy + "VALUES ('legacy', 'round', NULL, 1, 0, 'saved answer', 2, 0, 0, 0, 0)")
+            assertThrowsSqlite(db, "same legacy word must not be enqueued twice") {
+                it.execSQL(insertLegacy + "VALUES ('duplicate', 'round', NULL, 1, 0, 'saved answer', 3, 0, 0, 0, 0)")
+            }
+            assertThrowsSqlite(db, "legacy reference must exist") {
+                it.execSQL(insertLegacy + "VALUES ('missing', 'round', NULL, 999, 0, 'answer', 3, 0, 0, 0, 0)")
+            }
+            db.execSQL("DELETE FROM vocabulary WHERE id = 1")
+            db.query("SELECT itemToken FROM context_review_items ORDER BY itemToken").use { cursor ->
+                assertEquals(2, cursor.count)
+                assertTrue(cursor.moveToFirst())
+                assertEquals("history", cursor.getString(0))
+            }
+            db.query("PRAGMA foreign_key_check").use { cursor -> assertEquals(0, cursor.count) }
+        } finally {
+            db.close()
+        }
     }
 
     private companion object {

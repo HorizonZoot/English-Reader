@@ -62,7 +62,7 @@ import io.github.zoot.englishreader.data.entity.WholeTranslationTaskEntity
         ContextReviewSessionEntity::class,
         ContextReviewItemEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 abstract class EnglishReaderDatabase : RoomDatabase() {
@@ -100,7 +100,8 @@ abstract class EnglishReaderDatabase : RoomDatabase() {
                     MIGRATION_5_6,
                     MIGRATION_6_7,
                     MIGRATION_7_8,
-                    MIGRATION_8_9
+                    MIGRATION_8_9,
+                    MIGRATION_9_10
                 )
                 .build()
         }

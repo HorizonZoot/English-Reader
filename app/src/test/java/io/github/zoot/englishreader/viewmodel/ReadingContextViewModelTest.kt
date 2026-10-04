@@ -16,6 +16,7 @@ import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.mockk.coEvery
 import io.mockk.every
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
@@ -26,8 +27,6 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -78,65 +77,44 @@ class ReadingContextViewModelTest {
     }
 
     @Test
-    fun requestContextMeaning_secondInflectedOccurrence_preservesSourceAndUsesChosenDictionaryCandidate() = runTest {
+    fun saveContextWord_secondInflectedOccurrence_directlySavesAllDictionaryMeanings() = runTest {
         coEvery { fixture.dictionaryRepository.lookupOffline("lives") } returns OfflineLookupResult(
             entry = DictionaryEntry("live", null, "v. 活着；v. 居住", null),
             inflectedForm = "lives",
-            alternateEntries = listOf(DictionaryEntry("life", null, "n. 生命", null))
+            alternateEntries = listOf(DictionaryEntry("life", null, "n. 生命\nn. 生活", null))
         )
         val viewModel = loadedViewModel()
         selectWord(viewModel)
         assertEquals("live", viewModel.wordDefinition.value?.word)
         assertEquals("lives", viewModel.wordDefinition.value?.inflectedForm)
-        viewModel.requestContextMeaning("life")
-        val draft = requireNotNull(viewModel.contextMeaningDraft.value)
-        assertEquals(secondOccurrence, draft.selection)
-        assertEquals(listOf("n. 生命"), draft.choices)
-        assertEquals("life", draft.dictionaryWord)
-        assertEquals("", draft.meaning)
-        assertFalse(draft.saving)
         assertTrue(saveRequests.isEmpty())
-
         viewModel.contextSaved.test {
-            viewModel.updateContextMeaning("n. 生命")
-            assertTrue(saveRequests.isEmpty())
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("life")
             assertEquals(ContextSaveFeedback.SAVED, awaitItem())
             runCurrent()
-            assertEquals(listOf(SaveRequest(secondOccurrence, "life", "n. 生命")), saveRequests)
+            assertEquals(listOf(SaveRequest(secondOccurrence, "life", "n. 生命\nn. 生活")), saveRequests)
             assertTrue(viewModel.contextCardSaved.value)
-            assertNull(viewModel.contextMeaningDraft.value)
+            assertFalse(viewModel.isSavingContextCard.value)
             expectNoEvents()
         }
     }
 
     @Test
-    fun confirmContextMeaning_blankOrDismissedDraft_neverWrites() = runTest {
+    fun saveContextWord_onlyEnglishAvailable_keepsDictionaryAnswer() = runTest {
+        coEvery { fixture.dictionaryRepository.lookupOffline("lives") } returns OfflineLookupResult(
+            DictionaryEntry("lives", null, "", "to live\nto reside")
+        )
         val viewModel = loadedViewModel()
         selectWord(viewModel)
         viewModel.contextSaved.test {
-            viewModel.requestContextMeaning("lives")
-            for (meaning in listOf("", " \t\n ")) {
-                viewModel.updateContextMeaning(meaning)
-                viewModel.confirmContextMeaning()
-                runCurrent()
-                assertEquals(meaning, viewModel.contextMeaningDraft.value?.meaning)
-                assertEquals(false, viewModel.contextMeaningDraft.value?.saving)
-                assertTrue(saveRequests.isEmpty())
-                assertFalse(viewModel.contextCardSaved.value)
-            }
-            viewModel.updateContextMeaning("手填释义")
-            viewModel.dismissContextMeaning()
-            viewModel.confirmContextMeaning()
-            runCurrent()
-            assertNull(viewModel.contextMeaningDraft.value)
-            assertTrue(saveRequests.isEmpty())
-            expectNoEvents()
+            viewModel.saveContextWord("lives")
+            assertEquals(ContextSaveFeedback.SAVED, awaitItem())
+            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "to live\nto reside")), saveRequests)
         }
     }
 
     @Test
-    fun lookupContextWord_missingOrFailedDictionary_keepsManualMeaningAvailable() = runTest {
+    fun saveContextWord_missingOrFailedDictionary_savesWithoutManualInput() = runTest {
         for (failure in listOf(null, IOException("dictionary unavailable"))) {
             coEvery { fixture.dictionaryRepository.lookupOnline("lives") } coAnswers {
                 if (failure != null) throw failure
@@ -144,28 +122,33 @@ class ReadingContextViewModelTest {
             }
             val viewModel = loadedViewModel()
             selectWord(viewModel)
-            val definition = requireNotNull(viewModel.wordDefinition.value)
-            assertEquals("lives", definition.word)
-            assertTrue(definition.chineseDefinitions.isEmpty())
-            assertTrue(definition.englishDefinitions.isEmpty())
             assertFalse(viewModel.isLoadingDefinition.value)
-            viewModel.requestContextMeaning("lives")
-            assertEquals(emptyList<String>(), viewModel.contextMeaningDraft.value?.choices)
-            assertEquals("", viewModel.contextMeaningDraft.value?.meaning)
-
             viewModel.contextSaved.test {
-                viewModel.updateContextMeaning("手填释义")
-                viewModel.confirmContextMeaning()
+                viewModel.saveContextWord("lives")
                 assertEquals(ContextSaveFeedback.SAVED, awaitItem())
-                assertNull(viewModel.contextMeaningDraft.value)
                 assertTrue(viewModel.contextCardSaved.value)
             }
         }
-        assertEquals(List(2) { SaveRequest(secondOccurrence, "lives", "手填释义") }, saveRequests)
+        assertEquals(List(2) { SaveRequest(secondOccurrence, "lives", "") }, saveRequests)
     }
 
     @Test
-    fun beginContextWordSelection_invalidArticleSentenceOrTarget_cannotCreateDraft() = runTest {
+    fun saveContextWord_noSelectionOrUnknownCandidate_neverWrites() = runTest {
+        val viewModel = loadedViewModel()
+        viewModel.contextSaved.test {
+            viewModel.saveContextWord("lives")
+            selectWord(viewModel)
+            viewModel.saveContextWord("unrelated")
+            viewModel.clearSelection()
+            viewModel.saveContextWord("lives")
+            runCurrent()
+            assertTrue(saveRequests.isEmpty())
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun beginContextWordSelection_invalidArticleSentenceOrTarget_cannotSave() = runTest {
         val viewModel = loadedViewModel()
         val invalidSelections = listOf(
             secondOccurrence.copy(article = article.copy(id = 8)),
@@ -180,11 +163,8 @@ class ReadingContextViewModelTest {
         )
         for (selection in invalidSelections) {
             selectWord(viewModel, selection)
-            viewModel.requestContextMeaning("lives")
-            viewModel.updateContextMeaning("不能保存")
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             runCurrent()
-            assertNull(viewModel.contextMeaningDraft.value)
             assertNull(viewModel.wordDefinition.value)
             assertFalse(viewModel.contextCardSaved.value)
             assertTrue(saveRequests.isEmpty())
@@ -193,53 +173,45 @@ class ReadingContextViewModelTest {
 
     @Test
     fun beginContextWordSelection_firstOccurrenceSaved_secondOccurrenceRemainsIndependent() = runTest {
-        val firstCard = sourceCard.copy(targetStartOffset = 6, targetEndOffset = 11)
-        coEvery { fixture.vocabularyRepository.findContextCard(firstOccurrence) } returns firstCard
+        coEvery { fixture.vocabularyRepository.findContextCard(firstOccurrence) } returns
+            sourceCard.copy(targetStartOffset = 6, targetEndOffset = 11)
         val viewModel = loadedViewModel()
         selectWord(viewModel, firstOccurrence)
         assertTrue(viewModel.contextCardSaved.value)
-
         viewModel.contextSaved.test {
-            viewModel.requestContextMeaning("life")
+            viewModel.saveContextWord("life")
             assertEquals(ContextSaveFeedback.ALREADY_EXISTS, awaitItem())
-            assertNull(viewModel.contextMeaningDraft.value)
             assertTrue(saveRequests.isEmpty())
             selectWord(viewModel, secondOccurrence)
             assertFalse(viewModel.contextCardSaved.value)
-            viewModel.requestContextMeaning("lives")
-            viewModel.updateContextMeaning("另一处含义")
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             assertEquals(ContextSaveFeedback.SAVED, awaitItem())
-            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "另一处含义")), saveRequests)
+            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "")), saveRequests)
         }
     }
 
     @Test
-    fun confirmContextMeaning_duplicateAtWrite_reportsExistingWithoutAnotherWrite() = runTest {
+    fun saveContextWord_duplicateAtWrite_reportsExistingWithoutAnotherWrite() = runTest {
         coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } coAnswers {
             saveRequests += SaveRequest(firstArg(), secondArg(), thirdArg())
             ContextCardSaveResult.ALREADY_EXISTS
         }
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("新的输入")
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
-            assertEquals(ContextSaveFeedback.ALREADY_EXISTS, awaitItem())
-            runCurrent()
+            repeat(2) {
+                viewModel.saveContextWord("lives")
+                assertEquals(ContextSaveFeedback.ALREADY_EXISTS, awaitItem())
+                runCurrent()
+            }
             assertTrue(viewModel.contextCardSaved.value)
-            assertNull(viewModel.contextMeaningDraft.value)
-            viewModel.confirmContextMeaning()
-            runCurrent()
-            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "新的输入")), saveRequests)
+            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "")), saveRequests)
             expectNoEvents()
         }
     }
 
     @Test
-    fun confirmContextMeaning_failure_preservesEditableDraftForRetry() = runTest {
+    fun saveContextWord_failure_keepsSelectionAndAllowsRetry() = runTest {
         coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } coAnswers {
             saveRequests += SaveRequest(firstArg(), secondArg(), thirdArg())
             if (saveRequests.size == 1) throw IOException("storage unavailable")
@@ -247,53 +219,37 @@ class ReadingContextViewModelTest {
         }
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("原输入")
-        val originalDraft = requireNotNull(viewModel.contextMeaningDraft.value)
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             assertEquals(ContextSaveFeedback.FAILED, awaitItem())
             runCurrent()
-            assertEquals(originalDraft, viewModel.contextMeaningDraft.value)
             assertFalse(viewModel.contextCardSaved.value)
-            viewModel.updateContextMeaning("修正输入")
-            viewModel.confirmContextMeaning()
+            assertFalse(viewModel.isSavingContextCard.value)
+            assertEquals("lives", viewModel.wordDefinition.value?.word)
+            viewModel.saveContextWord("lives")
             assertEquals(ContextSaveFeedback.SAVED, awaitItem())
-            runCurrent()
-            assertEquals(
-                listOf(SaveRequest(secondOccurrence, "lives", "原输入"), SaveRequest(secondOccurrence, "lives", "修正输入")),
-                saveRequests
-            )
-            assertNull(viewModel.contextMeaningDraft.value)
+            assertEquals(List(2) { SaveRequest(secondOccurrence, "lives", "") }, saveRequests)
             assertTrue(viewModel.contextCardSaved.value)
         }
     }
 
     @Test
-    fun confirmContextMeaning_sourceChangedAtWrite_neverReportsSaved() = runTest {
-        coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } coAnswers {
-            saveRequests += SaveRequest(firstArg(), secondArg(), thirdArg())
-            ContextCardSaveResult.SOURCE_CHANGED
-        }
+    fun saveContextWord_sourceChangedAtWrite_neverReportsSaved() = runTest {
+        coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } returns ContextCardSaveResult.SOURCE_CHANGED
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("原输入")
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             assertEquals(ContextSaveFeedback.SOURCE_CHANGED, awaitItem())
             runCurrent()
             assertFalse(viewModel.contextCardSaved.value)
-            assertEquals(false, viewModel.contextMeaningDraft.value?.saving)
-            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "原输入")), saveRequests)
+            assertFalse(viewModel.isSavingContextCard.value)
             expectNoEvents()
         }
     }
 
     @Test
-    fun confirmContextMeaning_pendingSave_repeatedConfirmationWritesOnce() = runTest {
+    fun saveContextWord_pendingSave_repeatedTapWritesOnce() = runTest {
         val result = CompletableDeferred<ContextCardSaveResult>()
         coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } coAnswers {
             saveRequests += SaveRequest(firstArg(), secondArg(), thirdArg())
@@ -301,30 +257,38 @@ class ReadingContextViewModelTest {
         }
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("确认的输入")
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             runCurrent()
-            assertEquals(true, viewModel.contextMeaningDraft.value?.saving)
-            viewModel.updateContextMeaning("保存中的修改")
-            viewModel.confirmContextMeaning()
+            assertTrue(viewModel.isSavingContextCard.value)
+            viewModel.saveContextWord("lives")
             runCurrent()
-            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "确认的输入")), saveRequests)
-            assertEquals("确认的输入", viewModel.contextMeaningDraft.value?.meaning)
+            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "")), saveRequests)
             expectNoEvents()
             result.complete(ContextCardSaveResult.SAVED)
-            runCurrent()
             assertEquals(ContextSaveFeedback.SAVED, awaitItem())
-            assertNull(viewModel.contextMeaningDraft.value)
+            runCurrent()
+            assertFalse(viewModel.isSavingContextCard.value)
             assertTrue(viewModel.contextCardSaved.value)
+        }
+    }
+
+    @Test
+    fun saveContextWord_cancelled_releasesBusyWithoutSuccessOrFailure() = runTest {
+        coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } throws CancellationException()
+        val viewModel = loadedViewModel()
+        selectWord(viewModel)
+        viewModel.contextSaved.test {
+            viewModel.saveContextWord("lives")
+            runCurrent()
+            assertFalse(viewModel.isSavingContextCard.value)
+            assertFalse(viewModel.contextCardSaved.value)
             expectNoEvents()
         }
     }
 
     @Test
-    fun lookupContextWord_lateOldDefinition_cannotReplaceNewPendingLookupOrDraft() = runTest {
+    fun lookupContextWord_lateOldDefinition_cannotReplaceOrSaveNewPendingLookup() = runTest {
         val oldResult = CompletableDeferred<OfflineLookupResult?>()
         val newResult = CompletableDeferred<OfflineLookupResult?>()
         coEvery { fixture.dictionaryRepository.lookupOffline("lives") } coAnswers {
@@ -334,27 +298,25 @@ class ReadingContextViewModelTest {
         val shape = firstOccurrence.copy(wordStartOffset = 20, wordEndOffset = 25)
         val viewModel = loadedViewModel()
         selectWord(viewModel, firstOccurrence)
-        assertTrue(viewModel.isLoadingDefinition.value)
         selectWord(viewModel, shape)
-        viewModel.requestContextMeaning("shape")
-        viewModel.updateContextMeaning("当前手填")
-        val currentDraft = requireNotNull(viewModel.contextMeaningDraft.value)
-
         oldResult.complete(OfflineLookupResult(DictionaryEntry("life", null, "过期释义", null)))
         runCurrent()
         assertTrue(viewModel.isLoadingDefinition.value)
         assertNull(viewModel.wordDefinition.value)
-        assertEquals(currentDraft, viewModel.contextMeaningDraft.value)
-
+        viewModel.saveContextWord("life")
+        viewModel.saveContextWord("shape")
+        assertTrue(saveRequests.isEmpty())
         newResult.complete(OfflineLookupResult(DictionaryEntry("shape", null, "塑造", null)))
         runCurrent()
-        assertEquals("shape", viewModel.wordDefinition.value?.word)
-        assertFalse(viewModel.isLoadingDefinition.value)
-        assertEquals(currentDraft, viewModel.contextMeaningDraft.value)
+        viewModel.contextSaved.test {
+            viewModel.saveContextWord("shape")
+            assertEquals(ContextSaveFeedback.SAVED, awaitItem())
+            assertEquals(listOf(SaveRequest(shape, "shape", "塑造")), saveRequests)
+        }
     }
 
     @Test
-    fun beginContextWordSelection_lateOldDuplicate_cannotMarkNewOccurrenceOrCloseEditor() = runTest {
+    fun beginContextWordSelection_lateOldDuplicate_cannotMarkNewOccurrence() = runTest {
         val oldResult = CompletableDeferred<ContextCardEntity?>()
         coEvery { fixture.vocabularyRepository.findContextCard(firstOccurrence) } coAnswers {
             withContext(NonCancellable) { oldResult.await() }
@@ -362,15 +324,10 @@ class ReadingContextViewModelTest {
         val viewModel = loadedViewModel()
         selectWord(viewModel, firstOccurrence)
         selectWord(viewModel, secondOccurrence)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("第二处输入")
-        val currentDraft = requireNotNull(viewModel.contextMeaningDraft.value)
-
         viewModel.contextSaved.test {
             oldResult.complete(sourceCard.copy(targetStartOffset = 6, targetEndOffset = 11))
             runCurrent()
             assertFalse(viewModel.contextCardSaved.value)
-            assertEquals(currentDraft, viewModel.contextMeaningDraft.value)
             assertTrue(saveRequests.isEmpty())
             expectNoEvents()
         }
@@ -385,99 +342,80 @@ class ReadingContextViewModelTest {
         selectWord(viewModel, firstOccurrence)
         selectWord(viewModel, secondOccurrence)
         assertTrue(viewModel.contextCardSaved.value)
-
         oldResult.complete(null)
         runCurrent()
         assertTrue(viewModel.contextCardSaved.value)
-        assertNull(viewModel.contextMeaningDraft.value)
     }
 
     @Test
-    fun confirmContextMeaning_lookupMissArrivesAfterSave_keepsConfirmedSavedBadge() = runTest {
+    fun saveContextWord_lookupMissArrivesAfterSave_keepsSavedBadge() = runTest {
         val lookup = CompletableDeferred<ContextCardEntity?>()
         coEvery { fixture.vocabularyRepository.findContextCard(secondOccurrence) } coAnswers { lookup.await() }
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("已确认输入")
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             assertEquals(ContextSaveFeedback.SAVED, awaitItem())
-            assertTrue(viewModel.contextCardSaved.value)
             lookup.complete(null)
             runCurrent()
             assertTrue(viewModel.contextCardSaved.value)
-            assertNull(viewModel.contextMeaningDraft.value)
-            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "已确认输入")), saveRequests)
+            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "")), saveRequests)
             expectNoEvents()
         }
     }
 
     @Test
-    fun confirmContextMeaning_lateSaveAfterNewSelection_completesWithoutChangingCurrentEditor() = runTest {
+    fun saveContextWord_lateSaveAfterNewSelection_doesNotChangeCurrentSelection() = runTest {
         val result = CompletableDeferred<ContextCardSaveResult>()
         val completed = mutableListOf<SaveRequest>()
         coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } coAnswers {
             val request = SaveRequest(firstArg(), secondArg(), thirdArg())
-            saveRequests += request
             result.await().also { completed += request }
         }
         val viewModel = loadedViewModel()
         selectWord(viewModel, firstOccurrence)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("第一处输入")
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             runCurrent()
-            assertEquals(true, viewModel.contextMeaningDraft.value?.saving)
+            assertTrue(viewModel.isSavingContextCard.value)
             selectWord(viewModel, secondOccurrence)
-            viewModel.requestContextMeaning("lives")
-            viewModel.updateContextMeaning("第二处输入")
-            val currentDraft = requireNotNull(viewModel.contextMeaningDraft.value)
-            assertFalse(currentDraft.saving)
-            assertTrue(completed.isEmpty())
-
+            assertFalse(viewModel.isSavingContextCard.value)
             result.complete(ContextCardSaveResult.SAVED)
             runCurrent()
-            assertEquals(listOf(SaveRequest(firstOccurrence, "lives", "第一处输入")), completed)
-            assertEquals(currentDraft, viewModel.contextMeaningDraft.value)
+            assertEquals(listOf(SaveRequest(firstOccurrence, "lives", "")), completed)
             assertFalse(viewModel.contextCardSaved.value)
+            assertEquals("lives", viewModel.wordDefinition.value?.word)
             expectNoEvents()
         }
     }
 
     @Test
-    fun confirmContextMeaning_lateFailureAfterReselectingSameOccurrence_preservesNewDraft() = runTest {
-        val result = CompletableDeferred<ContextCardSaveResult>()
+    fun saveContextWord_lateFailureAfterReselectingSameOccurrence_cannotClearNewSaveBusy() = runTest {
+        val oldResult = CompletableDeferred<ContextCardSaveResult>()
+        val newResult = CompletableDeferred<ContextCardSaveResult>()
         coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } coAnswers {
             saveRequests += SaveRequest(firstArg(), secondArg(), thirdArg())
-            result.await()
+            if (saveRequests.size == 1) oldResult.await() else newResult.await()
         }
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("旧输入")
-        val oldDraft = requireNotNull(viewModel.contextMeaningDraft.value)
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             runCurrent()
-            assertEquals(true, viewModel.contextMeaningDraft.value?.saving)
             selectWord(viewModel, firstOccurrence)
             selectWord(viewModel, secondOccurrence)
-            viewModel.requestContextMeaning("lives")
-            viewModel.updateContextMeaning("重新打开后的输入")
-            val currentDraft = requireNotNull(viewModel.contextMeaningDraft.value)
-            assertNotEquals(oldDraft.id, currentDraft.id)
-
-            result.completeExceptionally(IOException("late storage failure"))
+            viewModel.saveContextWord("lives")
             runCurrent()
-            assertEquals(currentDraft, viewModel.contextMeaningDraft.value)
+            oldResult.completeExceptionally(IOException("late storage failure"))
+            runCurrent()
+            assertTrue(viewModel.isSavingContextCard.value)
             assertFalse(viewModel.contextCardSaved.value)
-            assertEquals(listOf(SaveRequest(secondOccurrence, "lives", "旧输入")), saveRequests)
             expectNoEvents()
+            newResult.complete(ContextCardSaveResult.SAVED)
+            assertEquals(ContextSaveFeedback.SAVED, awaitItem())
+            runCurrent()
+            assertFalse(viewModel.isSavingContextCard.value)
+            assertTrue(viewModel.contextCardSaved.value)
         }
     }
 
@@ -489,34 +427,22 @@ class ReadingContextViewModelTest {
         val completed = CompletableDeferred<SaveRequest>()
         coEvery { fixture.vocabularyRepository.saveContextCard(any(), any(), any()) } coAnswers {
             val request = SaveRequest(firstArg(), secondArg(), thirdArg())
-            saveRequests += request
             result.await().also { completed.complete(request) }
         }
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("旧文章输入")
-
         viewModel.contextSaved.test {
-            viewModel.confirmContextMeaning()
+            viewModel.saveContextWord("lives")
             runCurrent()
-            assertEquals(true, viewModel.contextMeaningDraft.value?.saving)
             viewModel.loadArticle(8)
             runCurrent()
-            assertEquals(otherArticle, viewModel.article.value)
-            assertNull(viewModel.contextMeaningDraft.value)
-            assertFalse(viewModel.contextCardSaved.value)
             selectWord(viewModel, secondOccurrence.copy(article = otherArticle))
-            viewModel.requestContextMeaning("lives")
-            viewModel.updateContextMeaning("新文章输入")
-            val currentDraft = requireNotNull(viewModel.contextMeaningDraft.value)
-
             result.complete(ContextCardSaveResult.SAVED)
             runCurrent()
-            assertTrue(completed.isCompleted)
-            assertEquals(SaveRequest(secondOccurrence, "lives", "旧文章输入"), completed.await())
-            assertEquals(currentDraft, viewModel.contextMeaningDraft.value)
+            assertEquals(SaveRequest(secondOccurrence, "lives", ""), completed.await())
+            assertEquals(otherArticle, viewModel.article.value)
             assertFalse(viewModel.contextCardSaved.value)
+            assertFalse(viewModel.isSavingContextCard.value)
             expectNoEvents()
         }
     }
@@ -528,55 +454,42 @@ class ReadingContextViewModelTest {
         coEvery { fixture.articleRepository.getArticleById(8) } coAnswers { load.await() }
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("旧输入")
         viewModel.loadArticle(8)
         runCurrent()
         assertEquals(article, viewModel.article.value)
         assertTrue(viewModel.isLoadingArticle.value)
-        assertNull(viewModel.contextMeaningDraft.value)
-
         selectWord(viewModel, secondOccurrence)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("过期输入")
-        viewModel.confirmContextMeaning()
-        assertNull(viewModel.contextMeaningDraft.value)
+        viewModel.saveContextWord("lives")
         assertTrue(saveRequests.isEmpty())
-
         load.complete(otherArticle)
         runCurrent()
         selectWord(viewModel, secondOccurrence)
-        viewModel.requestContextMeaning("lives")
-        assertNull(viewModel.contextMeaningDraft.value)
+        viewModel.saveContextWord("lives")
+        assertTrue(saveRequests.isEmpty())
         selectWord(viewModel, secondOccurrence.copy(article = otherArticle))
-        viewModel.requestContextMeaning("lives")
-        assertEquals(otherArticle, viewModel.contextMeaningDraft.value?.selection?.article)
+        viewModel.contextSaved.test {
+            viewModel.saveContextWord("lives")
+            assertEquals(ContextSaveFeedback.SAVED, awaitItem())
+            assertEquals(otherArticle, saveRequests.single().selection.article)
+        }
     }
 
     @Test
-    fun observeArticle_bodyChangedOutsideSentence_invalidatesDraftAndOldSelection() = runTest {
+    fun observeArticle_bodyChangedOutsideSentence_invalidatesOldSelection() = runTest {
         val updates = MutableStateFlow<ArticleEntity?>(article)
         every { fixture.articleRepository.observeArticle(article.id) } returns updates
         val viewModel = loadedViewModel()
         selectWord(viewModel)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("旧输入")
-        assertNotNull(viewModel.contextMeaningDraft.value)
-
         val changed = article.copy(content = "Changed.\n\nBefore. Their lives shape lives.")
         updates.value = changed
         runCurrent()
         assertEquals(changed, viewModel.article.value)
-        assertNull(viewModel.contextMeaningDraft.value)
         assertNull(viewModel.wordDefinition.value)
         assertFalse(viewModel.contextCardSaved.value)
-        viewModel.confirmContextMeaning()
+        viewModel.saveContextWord("lives")
         selectWord(viewModel, secondOccurrence)
-        viewModel.requestContextMeaning("lives")
-        viewModel.updateContextMeaning("过期输入")
-        viewModel.confirmContextMeaning()
+        viewModel.saveContextWord("lives")
         runCurrent()
-        assertNull(viewModel.contextMeaningDraft.value)
         assertTrue(saveRequests.isEmpty())
     }
 
@@ -584,18 +497,14 @@ class ReadingContextViewModelTest {
     fun openReadingSession_contextCardRoute_targetsExactSecondOccurrenceAndHighlightsSnapshot() = runTest {
         coEvery { fixture.vocabularyRepository.getContextCard(sourceCard.id) } returns sourceCard
         val viewModel = fixture.create(SavedStateHandle(mapOf("contextCardId" to sourceCard.id)))
-
         viewModel.highlightedContextCard.test {
             assertNull(awaitItem())
             viewModel.openReadingSession(article.id)
             runCurrent()
             assertEquals(article, viewModel.article.value)
-            assertEquals(
-                ReadingAnchor(1, ReadingTextKind.ORIGINAL, 26),
-                viewModel.pendingPositionTarget.value?.position?.anchor
-            )
+            assertEquals(ReadingAnchor(1, ReadingTextKind.ORIGINAL, 26),
+                viewModel.pendingPositionTarget.value?.position?.anchor)
             assertEquals(sourceCard, awaitItem())
-            assertEquals("lives", viewModel.highlightedContextCard.value?.word)
             assertEquals(18, viewModel.highlightedContextCard.value?.targetStartOffset)
             assertEquals(23, viewModel.highlightedContextCard.value?.targetEndOffset)
         }
@@ -615,9 +524,7 @@ class ReadingContextViewModelTest {
         for ((loadedArticle, card) in invalidSources) {
             coEvery { fixture.articleRepository.getArticleById(article.id) } returns loadedArticle
             coEvery { fixture.vocabularyRepository.getContextCard(sourceCard.id) } returns card
-            val handle = SavedStateHandle(mapOf("contextCardId" to sourceCard.id, "word" to "lives"))
-            val viewModel = fixture.create(handle)
-
+            val viewModel = fixture.create(SavedStateHandle(mapOf("contextCardId" to sourceCard.id, "word" to "lives")))
             viewModel.highlightedContextCard.test {
                 assertNull(awaitItem())
                 viewModel.readingErrors.test {
@@ -625,10 +532,8 @@ class ReadingContextViewModelTest {
                     assertEquals(ReadingError.CONTEXT_SOURCE_UNAVAILABLE, awaitItem())
                     runCurrent()
                     assertEquals(loadedArticle, viewModel.article.value)
-                    assertEquals(
-                        ReadingAnchor(textKind = ReadingTextKind.TITLE),
-                        viewModel.pendingPositionTarget.value?.position?.anchor
-                    )
+                    assertEquals(ReadingAnchor(textKind = ReadingTextKind.TITLE),
+                        viewModel.pendingPositionTarget.value?.position?.anchor)
                     assertNull(viewModel.highlightedParagraph.value)
                     assertNull(viewModel.highlightedContextCard.value)
                 }
@@ -637,11 +542,9 @@ class ReadingContextViewModelTest {
         }
     }
 
-    private fun TestScope.loadedViewModel(): ReadingViewModel {
-        val viewModel = fixture.create()
-        viewModel.loadArticle(article.id)
+    private fun TestScope.loadedViewModel(): ReadingViewModel = fixture.create().also {
+        it.loadArticle(article.id)
         runCurrent()
-        return viewModel
     }
 
     private fun TestScope.selectWord(

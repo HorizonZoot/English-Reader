@@ -1,9 +1,11 @@
 package io.github.zoot.englishreader.viewmodel
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
 import io.github.zoot.englishreader.core.ContextGrade
 import io.github.zoot.englishreader.data.entity.ContextReviewRound
+import io.github.zoot.englishreader.data.repository.DictionaryRepository
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.github.zoot.englishreader.util.contextEntry
@@ -32,12 +34,15 @@ import java.io.IOException
 class ContextReviewViewModelTest {
     @get:Rule val dispatcher = MainDispatcherRule()
     private val repository = mockk<VocabularyRepository>()
+    private val dictionary = mockk<DictionaryRepository>()
     private val store = ViewModelStore()
     private val saved = MutableStateFlow<ContextReviewRound?>(contextRound())
     private var day = 20_000L
 
     @Before
     fun setUp() {
+        every { dictionary.revision } returns MutableStateFlow(0L)
+        coEvery { dictionary.lookupOffline(any()) } returns null
         every { repository.currentReviewDay() } answers { day }
         every { repository.observeContextReview() } returns saved
         coEvery { repository.startOrResumeContextReview() } coAnswers { checkNotNull(saved.value) }
@@ -47,7 +52,10 @@ class ContextReviewViewModelTest {
     @After
     fun tearDown() { store.clear() }
 
-    private fun create() = ContextReviewViewModel(repository).also { store.put("review", it) }
+    private fun create() = ContextReviewViewModel(
+        repository, dictionary, mockk(relaxed = true), mockk(relaxed = true),
+        mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), SavedStateHandle()
+    ).also { store.put("review", it) }
 
     @Test
     fun startNextRound_restoredCompletedRound_waitsForExplicitNextAction() = runTest {
@@ -75,7 +83,7 @@ class ContextReviewViewModelTest {
     @Test
     fun openContextSource_onlyCurrentRevealedItem_canValidateAndNavigateOnce() = runTest {
         saved.value = contextRound(listOf(contextEntry(), contextEntry(id = 2, revealed = true)))
-        coEvery { repository.hasContextSource(any()) } returns true
+        coEvery { repository.hasStudySource(any()) } returns true
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
@@ -83,7 +91,7 @@ class ContextReviewViewModelTest {
             viewModel.openContextSource("item-2")
             viewModel.openContextSource("stale-item")
             runCurrent()
-            coVerify(exactly = 0) { repository.hasContextSource(any()) }
+            coVerify(exactly = 0) { repository.hasStudySource(any()) }
             expectNoEvents()
 
             val revealed = contextEntry(revealed = true)
@@ -92,9 +100,9 @@ class ContextReviewViewModelTest {
             viewModel.openContextSource("item-1")
             runCurrent()
             val source = awaitItem()
-            assertEquals(revealed.card, viewModel.consumeContextSource(source))
+            assertEquals(revealed.studyWord(), viewModel.consumeContextSource(source))
             assertNull(viewModel.consumeContextSource(source))
-            coVerify(exactly = 1) { repository.hasContextSource(revealed.card) }
+            coVerify(exactly = 1) { repository.hasStudySource(checkNotNull(revealed.studyWord())) }
             expectNoEvents()
         }
     }
@@ -102,7 +110,7 @@ class ContextReviewViewModelTest {
     @Test
     fun openContextSource_changedOrDeletedSource_reportsUnavailableWithoutNavigation() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
-        coEvery { repository.hasContextSource(any()) } returns false
+        coEvery { repository.hasStudySource(any()) } returns false
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
@@ -112,7 +120,7 @@ class ContextReviewViewModelTest {
                 assertEquals(ContextReviewEvent.SOURCE_UNAVAILABLE, awaitItem())
 
                 val entry = saved.value!!.current()!!
-                saved.value = contextRound(listOf(entry.copy(card = entry.card.copy(articleId = null))))
+                saved.value = contextRound(listOf(entry.copy(card = checkNotNull(entry.card).copy(articleId = null))))
                 runCurrent()
                 viewModel.openContextSource("item-1")
                 runCurrent()
@@ -126,7 +134,7 @@ class ContextReviewViewModelTest {
     @Test
     fun openContextSource_readFailure_reportsUnavailableButCancellationIsSilent() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
-        coEvery { repository.hasContextSource(any()) } throws IOException()
+        coEvery { repository.hasStudySource(any()) } throws IOException()
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
@@ -134,7 +142,7 @@ class ContextReviewViewModelTest {
                 viewModel.openContextSource("item-1")
                 runCurrent()
                 assertEquals(ContextReviewEvent.SOURCE_UNAVAILABLE, awaitItem())
-                coEvery { repository.hasContextSource(any()) } throws CancellationException()
+                coEvery { repository.hasStudySource(any()) } throws CancellationException()
                 viewModel.openContextSource("item-1")
                 runCurrent()
                 expectNoEvents()
@@ -147,14 +155,14 @@ class ContextReviewViewModelTest {
     fun cancelContextNavigation_lateNonCooperativeLookup_dropsNavigationAndFeedback() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
         val reply = CompletableDeferred<Boolean>()
-        coEvery { repository.hasContextSource(any()) } coAnswers { withContext(NonCancellable) { reply.await() } }
+        coEvery { repository.hasStudySource(any()) } coAnswers { withContext(NonCancellable) { reply.await() } }
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
             viewModel.uiEvent.test {
                 viewModel.openContextSource("item-1")
                 runCurrent()
-                coVerify(exactly = 1) { repository.hasContextSource(any()) }
+                coVerify(exactly = 1) { repository.hasStudySource(any()) }
                 viewModel.cancelContextNavigation()
                 reply.complete(true)
                 runCurrent()
@@ -168,14 +176,14 @@ class ContextReviewViewModelTest {
     fun openContextSource_turnChangesDuringLookup_dropsLateFailure() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
         val reply = CompletableDeferred<Boolean>()
-        coEvery { repository.hasContextSource(any()) } coAnswers { withContext(NonCancellable) { reply.await() } }
+        coEvery { repository.hasStudySource(any()) } coAnswers { withContext(NonCancellable) { reply.await() } }
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
             viewModel.uiEvent.test {
                 viewModel.openContextSource("item-1")
                 runCurrent()
-                coVerify(exactly = 1) { repository.hasContextSource(any()) }
+                coVerify(exactly = 1) { repository.hasStudySource(any()) }
                 saved.value = contextRound(listOf(contextEntry(id = 2, revealed = true)))
                 runCurrent()
                 reply.completeExceptionally(IOException())
@@ -192,7 +200,7 @@ class ContextReviewViewModelTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
         val sourceReply = CompletableDeferred<Boolean>()
         val gradeReply = CompletableDeferred<Boolean>()
-        coEvery { repository.hasContextSource(any()) } coAnswers { withContext(NonCancellable) { sourceReply.await() } }
+        coEvery { repository.hasStudySource(any()) } coAnswers { withContext(NonCancellable) { sourceReply.await() } }
         coEvery { repository.gradeContextAnswer(any(), any()) } coAnswers { gradeReply.await() }
         val viewModel = create()
         runCurrent()
@@ -203,7 +211,7 @@ class ContextReviewViewModelTest {
             runCurrent()
             assertTrue(viewModel.state.value.busy)
             viewModel.openContextSource("item-1")
-            coVerify(exactly = 1) { repository.hasContextSource(any()) }
+            coVerify(exactly = 1) { repository.hasStudySource(any()) }
             gradeReply.complete(true)
             sourceReply.complete(true)
             runCurrent()
@@ -215,7 +223,7 @@ class ContextReviewViewModelTest {
     @Test
     fun consumeContextSource_cancelledOrSupersededEvent_neverNavigates() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
-        coEvery { repository.hasContextSource(any()) } returns true
+        coEvery { repository.hasStudySource(any()) } returns true
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
@@ -232,14 +240,14 @@ class ContextReviewViewModelTest {
             runCurrent()
             val current = awaitItem()
             assertNull(viewModel.consumeContextSource(superseded))
-            assertEquals(current.entry.card, viewModel.consumeContextSource(current))
+            assertEquals(current.entry.studyWord(), viewModel.consumeContextSource(current))
         }
     }
 
     @Test
     fun consumeContextSource_currentAnswerHiddenAfterEmission_rejectsEvent() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
-        coEvery { repository.hasContextSource(any()) } returns true
+        coEvery { repository.hasStudySource(any()) } returns true
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
@@ -255,7 +263,7 @@ class ContextReviewViewModelTest {
     @Test
     fun consumeContextSource_dayChangesAfterEmission_rejectsOldRound() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
-        coEvery { repository.hasContextSource(any()) } returns true
+        coEvery { repository.hasStudySource(any()) } returns true
         val viewModel = create()
         runCurrent()
         viewModel.contextToOpen.test {
@@ -275,12 +283,12 @@ class ContextReviewViewModelTest {
     @Test
     fun openContextSource_noObserver_doesNotReplayOnReturn() = runTest {
         saved.value = contextRound(listOf(contextEntry(revealed = true)))
-        coEvery { repository.hasContextSource(any()) } returns true
+        coEvery { repository.hasStudySource(any()) } returns true
         val viewModel = create()
         runCurrent()
         viewModel.openContextSource("item-1")
         runCurrent()
-        coVerify(exactly = 1) { repository.hasContextSource(any()) }
+        coVerify(exactly = 1) { repository.hasStudySource(any()) }
         viewModel.contextToOpen.test { expectNoEvents() }
     }
 
@@ -355,6 +363,92 @@ class ContextReviewViewModelTest {
             runCurrent()
             assertEquals(ContextReviewEvent.CARD_CHANGED, awaitItem())
             assertEquals("item-1", viewModel.state.value.round!!.current()!!.item.itemToken)
+        }
+    }
+
+    @Test
+    fun skipMissingAnswer_hiddenStaleOrNonEmptyAnswer_doesNotWrite() = runTest {
+        val blank = contextEntry().let { it.copy(item = it.item.copy(meaningSnapshot = "")) }
+        saved.value = contextRound(listOf(blank))
+        val viewModel = create()
+        runCurrent()
+        viewModel.skipMissingAnswer("item-1")
+        saved.value = contextRound(listOf(blank.copy(item = blank.item.copy(revealed = true))))
+        runCurrent()
+        viewModel.skipMissingAnswer("stale-item")
+        viewModel.grade("item-1", ContextGrade.REMEMBERED)
+        saved.value = contextRound(listOf(contextEntry(revealed = true)))
+        runCurrent()
+        viewModel.skipMissingAnswer("item-1")
+        runCurrent()
+        coVerify(exactly = 0) {
+            repository.skipContextAnswer(any())
+            repository.gradeContextAnswer(any(), any())
+        }
+    }
+
+    @Test
+    fun skipMissingAnswer_inFlightDoubleTap_waitsForStoredSkipWithoutGrading() = runTest {
+        val blank = contextEntry(revealed = true).let { it.copy(item = it.item.copy(meaningSnapshot = "")) }
+        saved.value = contextRound(listOf(blank, contextEntry(id = 2)))
+        val reply = CompletableDeferred<Boolean>()
+        coEvery { repository.skipContextAnswer("item-1") } coAnswers {
+            reply.await().also {
+                saved.value = contextRound(listOf(blank.copy(item = blank.item.copy(skipped = true)), contextEntry(id = 2)))
+            }
+        }
+        val viewModel = create()
+        runCurrent()
+        viewModel.skipMissingAnswer("item-1")
+        viewModel.skipMissingAnswer("item-1")
+        runCurrent()
+        assertTrue(viewModel.state.value.busy)
+        assertEquals("item-1", viewModel.state.value.round!!.current()!!.item.itemToken)
+        reply.complete(true)
+        runCurrent()
+        assertFalse(viewModel.state.value.busy)
+        assertEquals("item-2", viewModel.state.value.round!!.current()!!.item.itemToken)
+        assertEquals(0, viewModel.state.value.round!!.answeredCount())
+        coVerify(exactly = 1) { repository.skipContextAnswer("item-1") }
+        coVerify(exactly = 0) { repository.gradeContextAnswer(any(), any()) }
+    }
+
+    @Test
+    fun skipMissingAnswer_writeFailureOrStaleResult_keepsTurnRetryable() = runTest {
+        val blank = contextEntry(revealed = true).let { it.copy(item = it.item.copy(meaningSnapshot = "")) }
+        saved.value = contextRound(listOf(blank))
+        coEvery { repository.skipContextAnswer("item-1") } throws IOException()
+        val viewModel = create()
+        runCurrent()
+        viewModel.uiEvent.test {
+            viewModel.skipMissingAnswer("item-1")
+            runCurrent()
+            assertEquals(ContextReviewEvent.SAVE_FAILED, awaitItem())
+            assertFalse(viewModel.state.value.busy)
+            assertEquals(blank, viewModel.state.value.round!!.current())
+            coEvery { repository.skipContextAnswer("item-1") } returns false
+            viewModel.skipMissingAnswer("item-1")
+            runCurrent()
+            assertEquals(ContextReviewEvent.CARD_CHANGED, awaitItem())
+            assertEquals(blank, viewModel.state.value.round!!.current())
+            assertFalse(viewModel.state.value.busy)
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun skipMissingAnswer_cancellation_doesNotEmitFailureOrAdvance() = runTest {
+        val blank = contextEntry(revealed = true).let { it.copy(item = it.item.copy(meaningSnapshot = "")) }
+        saved.value = contextRound(listOf(blank))
+        coEvery { repository.skipContextAnswer("item-1") } throws CancellationException()
+        val viewModel = create()
+        runCurrent()
+        viewModel.uiEvent.test {
+            viewModel.skipMissingAnswer("item-1")
+            runCurrent()
+            assertFalse(viewModel.state.value.busy)
+            assertEquals(blank, viewModel.state.value.round!!.current())
+            expectNoEvents()
         }
     }
 

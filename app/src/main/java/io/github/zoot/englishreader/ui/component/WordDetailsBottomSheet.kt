@@ -54,6 +54,7 @@ fun WordDetailsBottomSheet(
     inflectedForm: String? = null,
     // 歧义变形词（lives/leaves）的其余合法原形，在主释义下方并列展示
     alternates: List<AlternateDefinition> = emptyList(),
+    isSavingVocabulary: Boolean = false,
     /** 上报展开动画结束后的面板顶边屏幕坐标，供阅读列表计算实际遮挡。 */
     onVisibleTopChanged: (Float) -> Unit = {}
 ) {
@@ -97,7 +98,8 @@ fun WordDetailsBottomSheet(
             isLoadingAudio = isLoadingAudio,
             isInVocabulary = isInVocabulary,
             inflectedForm = inflectedForm,
-            alternates = alternates
+            alternates = alternates,
+            isSavingVocabulary = isSavingVocabulary
         )
     }
 }
@@ -115,7 +117,8 @@ internal fun WordDetailsContent(
     isLoadingAudio: Boolean = false,
     isInVocabulary: (String) -> Boolean = { false },
     inflectedForm: String? = null,
-    alternates: List<AlternateDefinition> = emptyList()
+    alternates: List<AlternateDefinition> = emptyList(),
+    isSavingVocabulary: Boolean = false
 ) {
     val loadingDescription = stringResource(R.string.loading_pronunciation)
 
@@ -236,6 +239,7 @@ internal fun WordDetailsContent(
                     AddToVocabularyButton(
                         word = alternate.word,
                         isSaved = isInVocabulary(alternate.word),
+                        isSaving = isSavingVocabulary,
                         onAddToVocabulary = onAddToVocabulary,
                         modifier = Modifier.testTag("word-details-add-alternate-$index"),
                         primary = false
@@ -258,6 +262,7 @@ internal fun WordDetailsContent(
             AddToVocabularyButton(
                 word = word,
                 isSaved = isInVocabulary(word),
+                isSaving = isSavingVocabulary,
                 onAddToVocabulary = onAddToVocabulary,
                 modifier = Modifier.testTag("word-details-add-main"),
                 primary = true
@@ -270,6 +275,7 @@ internal fun WordDetailsContent(
 private fun AddToVocabularyButton(
     word: String,
     isSaved: Boolean,
+    isSaving: Boolean,
     onAddToVocabulary: (String) -> Unit,
     modifier: Modifier,
     primary: Boolean
@@ -281,7 +287,7 @@ private fun AddToVocabularyButton(
     )
     Button(
         onClick = { onAddToVocabulary(word) },
-        enabled = !isSaved,
+        enabled = !isSaved && !isSaving,
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 52.dp)
@@ -311,7 +317,11 @@ private fun AddToVocabularyButton(
         Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = stringResource(
-                if (isSaved) R.string.already_in_vocabulary else R.string.add_to_vocabulary
+                when {
+                    isSaved -> R.string.already_in_vocabulary
+                    isSaving -> R.string.context_saving
+                    else -> R.string.add_to_vocabulary
+                }
             ),
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.Medium,

@@ -16,13 +16,4 @@ data class ContextWordSelection(
     val wordEndOffset: Int
 )
 
-data class ContextMeaningDraft(
-    val id: String,
-    val selection: ContextWordSelection,
-    val dictionaryWord: String,
-    val choices: List<String>,
-    val meaning: String = "",
-    val saving: Boolean = false
-)
-
-enum class ContextCardSaveResult { SAVED, ALREADY_EXISTS, SOURCE_CHANGED, INVALID_MEANING }
+enum class ContextCardSaveResult { SAVED, ALREADY_EXISTS, SOURCE_CHANGED }

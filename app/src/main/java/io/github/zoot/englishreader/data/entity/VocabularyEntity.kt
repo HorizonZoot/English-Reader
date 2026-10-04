@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -16,7 +17,8 @@ import androidx.room.PrimaryKey
     tableName = "vocabulary",
     indices = [
         Index(value = ["word", "articleId"], unique = true),
-        Index(value = ["articleId"])
+        Index(value = ["articleId"]),
+        Index(value = ["dueDay"])
     ],
     foreignKeys = [
         ForeignKey(
@@ -47,5 +49,12 @@ data class VocabularyEntity(
     val definitions: String? = null,
 
     /** 解释来源（api/llm） */
-    val definitionSource: String? = null
+    val definitionSource: String? = null,
+
+    val studyMeaning: String? = null,
+    @ColumnInfo(defaultValue = "0") val answerRevision: Long = 0,
+    @ColumnInfo(defaultValue = "0") val dueDay: Long = 0,
+    val lastReviewedAt: Long? = null,
+    @ColumnInfo(defaultValue = "0") val intervalDays: Int = 0,
+    @ColumnInfo(defaultValue = "0") val pendingStep: Int = 0
 )

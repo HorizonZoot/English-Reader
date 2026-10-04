@@ -1,6 +1,8 @@
 package io.github.zoot.englishreader.data.repository
 
 import io.github.zoot.englishreader.core.ContextGrade
+import io.github.zoot.englishreader.core.ContextReviewPolicy
+import io.github.zoot.englishreader.core.VocabularyStudyMode
 import io.github.zoot.englishreader.data.dao.ContextCardDao
 import io.github.zoot.englishreader.data.dao.VocabularyDao
 import io.github.zoot.englishreader.data.entity.ContextCardEntity
@@ -9,10 +11,13 @@ import io.github.zoot.englishreader.model.ContextReviewClock
 import io.github.zoot.englishreader.model.ContextWordSelection
 import io.github.zoot.englishreader.model.ReadingAnchor
 import io.github.zoot.englishreader.model.ReadingTextKind
+import io.github.zoot.englishreader.model.PreparedStudyMeaning
+import io.github.zoot.englishreader.model.StudyWord
 import io.github.zoot.englishreader.util.ParagraphAligner
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.entity.VocabularyWithSource
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -31,10 +36,35 @@ sealed interface VocabularyInsertResult {
 class VocabularyRepository @Inject constructor(
     private val vocabularyDao: VocabularyDao,
     private val contextCardDao: ContextCardDao,
-    private val reviewClock: ContextReviewClock
+    private val reviewClock: ContextReviewClock,
+    private val dictionaryRepository: DictionaryRepository
 ) {
     fun observeContextCards() = contextCardDao.observeCards()
     fun observeContextReview() = contextCardDao.observeRound()
+
+    fun observeStudyWords(): Flow<List<StudyWord>> = combine(
+        contextCardDao.observeCards(), vocabularyDao.getAllVocabularyWithSource()
+    ) { cards, vocabulary ->
+        (cards.map(StudyWord::Context) + vocabulary.map { StudyWord.Legacy(it.vocabulary, it.articleTitle) })
+            .sortedWith(compareByDescending<StudyWord> { it.createdAt }.thenBy { it.key })
+    }
+
+    suspend fun getStudyWord(key: String): StudyWord? = when {
+        key.startsWith("context:") -> key.removePrefix("context:").toLongOrNull()
+            ?.let { contextCardDao.card(it) }?.let(StudyWord::Context)
+        key.startsWith("vocabulary:") -> key.removePrefix("vocabulary:").toLongOrNull()
+            ?.let { contextCardDao.vocabulary(it) }?.let { StudyWord.Legacy(it) }
+        else -> null
+    }
+
+    suspend fun deleteStudyWord(word: StudyWord): Boolean = when (word) {
+        is StudyWord.Context -> deleteContextCard(word.card.id)
+        is StudyWord.Legacy -> {
+            vocabularyDao.deleteVocabulary(word.vocabulary)
+            true
+        }
+    }
+
     fun currentReviewDay(): Long = reviewClock.now().toLocalDate().toEpochDay()
     suspend fun getContextCard(id: Long) = contextCardDao.card(id)
     suspend fun deleteContextCard(id: Long): Boolean = contextCardDao.deleteCard(id) == 1
@@ -54,8 +84,6 @@ class VocabularyRepository @Inject constructor(
         dictionaryWord: String,
         meaning: String
     ): ContextCardSaveResult {
-        val confirmedMeaning = meaning.trim()
-        if (confirmedMeaning.isEmpty()) return ContextCardSaveResult.INVALID_MEANING
         if (!isValidSelection(selection)) return ContextCardSaveResult.SOURCE_CHANGED
         val now = reviewClock.now()
         val sentence = selection.sentence
@@ -74,10 +102,10 @@ class VocabularyRepository @Inject constructor(
             targetEndOffset = end,
             word = sentence.text.substring(start, end),
             dictionaryWord = dictionaryWord,
-            meaning = confirmedMeaning,
+            meaning = meaning.trim(),
             createdAt = now.toInstant().toEpochMilli(),
             updatedAt = now.toInstant().toEpochMilli(),
-            dueDay = now.toLocalDate().plusDays(1).toEpochDay()
+            dueDay = now.toLocalDate().toEpochDay()
         )
         return when (contextCardDao.insertForContent(card, selection.article.content)) {
             null -> ContextCardSaveResult.SOURCE_CHANGED
@@ -86,26 +114,47 @@ class VocabularyRepository @Inject constructor(
         }
     }
 
-    suspend fun editContextMeaning(card: ContextCardEntity, meaning: String): Boolean {
-        val now = reviewClock.now()
-        return contextCardDao.editMeaning(
-            card.id, card.answerRevision, meaning.trim(), now.toLocalDate().toEpochDay(), now.toInstant().toEpochMilli()
-        )
+    suspend fun startOrResumeContextReview(mode: VocabularyStudyMode = VocabularyStudyMode.DUE) =
+        startReview(mode, startNext = false)
+
+    suspend fun startNextContextReview(mode: VocabularyStudyMode = VocabularyStudyMode.DUE) =
+        startReview(mode, startNext = true)
+
+    private suspend fun startReview(mode: VocabularyStudyMode, startNext: Boolean) = reviewClock.now().let { now ->
+        val today = now.toLocalDate().toEpochDay()
+        val previous = contextCardDao.round()
+        val resuming = previous?.session?.localDay == today &&
+            (previous.current() != null || (!startNext && previous.session.mode == mode))
+        val meanings = if (resuming) emptyList() else {
+            val words = contextCardDao.studyCards(today, mode, ContextReviewPolicy.ROUND_SIZE).map(StudyWord::Context) +
+                contextCardDao.studyVocabulary(today, mode, ContextReviewPolicy.ROUND_SIZE).map { StudyWord.Legacy(it) }
+            words.map { word ->
+                val meaning = word.meaning.ifBlank {
+                    val lookupWord = (word as? StudyWord.Context)?.card?.dictionaryWord
+                        ?.takeIf(String::isNotBlank) ?: word.word
+                    dictionaryRepository.lookupOffline(lookupWord)?.entry?.let { entry ->
+                        entry.chinese.ifBlank { entry.english.orEmpty() }
+                    }.orEmpty()
+                }
+                PreparedStudyMeaning(word.key, word.word, word.answerRevision, meaning)
+            }
+        }
+        contextCardDao.startOrResume(today, now.toInstant().toEpochMilli(), startNext, mode, meanings)
     }
 
-    suspend fun startOrResumeContextReview() = reviewClock.now().let { now ->
-        contextCardDao.startOrResume(now.toLocalDate().toEpochDay(), now.toInstant().toEpochMilli())
-    }
-
-    suspend fun startNextContextReview() = reviewClock.now().let { now ->
-        contextCardDao.startOrResume(now.toLocalDate().toEpochDay(), now.toInstant().toEpochMilli(), startNext = true)
-    }
+    suspend fun skipContextAnswer(itemToken: String): Boolean =
+        contextCardDao.skip(itemToken, currentReviewDay())
 
     suspend fun revealContextAnswer(itemToken: String): Boolean =
         contextCardDao.reveal(itemToken, currentReviewDay())
 
     suspend fun gradeContextAnswer(itemToken: String, grade: ContextGrade): Boolean = reviewClock.now().let { now ->
         contextCardDao.rate(itemToken, grade, now.toLocalDate().toEpochDay(), now.toInstant().toEpochMilli())
+    }
+
+    suspend fun hasStudySource(word: StudyWord): Boolean = when (word) {
+        is StudyWord.Context -> hasContextSource(word.card)
+        is StudyWord.Legacy -> word.articleId?.let { contextCardDao.articleContent(it) != null } ?: false
     }
 
     suspend fun hasContextSource(card: ContextCardEntity): Boolean {

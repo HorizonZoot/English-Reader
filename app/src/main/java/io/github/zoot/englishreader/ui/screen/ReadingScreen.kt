@@ -95,7 +95,6 @@ import io.github.zoot.englishreader.ui.component.WholeTranslationSheet
 import io.github.zoot.englishreader.model.WholeTranslationSheetState
 import io.github.zoot.englishreader.ui.component.InteractiveText
 import io.github.zoot.englishreader.ui.component.InteractiveTextLongPressTarget
-import io.github.zoot.englishreader.ui.component.ContextMeaningDialog
 import io.github.zoot.englishreader.model.ContextWordSelection
 import io.github.zoot.englishreader.data.entity.ContextCardEntity
 import io.github.zoot.englishreader.viewmodel.ContextSaveFeedback
@@ -148,7 +147,7 @@ fun ReadingScreen(
     val isLoadingAudio by viewModel.isLoadingAudio.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoadingArticle.collectAsStateWithLifecycle()
     val contextCardSaved by viewModel.contextCardSaved.collectAsStateWithLifecycle()
-    val contextMeaningDraft by viewModel.contextMeaningDraft.collectAsStateWithLifecycle()
+    val isSavingContextCard by viewModel.isSavingContextCard.collectAsStateWithLifecycle()
     val fontSizeOption by viewModel.fontSizeOption.collectAsStateWithLifecycle()
     val themeOption by viewModel.themeOption.collectAsStateWithLifecycle()
     val aiSheetState by viewModel.aiSheetState.collectAsStateWithLifecycle()
@@ -365,7 +364,7 @@ fun ReadingScreen(
                 onDismiss = { ttsFailure = null; viewModel.stopAudio() }
             )
         }
-        wordDefinition?.takeIf { contextMeaningDraft == null }?.let { definition ->
+        wordDefinition?.let { definition ->
             WordDetailsBottomSheet(
                 word = definition.word,
                 phonetic = definition.phonetic,
@@ -374,34 +373,17 @@ fun ReadingScreen(
                 inflectedForm = definition.inflectedForm,
                 alternates = definition.alternates,
                 onDismiss = { viewModel.clearWordDefinition() },
-                onAddToVocabulary = viewModel::requestContextMeaning,
+                onAddToVocabulary = viewModel::saveContextWord,
                 onPlayAudio = {
                     viewModel.playWordAudio(definition.inflectedForm ?: definition.word, definition.audioUrl)
                 },
                 isLoadingAudio = isLoadingAudio,
                 isInVocabulary = { contextCardSaved },
+                isSavingVocabulary = isSavingContextCard,
                 onVisibleTopChanged = { top -> wordSheetTopOnScreen = top }
             )
         }
 
-        contextMeaningDraft?.let { draft ->
-            val selection = draft.selection
-            val start = selection.wordStartOffset - selection.sentence.startOffset
-            val end = selection.wordEndOffset - selection.sentence.startOffset
-            ContextMeaningDialog(
-                word = selection.sentence.text.substring(start, end),
-                sentence = selection.sentence.text,
-                targetStart = start,
-                targetEnd = end,
-                choices = draft.choices,
-                value = draft.meaning,
-                saving = draft.saving,
-                editing = false,
-                onValueChange = viewModel::updateContextMeaning,
-                onConfirm = viewModel::confirmContextMeaning,
-                onDismiss = viewModel::dismissContextMeaning
-            )
-        }
 
         ReadingScreenContent(
             article = article,

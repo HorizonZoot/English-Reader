@@ -7,10 +7,14 @@ import androidx.room.Query
 import androidx.room.Transaction
 import io.github.zoot.englishreader.core.ContextGrade
 import io.github.zoot.englishreader.core.ContextReviewPolicy
+import io.github.zoot.englishreader.core.VocabularyStudyMode
 import io.github.zoot.englishreader.data.entity.ContextCardEntity
 import io.github.zoot.englishreader.data.entity.ContextReviewItemEntity
 import io.github.zoot.englishreader.data.entity.ContextReviewRound
 import io.github.zoot.englishreader.data.entity.ContextReviewSessionEntity
+import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import io.github.zoot.englishreader.model.PreparedStudyMeaning
+import io.github.zoot.englishreader.model.StudyWord
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
@@ -21,6 +25,9 @@ abstract class ContextCardDao {
 
     @Query("SELECT * FROM context_cards WHERE id = :id")
     abstract suspend fun card(id: Long): ContextCardEntity?
+
+    @Query("SELECT * FROM vocabulary WHERE id = :id")
+    abstract suspend fun vocabulary(id: Long): VocabularyEntity?
 
     @Query("SELECT content FROM articles WHERE id = :articleId")
     abstract suspend fun articleContent(articleId: Long): String?
@@ -55,25 +62,18 @@ abstract class ContextCardDao {
     abstract suspend fun deleteCard(id: Long): Int
 
     @Query("""
-        UPDATE context_cards SET meaning = :meaning, answerRevision = answerRevision + 1,
-        dueDay = :tomorrow, pendingStep = 0, intervalDays = 0, lastReviewedAt = NULL, updatedAt = :now
-        WHERE id = :id AND answerRevision = :revision
+        SELECT * FROM context_cards WHERE :mode = 'LEARN' OR dueDay <= :today
+        ORDER BY CASE WHEN :mode = 'LEARN' THEN lastReviewedAt IS NOT NULL ELSE lastReviewedAt IS NULL END,
+            CASE WHEN :mode = 'LEARN' THEN lastReviewedAt ELSE dueDay END, createdAt, id LIMIT :limit
     """)
-    abstract suspend fun updateMeaning(id: Long, revision: Long, meaning: String, tomorrow: Long, now: Long): Int
+    abstract suspend fun studyCards(today: Long, mode: VocabularyStudyMode, limit: Int): List<ContextCardEntity>
 
-    @Query("UPDATE context_review_items SET skipped = 1 WHERE cardId = :cardId AND grade IS NULL")
-    abstract suspend fun skipPendingCard(cardId: Long)
-
-    @Transaction
-    open suspend fun editMeaning(id: Long, revision: Long, meaning: String, today: Long, now: Long): Boolean {
-        if (meaning.isBlank()) return false
-        val existing = card(id) ?: return false
-        if (existing.answerRevision != revision) return false
-        if (existing.meaning == meaning) return true
-        if (updateMeaning(id, revision, meaning, today + 1, now) != 1) return false
-        skipPendingCard(id)
-        return true
-    }
+    @Query("""
+        SELECT * FROM vocabulary WHERE :mode = 'LEARN' OR dueDay <= :today
+        ORDER BY CASE WHEN :mode = 'LEARN' THEN lastReviewedAt IS NOT NULL ELSE lastReviewedAt IS NULL END,
+            CASE WHEN :mode = 'LEARN' THEN lastReviewedAt ELSE dueDay END, createdAt, id LIMIT :limit
+    """)
+    abstract suspend fun studyVocabulary(today: Long, mode: VocabularyStudyMode, limit: Int): List<VocabularyEntity>
 
     @Query("""
         SELECT * FROM context_cards WHERE dueDay <= :today
@@ -100,17 +100,42 @@ abstract class ContextCardDao {
     abstract suspend fun skipPendingSession(token: String)
 
     @Transaction
-    open suspend fun startOrResume(today: Long, now: Long, startNext: Boolean = false): ContextReviewRound {
+    open suspend fun startOrResume(
+        today: Long,
+        now: Long,
+        startNext: Boolean = false,
+        mode: VocabularyStudyMode = VocabularyStudyMode.DUE,
+        meanings: List<PreparedStudyMeaning> = emptyList()
+    ): ContextReviewRound {
         val previous = round()
-        if (previous?.session?.localDay == today && (!startNext || previous.current() != null)) return previous
+        if (previous?.session?.localDay == today &&
+            (previous.current() != null || (!startNext && previous.session.mode == mode))
+        ) return previous
         previous?.let { skipPendingSession(it.session.sessionToken) }
-        val cards = dueCards(today, ContextReviewPolicy.ROUND_SIZE)
+        val words = (
+            studyCards(today, mode, ContextReviewPolicy.ROUND_SIZE).map(StudyWord::Context) +
+                studyVocabulary(today, mode, ContextReviewPolicy.ROUND_SIZE).map { StudyWord.Legacy(it) }
+            ).sortedWith(
+                compareBy<StudyWord> {
+                    if (mode == VocabularyStudyMode.LEARN) it.lastReviewedAt != null else it.lastReviewedAt == null
+                }.thenBy {
+                    if (mode == VocabularyStudyMode.LEARN) it.lastReviewedAt ?: Long.MIN_VALUE else it.dueDay
+                }.thenBy { it.createdAt }.thenBy { it.key }
+            ).take(ContextReviewPolicy.ROUND_SIZE)
         val token = UUID.randomUUID().toString()
-        putSession(ContextReviewSessionEntity(sessionToken = token, localDay = today, createdAt = now, initialCount = cards.size))
-        insertItems(cards.mapIndexed { index, card ->
+        putSession(ContextReviewSessionEntity(
+            sessionToken = token, localDay = today, createdAt = now, initialCount = words.size, mode = mode
+        ))
+        insertItems(words.mapIndexed { index, word ->
+            val meaning = meanings.firstOrNull {
+                it.key == word.key && it.word == word.word && it.answerRevision == word.answerRevision
+            }?.meaning ?: word.meaning
             ContextReviewItemEntity(
-                itemToken = UUID.randomUUID().toString(), sessionToken = token, cardId = card.id,
-                answerRevision = card.answerRevision, meaningSnapshot = card.meaning, position = index
+                itemToken = UUID.randomUUID().toString(), sessionToken = token,
+                cardId = (word as? StudyWord.Context)?.card?.id,
+                vocabularyId = (word as? StudyWord.Legacy)?.vocabulary?.id,
+                answerRevision = word.answerRevision, meaningSnapshot = meaning, position = index,
+                updatesSchedule = word.lastReviewedAt == null || word.dueDay <= today
             )
         })
         return checkNotNull(round())
@@ -125,6 +150,25 @@ abstract class ContextCardDao {
         if (round.session.localDay != today || round.current()?.item?.itemToken != token) return false
         return markRevealed(token) == 1
     }
+
+    @Query("UPDATE context_review_items SET skipped = 1 WHERE itemToken = :token AND grade IS NULL")
+    abstract suspend fun markSkipped(token: String): Int
+
+    @Transaction
+    open suspend fun skip(token: String, today: Long): Boolean {
+        val saved = round() ?: return false
+        if (saved.session.localDay != today || saved.current()?.item?.itemToken != token) return false
+        return markSkipped(token) == 1
+    }
+
+    @Query("""
+        UPDATE vocabulary SET dueDay = :dueDay, pendingStep = :pendingStep,
+        intervalDays = :intervalDays, lastReviewedAt = :now
+        WHERE id = :id AND answerRevision = :revision
+    """)
+    abstract suspend fun updateVocabularySchedule(
+        id: Long, revision: Long, dueDay: Long, pendingStep: Int, intervalDays: Int, now: Long
+    ): Int
 
     @Query("""
         UPDATE context_cards SET dueDay = :dueDay, pendingStep = :pendingStep,
@@ -153,11 +197,20 @@ abstract class ContextCardDao {
         if (round.session.localDay != today) return false
         val current = round.current() ?: return false
         val item = current.item
-        val card = current.card
-        if (item.itemToken != token || !item.revealed) return false
-        val schedule = if (item.isRetry) null else ContextReviewPolicy.schedule(today, card.pendingStep, grade)
+        val word = current.studyWord() ?: return false
+        if (item.itemToken != token || !item.revealed || item.meaningSnapshot.isBlank()) return false
+        val schedule = if (item.isRetry || !item.updatesSchedule) null
+            else ContextReviewPolicy.schedule(today, word.pendingStep, grade)
         if (schedule != null) {
-            check(updateSchedule(card.id, item.answerRevision, schedule.dueDay, schedule.pendingStep, schedule.intervalDays, now) == 1)
+            val updated = when (word) {
+                is StudyWord.Context -> updateSchedule(
+                    word.card.id, item.answerRevision, schedule.dueDay, schedule.pendingStep, schedule.intervalDays, now
+                )
+                is StudyWord.Legacy -> updateVocabularySchedule(
+                    word.vocabulary.id, item.answerRevision, schedule.dueDay, schedule.pendingStep, schedule.intervalDays, now
+                )
+            }
+            check(updated == 1)
         }
         check(markRated(token, grade, today, now, schedule?.intervalDays, schedule?.pendingStep) == 1)
         check(incrementAnswerCount(round.session.sessionToken) == 1)

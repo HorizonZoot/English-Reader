@@ -9,8 +9,12 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.semantics.SemanticsActions
-import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.isDialog
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -24,12 +28,13 @@ import androidx.lifecycle.LifecycleRegistry
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import io.github.zoot.englishreader.model.StudyWord
+import io.github.zoot.englishreader.ui.screen.vocabulary.StudyWordGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
 import io.github.zoot.englishreader.viewmodel.ContextLibraryState
-import io.github.zoot.englishreader.viewmodel.ContextMeaningEdit
 import io.github.zoot.englishreader.viewmodel.VocabularyUiEvent
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
 import io.mockk.every
@@ -62,11 +67,11 @@ class VocabularyScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
 
-    private val groupsState = MutableStateFlow<List<VocabularyGroup>>(emptyList())
-    private val detailsState = MutableStateFlow<Map<Long, VocabularyWordDetail>>(emptyMap())
+    private val groupsState = MutableStateFlow<List<StudyWordGroup>>(emptyList())
+    private val detailsState = MutableStateFlow<Map<String, VocabularyWordDetail>>(emptyMap())
     private val groupTypeState = MutableStateFlow<GroupType>(GroupType.ByTime)
-    private val vocabularyState = MutableStateFlow<List<VocabularyEntity>>(emptyList())
-    private val loadingAudioWordIdState = MutableStateFlow<Long?>(null)
+    private val libraryState = MutableStateFlow(ContextLibraryState(loading = false))
+    private val loadingAudioKeyState = MutableStateFlow<String?>(null)
     private val openedArticles = mutableListOf<Pair<Long, String>>()
     private val excerptsState = MutableStateFlow<List<ExcerptEntity>>(emptyList())
     private val excerptPlaybackState = MutableStateFlow<io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState?>(null)
@@ -77,17 +82,15 @@ class VocabularyScreenTest {
     private val uiEvents = MutableSharedFlow<VocabularyUiEvent>(extraBufferCapacity = 4)
 
     private val viewModel = mockk<VocabularyViewModel>(relaxed = true).also { model ->
-        every { model.groups } returns groupsState
-        every { model.details } returns detailsState
+        every { model.studyGroups } returns groupsState
+        every { model.studyDetails } returns detailsState
         every { model.groupType } returns groupTypeState
-        every { model.vocabulary } returns vocabularyState
-        every { model.loadingAudioWordId } returns loadingAudioWordIdState
+        every { model.loadingAudioKey } returns loadingAudioKeyState
         every { model.uiEvent } returns uiEvents
         every { model.excerpts } returns excerptsState
         every { model.excerptPlayback } returns excerptPlaybackState
         every { model.excerptToOpen } returns excerptToOpen
-        every { model.contextLibrary } returns MutableStateFlow(ContextLibraryState(loading = false))
-        every { model.contextEditor } returns MutableStateFlow<ContextMeaningEdit?>(null)
+        every { model.contextLibrary } returns libraryState
         every { model.contextToOpen } returns MutableSharedFlow()
     }
 
@@ -104,10 +107,12 @@ class VocabularyScreenTest {
             )
         )
 
+        scrollToText(string(R.string.vocabulary_group_today))
         composeRule.onNodeWithText(string(R.string.vocabulary_group_today)).assertIsDisplayed()
         // 「今天」用「N 个新单词」，其它分组用「N 个单词」。
         composeRule.onNodeWithText(string(R.string.vocabulary_group_words_new, 1))
             .assertIsDisplayed()
+        scrollToText("noticing")
         composeRule.onNodeWithText("noticing").assertIsDisplayed()
         composeRule.onNodeWithText("/ˈnəʊtɪsɪŋ/").assertIsDisplayed()
         composeRule.onNodeWithText("vt. 注意, 注意到").assertIsDisplayed()
@@ -118,8 +123,10 @@ class VocabularyScreenTest {
         groupTypeState.value = GroupType.ByAlphabet
         render(groups = listOf(group(VocabularyGroupId.Alphabet("A"), listOf(word(1L, "apple")))))
 
+        scrollToText("A")
         composeRule.onNodeWithText("A").assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.vocabulary_group_words, 1)).assertIsDisplayed()
+        scrollToText("apple")
         composeRule.onNodeWithText("apple").assertIsDisplayed()
     }
 
@@ -127,7 +134,7 @@ class VocabularyScreenTest {
     fun emptyVocabulary_showsEmptyStateAndHidesGroupingControl() {
         render(groups = emptyList())
 
-        composeRule.onNodeWithText(string(R.string.vocabulary_empty)).assertIsDisplayed()
+        composeRule.onNodeWithText(string(R.string.study_words_empty)).assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.vocabulary_group_by_time)).assertDoesNotExist()
     }
 
@@ -156,11 +163,10 @@ class VocabularyScreenTest {
             }
         )
 
-        composeRule.onNodeWithText(
-            string(R.string.vocabulary_source_article, "The Future of AI")
-        ).assertIsDisplayed()
+        scrollToText("The Future of AI")
+        composeRule.onNodeWithText("The Future of AI").assertIsDisplayed()
         composeRule.runOnIdle { events.clear() }
-        composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performClick()
+        composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performScrollTo().performClick()
 
         // 词一并带过去：阅读页要靠它滚动到并高亮该词所在的段落。
         composeRule.runOnIdle {
@@ -188,7 +194,7 @@ class VocabularyScreenTest {
             owner.registry.currentState = Lifecycle.State.RESUMED
         }
         composeRule.runOnIdle {
-            verify(exactly = 0) { viewModel.playWordAudio(any()) }
+            verify(exactly = 0) { viewModel.playStudyWordAudio(any()) }
             visible.value = false
         }
         composeRule.runOnIdle { verify(exactly = 2) { viewModel.stopAudio() } }
@@ -260,18 +266,17 @@ class VocabularyScreenTest {
     }
 
     @Test
-    fun tappingWord_playsItsPronunciation() {
+    fun pronunciationButton_playsItsWord() {
         val word = word(1L, "noticing")
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
 
-        composeRule.onNodeWithText("noticing").performClick()
+        composeRule.onNodeWithContentDescription(string(R.string.word_play_pronunciation, "noticing")).performClick()
 
-        verify(exactly = 1) { viewModel.playWordAudio(word) }
+        verify(exactly = 1) { viewModel.playStudyWordAudio(StudyWord.Legacy(word)) }
     }
 
     @Test
-    fun vocabularyList_isUnchangedByWordWithoutGloss() {
-        // 词库未收录的词只显示单词本身，不显示「未找到释义」这类占位。
+    fun wordWithoutGloss_displaysHonestMissingAnswerAndNoSourceAction() {
         val word = word(1L, "Zyxwvu", articleId = null)
         render(
             groups = listOf(group(VocabularyGroupId.Today, listOf(word))),
@@ -279,31 +284,23 @@ class VocabularyScreenTest {
         )
 
         composeRule.onNodeWithText("Zyxwvu").assertIsDisplayed()
-        composeRule.onNodeWithText(string(R.string.no_definitions_found)).assertDoesNotExist()
+        composeRule.onNodeWithText(string(R.string.study_answer_missing)).assertIsDisplayed()
+        composeRule.onNodeWithText("纠正释义").assertDoesNotExist()
+        composeRule.onNodeWithTag("context-meaning-input").assertDoesNotExist()
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).assertDoesNotExist()
     }
 
     @Test
-    fun wordNode_exposesDeleteAsACustomAccessibilityAction() {
-        // 左滑手势对读屏不可达，自定义操作是唯一的删除入口。它必须挂在读屏真正会
-        // 聚焦的节点上——即因 clickable 而合并子节点、带 contentDescription 的单词行。
-        // 挂在外层 SwipeToDismissBox（不合并、无文本）上时读屏遍历会跳过它。
+    fun deleteButton_isAccessibleAndRequiresConfirmation() {
         val word = word(1L, "noticing")
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
 
-        val actions = composeRule
-            .onNodeWithContentDescription(string(R.string.word_play_pronunciation, "noticing"))
-            .fetchSemanticsNode()
-            .config
-            .getOrNull(SemanticsActions.CustomActions)
-            .orEmpty()
-
-        val delete = actions.firstOrNull { it.label == string(R.string.delete_vocabulary) }
-        assertTrue("delete action missing on the focusable word node", delete != null)
-
-        composeRule.runOnUiThread { delete!!.action() }
-
-        verify(exactly = 1) { viewModel.deleteVocabulary(word) }
+        scrollToText(string(R.string.action_delete))
+        composeRule.onNodeWithText(string(R.string.action_delete)).performScrollTo().performClick()
+        verify(exactly = 0) { viewModel.deleteStudyWord(any()) }
+        composeRule.onNodeWithText(string(R.string.study_delete_title)).assertIsDisplayed()
+        composeRule.onNode(hasText(string(R.string.action_delete)) and hasAnyAncestor(isDialog())).performClick()
+        verify(exactly = 1) { viewModel.deleteStudyWord(StudyWord.Legacy(word)) }
     }
 
     @Test
@@ -320,7 +317,7 @@ class VocabularyScreenTest {
 
         composeRule.runOnIdle {
             detailsState.value = mapOf(
-                word.id to VocabularyWordDetail(
+                "vocabulary:${word.id}" to VocabularyWordDetail(
                     phonetic = "/ˈnəʊtɪsɪŋ/",
                     chinese = "vt. 注意, 注意到"
                 )
@@ -384,6 +381,7 @@ class VocabularyScreenTest {
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performClick()
         verify(exactly = 1) { viewModel.openExcerpt(excerpt) }
         composeRule.onNodeWithText(string(R.string.favorites_words)).performClick()
+        scrollToText("noticing")
         composeRule.onNodeWithText("noticing").assertIsDisplayed()
     }
 
@@ -454,9 +452,11 @@ class VocabularyScreenTest {
         details: Map<Long, VocabularyWordDetail> = emptyMap(),
         onOpenArticle: (Long, String) -> Unit = { articleId, word -> openedArticles += articleId to word }
     ) {
-        groupsState.value = groups
-        detailsState.value = details
-        vocabularyState.value = groups.flatMap { it.words }
+        groupsState.value = groups.map { group ->
+            StudyWordGroup(group.id, group.words.map { StudyWord.Legacy(it, details[it.id]?.sourceTitle) }, group.isExpanded)
+        }
+        detailsState.value = details.mapKeys { "vocabulary:${it.key}" }
+        libraryState.value = ContextLibraryState(words = groupsState.value.flatMap { it.words }, loading = false)
         composeRule.setContent {
             Box(modifier = Modifier.width(360.dp).fillMaxHeight()) {
                 VocabularyScreen(
@@ -466,7 +466,11 @@ class VocabularyScreenTest {
                 )
             }
         }
-        composeRule.onNodeWithText(string(R.string.context_legacy_words)).performClick()
+        groups.firstOrNull()?.words?.firstOrNull()?.let { scrollToText(it.word) }
+    }
+
+    private fun scrollToText(text: String) {
+        composeRule.onNodeWithTag("context-card-list").performScrollToNode(hasText(text))
     }
 
     private fun string(resourceId: Int, vararg args: Any): String =

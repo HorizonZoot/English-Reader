@@ -5,8 +5,11 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.zoot.englishreader.core.ContextGrade
+import io.github.zoot.englishreader.core.VocabularyStudyMode
+import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.database.EnglishReaderDatabase
 import io.github.zoot.englishreader.data.entity.ContextCardEntity
+import io.github.zoot.englishreader.model.PreparedStudyMeaning
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.*
@@ -40,6 +43,93 @@ class ContextCardDaoAndroidTest {
     )
 
     @Test
+    fun learn_mixedSourcesAndFuturePractice_resumesModeAndOnlyUpdatesEligibleSchedules() = runBlocking {
+        dao.insertCard(card(1))
+        val future = card(2, today + 9).copy(lastReviewedAt = 10, intervalDays = 9, pendingStep = 2)
+        dao.insertCard(future)
+        val fresh = VocabularyEntity(id = 1, word = "new", definitions = "新", createdAt = 3)
+        val due = VocabularyEntity(id = 2, word = "due", definitions = "到期", createdAt = 4,
+            dueDay = today, lastReviewedAt = 5, intervalDays = 3, pendingStep = 1)
+        db.vocabularyDao().insertVocabularyIfAbsent(fresh)
+        db.vocabularyDao().insertVocabularyIfAbsent(due)
+        val round = dao.startOrResume(today, 100, mode = VocabularyStudyMode.LEARN)
+        assertEquals(4, round.entries.size)
+        assertEquals(listOf("context:1", "vocabulary:1", "vocabulary:2", "context:2"),
+            round.entries.sortedBy { it.item.position }.map { it.studyWord()!!.key })
+        assertEquals(false, round.entries.single { it.item.cardId == 2L }.item.updatesSchedule)
+        val first = round.current()!!.item
+        dao.reveal(first.itemToken, today)
+        val resumed = dao.startOrResume(today, 101, mode = VocabularyStudyMode.DUE)
+        assertEquals(round.session.sessionToken, resumed.session.sessionToken)
+        assertEquals(VocabularyStudyMode.LEARN, resumed.session.mode)
+        assertTrue(resumed.current()!!.item.revealed)
+        repeat(4) {
+            val item = dao.round()!!.current()!!.item
+            dao.reveal(item.itemToken, today)
+            assertTrue(dao.rate(item.itemToken, ContextGrade.REMEMBERED, today, 102L + it))
+            assertFalse(dao.rate(item.itemToken, ContextGrade.FORGOTTEN, today, 110L + it))
+        }
+        assertEquals(future, dao.card(2))
+        assertEquals(today + 1, dao.vocabulary(1)!!.dueDay)
+        assertEquals(today + 3, dao.vocabulary(2)!!.dueDay)
+        assertEquals(4, dao.round()!!.answeredCount())
+        val nextMode = dao.startOrResume(today, 120, mode = VocabularyStudyMode.DUE)
+        assertNotEquals(round.session.sessionToken, nextMode.session.sessionToken)
+        assertNull(nextMode.current())
+        db.openHelper.readableDatabase.query("SELECT COUNT(*) FROM context_review_items WHERE grade IS NOT NULL").use {
+            assertTrue(it.moveToFirst())
+            assertEquals(4, it.getInt(0))
+        }
+    }
+
+    @Test
+    fun legacy_blankAnswer_skipsWithoutProgressAndUsesLaterDictionarySnapshot() = runBlocking {
+        val word = VocabularyEntity(id = 1, word = "unknown", createdAt = 1)
+        db.vocabularyDao().insertVocabularyIfAbsent(word)
+        val old = dao.startOrResume(today, 100).current()!!.item
+        assertTrue(dao.reveal(old.itemToken, today))
+        assertFalse(dao.rate(old.itemToken, ContextGrade.REMEMBERED, today, 101))
+        assertTrue(dao.skip(old.itemToken, today))
+        assertFalse(dao.skip(old.itemToken, today))
+        assertEquals(word, dao.vocabulary(1))
+        assertEquals(0, dao.round()!!.answeredCount())
+        assertNull(dao.round()!!.current())
+        assertTrue(dao.round()!!.entries.single().item.skipped)
+        assertNull(dao.round()!!.entries.single().item.grade)
+
+        val next = dao.startOrResume(today, 103, startNext = true, meanings = listOf(
+            PreparedStudyMeaning("vocabulary:1", "unknown", 0, "dictionary answer")
+        )).current()!!.item
+        assertEquals("dictionary answer", next.meaningSnapshot)
+        assertEquals(0L, next.answerRevision)
+        assertEquals(word, dao.vocabulary(1))
+        assertFalse(next.revealed)
+        assertFalse(dao.rate(old.itemToken, ContextGrade.REMEMBERED, today, 104))
+        assertFalse(dao.rate(next.itemToken, ContextGrade.REMEMBERED, today, 104))
+        assertTrue(dao.reveal(next.itemToken, today))
+        assertTrue(dao.rate(next.itemToken, ContextGrade.REMEMBERED, today, 105))
+        assertEquals(1, dao.round()!!.answeredCount())
+        assertNull(dao.vocabulary(1)!!.studyMeaning)
+    }
+
+    @Test
+    fun sourceDeletion_duplicateLegacyWord_keepsLearnedRowAndHistory() = runBlocking {
+        val orphan = VocabularyEntity(id = 1, word = "bank", definitions = "saved", createdAt = 1)
+        val learned = orphan.copy(id = 2, articleId = 7, lastReviewedAt = 10, dueDay = today)
+        db.vocabularyDao().insertVocabularyIfAbsent(orphan)
+        db.vocabularyDao().insertVocabularyIfAbsent(learned)
+        val item = dao.startOrResume(today, 100).current()!!.item
+        assertEquals(2L, item.vocabularyId)
+        dao.reveal(item.itemToken, today)
+        dao.rate(item.itemToken, ContextGrade.REMEMBERED, today, 101)
+        val saved = dao.vocabulary(2)!!
+        db.articleDao().deleteArticleById(7)
+        assertEquals(saved.copy(articleId = null), dao.vocabulary(2))
+        assertEquals(orphan, dao.vocabulary(1))
+        assertEquals(ContextGrade.REMEMBERED, dao.round()!!.entries.single { it.item.vocabularyId == 2L }.item.grade)
+    }
+
+    @Test
     fun save_exactDuplicate_doesNotOverwrite_andChangedSourceCannotInsert() = runBlocking {
         val original = card()
         assertEquals(1L, dao.insertForContent(original, content))
@@ -57,8 +147,8 @@ class ContextCardDaoAndroidTest {
         dao.insertCard(card(14, today + 1))
         val first = dao.startOrResume(today, 100)
         assertEquals(10, first.entries.size)
-        assertEquals(13L, first.current()!!.card.id)
-        assertFalse(first.entries.any { it.card.id == 14L })
+        assertEquals(13L, first.current()!!.item.cardId)
+        assertFalse(first.entries.any { it.item.cardId == 14L })
         val token = first.current()!!.item.itemToken
         assertTrue(dao.reveal(token, today))
         val resumed = dao.startOrResume(today, 200)
@@ -75,7 +165,7 @@ class ContextCardDaoAndroidTest {
         assertTrue(dao.reveal(first.item.itemToken, today))
         assertTrue(dao.rate(first.item.itemToken, ContextGrade.FORGOTTEN, today, 102))
         assertFalse(dao.rate(first.item.itemToken, ContextGrade.REMEMBERED, today, 103))
-        val schedule = dao.card(first.card.id)!!
+        val schedule = dao.card(checkNotNull(first.item.cardId))!!
         assertEquals(today + 1, schedule.dueDay)
         assertEquals(0, schedule.pendingStep)
         repeat(3) {
@@ -86,11 +176,11 @@ class ContextCardDaoAndroidTest {
         }
         val retry = dao.round()!!.current()!!
         assertTrue(retry.item.isRetry)
-        assertEquals(first.card.id, retry.card.id)
+        assertEquals(first.item.cardId, retry.item.cardId)
         assertTrue(dao.reveal(retry.item.itemToken, today))
         assertTrue(dao.rate(retry.item.itemToken, ContextGrade.FORGOTTEN, today, 120))
-        assertEquals(schedule, dao.card(first.card.id))
-        assertEquals(1, dao.round()!!.entries.count { it.item.cardId == first.card.id && it.item.isRetry })
+        assertEquals(schedule, dao.card(checkNotNull(first.item.cardId)))
+        assertEquals(1, dao.round()!!.entries.count { it.item.cardId == first.item.cardId && it.item.isRetry })
     }
 
     @Test
@@ -113,20 +203,29 @@ class ContextCardDaoAndroidTest {
     }
 
     @Test
-    fun editMeaning_invalidatesOldAnswerAndResetsFutureDue_withoutDeletingHistory() = runBlocking {
-        (1L..4L).forEach { dao.insertCard(card(it)) }
-        val first = dao.startOrResume(today, 100).current()!!
-        dao.reveal(first.item.itemToken, today)
-        dao.rate(first.item.itemToken, ContextGrade.FORGOTTEN, today, 101)
-        assertTrue(dao.editMeaning(first.card.id, first.card.answerRevision, "financial institution", today, 102))
-        assertFalse(dao.editMeaning(first.card.id, first.card.answerRevision, "stale", today, 103))
-        val edited = dao.card(first.card.id)!!
-        assertEquals(today + 1, edited.dueDay)
-        assertNull(edited.lastReviewedAt)
-        assertEquals(0, edited.pendingStep)
-        val entries = dao.round()!!.entries.filter { it.card.id == first.card.id }
-        assertEquals("river side", entries.single { it.item.grade != null }.item.meaningSnapshot)
-        assertTrue(entries.single { it.item.isRetry }.item.skipped)
+    fun preparedAnswers_sourceIdentityWordAndRevisionGuardSnapshotsWithoutChangingSavedData() = runBlocking {
+        val original = card().copy(meaning = "", answerRevision = 2)
+        val legacy = VocabularyEntity(id = 1, word = "bank", studyMeaning = "saved manual answer", answerRevision = 3)
+        dao.insertCard(original)
+        db.vocabularyDao().insertVocabularyIfAbsent(legacy)
+        val round = dao.startOrResume(today, 100, mode = VocabularyStudyMode.LEARN, meanings = listOf(
+            PreparedStudyMeaning("context:1", "other", 2, "wrong word"),
+            PreparedStudyMeaning("context:1", "bank", 1, "stale revision"),
+            PreparedStudyMeaning("context:1", "bank", 2, "automatic dictionary answer"),
+            PreparedStudyMeaning("vocabulary:1", "bank", 2, "stale legacy revision")
+        ))
+        assertEquals("automatic dictionary answer", round.entries.single { it.item.cardId == 1L }.item.meaningSnapshot)
+        assertEquals("saved manual answer", round.entries.single { it.item.vocabularyId == 1L }.item.meaningSnapshot)
+        assertEquals(original, dao.card(1))
+        assertEquals(legacy, dao.vocabulary(1))
+        val first = round.current()!!.item
+        assertTrue(dao.reveal(first.itemToken, today))
+        val resumed = dao.startOrResume(today, 101, mode = VocabularyStudyMode.LEARN, meanings = listOf(
+            PreparedStudyMeaning("context:1", "bank", 2, "later dictionary answer")
+        ))
+        assertEquals(round.session.sessionToken, resumed.session.sessionToken)
+        assertEquals(first.meaningSnapshot, resumed.current()!!.item.meaningSnapshot)
+        assertTrue(resumed.current()!!.item.revealed)
     }
 
     @Test
@@ -140,7 +239,7 @@ class ContextCardDaoAndroidTest {
         val next = dao.startOrResume(today + 1, 200)
         assertNotEquals(old.session.sessionToken, next.session.sessionToken)
         assertFalse(next.entries.any { it.item.isRetry })
-        assertNull(dao.card(unanswered.card.id)!!.lastReviewedAt)
+        assertNull(dao.card(checkNotNull(unanswered.item.cardId))!!.lastReviewedAt)
         assertFalse(dao.reveal(unanswered.item.itemToken, today + 1))
         db.openHelper.readableDatabase.query("SELECT grade, skipped FROM context_review_items WHERE sessionToken = ?", arrayOf(old.session.sessionToken)).use { cursor ->
             var historyCount = 0
@@ -202,7 +301,7 @@ class ContextCardDaoAndroidTest {
         assertNull(resumed.current())
         val next = dao.startOrResume(today, 121, startNext = true)
         assertNotEquals(original.session.sessionToken, next.session.sessionToken)
-        assertEquals(11L, next.current()!!.card.id)
+        assertEquals(11L, next.current()!!.item.cardId)
         assertEquals(0, next.answeredCount())
     }
 }

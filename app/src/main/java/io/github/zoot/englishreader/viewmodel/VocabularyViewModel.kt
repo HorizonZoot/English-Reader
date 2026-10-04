@@ -4,7 +4,8 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.zoot.englishreader.data.audio.PronunciationAudioCache
-import io.github.zoot.englishreader.data.audio.WordAudioUrl
+import io.github.zoot.englishreader.data.audio.WordPronunciation
+import io.github.zoot.englishreader.model.StudyWord
 import io.github.zoot.englishreader.data.entity.ContextCardEntity
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
@@ -14,6 +15,7 @@ import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.repository.DictionaryRepository
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
 import io.github.zoot.englishreader.ui.screen.vocabulary.AlphabetGrouper
+import io.github.zoot.englishreader.ui.screen.vocabulary.groupStudyWords
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.TimeGrouper
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
@@ -30,11 +32,9 @@ import kotlinx.coroutines.CompletableDeferred
 import io.github.zoot.englishreader.util.TtsPlayer
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.job
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
@@ -165,17 +165,15 @@ class VocabularyViewModel @Inject constructor(
 
     private val groupingTime = MutableStateFlow(VocabularyGroupingTime.current())
     private val contextRefresh = MutableStateFlow(0)
-    private val _contextEditor = MutableStateFlow<ContextMeaningEdit?>(null)
-    val contextEditor = _contextEditor.asStateFlow()
-    private val contextDeletesInFlight = mutableSetOf<Long>()
+    private val contextDeletesInFlight = mutableSetOf<String>()
     private var contextSourceRequest: Job? = null
     private val _contextToOpen = MutableSharedFlow<ContextCardEntity>()
     val contextToOpen = _contextToOpen.asSharedFlow()
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val contextLibrary = contextRefresh.flatMapLatest {
-        combine(vocabularyRepository.observeContextCards(), vocabularyRepository.observeContextReview()) { cards, round ->
-            ContextLibraryState(cards = cards, round = round, loading = false)
+        combine(vocabularyRepository.observeStudyWords(), vocabularyRepository.observeContextReview()) { words, round ->
+            ContextLibraryState(words = words, round = round, loading = false)
         }.onStart { emit(ContextLibraryState()) }
             .catch { error ->
                 if (error is CancellationException) throw error
@@ -185,62 +183,29 @@ class VocabularyViewModel @Inject constructor(
         library.copy(today = Instant.ofEpochMilli(time.nowMillis).atZone(time.zoneId).toLocalDate().toEpochDay())
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIPTION_TIMEOUT_MS), ContextLibraryState())
 
+    val studyGroups = combine(contextLibrary, groupType, expandedGroups, groupingTime) { library, type, expanded, time ->
+        groupStudyWords(library.words, type, expanded, time)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIPTION_TIMEOUT_MS), emptyList())
+
     fun retryContextLibrary() { contextRefresh.value++ }
 
-    fun editContextMeaning(card: ContextCardEntity) {
-        _contextEditor.value = ContextMeaningEdit(card, card.meaning)
-    }
-
-    fun updateContextMeaning(meaning: String) {
-        _contextEditor.value?.takeUnless { it.saving }?.let { _contextEditor.value = it.copy(meaning = meaning) }
-    }
-
-    fun dismissContextEditor() {
-        if (_contextEditor.value?.saving != true) _contextEditor.value = null
-    }
-
-    fun confirmContextMeaning() {
-        val edit = _contextEditor.value?.takeUnless { it.saving || it.meaning.isBlank() } ?: return
-        _contextEditor.value = edit.copy(saving = true)
+    fun deleteStudyWord(word: StudyWord) {
+        if (!contextDeletesInFlight.add(word.key)) return
+        stopAudio()
         viewModelScope.launch {
             try {
-                val saved = vocabularyRepository.editContextMeaning(edit.card, edit.meaning)
-                currentCoroutineContext().ensureActive()
-                if (_contextEditor.value?.requestId != edit.requestId) return@launch
-                if (saved) {
-                    _contextEditor.value = null
-                    _uiEvent.send(VocabularyUiEvent.ContextMeaningSaved)
-                } else {
-                    _contextEditor.value = edit
-                    _uiEvent.send(VocabularyUiEvent.ContextCardChanged)
+                if (vocabularyRepository.deleteStudyWord(word)) {
+                    _uiEvent.send(when (word) {
+                        is StudyWord.Legacy -> VocabularyUiEvent.Deleted(word.vocabulary)
+                        is StudyWord.Context -> VocabularyUiEvent.ContextDeleted
+                    })
                 }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                if (_contextEditor.value?.requestId == edit.requestId) {
-                    _contextEditor.value = edit
-                    _uiEvent.send(VocabularyUiEvent.ContextSaveFailed)
-                }
-            } finally {
-                _contextEditor.value?.takeIf { it.requestId == edit.requestId && it.saving }?.let {
-                    _contextEditor.value = it.copy(saving = false)
-                }
-            }
-        }
-    }
-
-    fun deleteContextCard(card: ContextCardEntity) {
-        if (!contextDeletesInFlight.add(card.id)) return
-        if (_contextEditor.value?.card?.id == card.id) _contextEditor.value = null
-        viewModelScope.launch {
-            try {
-                if (vocabularyRepository.deleteContextCard(card.id)) _uiEvent.send(VocabularyUiEvent.ContextDeleted)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
                 _uiEvent.send(VocabularyUiEvent.ContextDeleteFailed)
             } finally {
-                contextDeletesInFlight.remove(card.id)
+                contextDeletesInFlight.remove(word.key)
             }
         }
     }
@@ -381,101 +346,21 @@ class VocabularyViewModel @Inject constructor(
         }
     }
 
-    /**
-     * 正在准备读音的生词 id；null 表示当前没有在准备。
-     *
-     * 只覆盖「需要联网取音频」的那一段：命中本地缓存时 prepare() 是毫秒级，闪一下
-     * 转圈比不转更难看。
-     */
-    private val _loadingAudioWordId = MutableStateFlow<Long?>(null)
-    val loadingAudioWordId: StateFlow<Long?> = _loadingAudioWordId.asStateFlow()
-
-    private var playAudioJob: Job? = null
-    private var fallbackJob: Job? = null
+    private val pronunciation = WordPronunciation(
+        viewModelScope, audioPlayer, networkChecker, ttsPlayer, pronunciationAudioCache,
+        settingsPreferences, onUnavailable = { _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable) }
+    )
+    val loadingAudioKey = pronunciation.loadingKey
+    val loadingAudioWordId = loadingAudioKey.map { it?.removePrefix("vocabulary:")?.toLongOrNull() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
     private var audioGeneration = 0L
-    private var audioRequestToken: AudioPlayer.RequestToken? = null
 
-    /** 缓存优先；每个新意图都停止旧的媒体与 TTS，包括同词重播和离线兜底。 */
-    fun playWordAudio(vocabulary: VocabularyEntity) {
-        val word = vocabulary.word.trim()
-        if (word.isEmpty()) return
-        val key = WordLookupKey.normalize(word)
-        stopAudio(preserveTtsPreparation = true)
-        val generation = audioGeneration
-        val token = audioPlayer.beginRequest()
-        audioRequestToken = token
-        playAudioJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
-            try {
-                val cached = pronunciationAudioCache.get(key)
-                if (!isCurrentAudioRequest(generation, token)) return@launch
-                if (cached == null && !networkChecker.isOnline()) {
-                    speakViaTts(word, generation, token)
-                    return@launch
-                }
-                if (cached == null) _loadingAudioWordId.value = vocabulary.id
-                val url = cached?.absolutePath ?: WordAudioUrl.forWord(word)
-                audioPlayer.play(
-                    token = token,
-                    url = url,
-                    onError = { exception ->
-                        viewModelScope.launch playbackFailure@ {
-                            if (!isCurrentAudioRequest(generation, token)) return@playbackFailure
-                            fallbackJob?.cancel()
-                            fallbackJob = currentCoroutineContext().job
-                            _loadingAudioWordId.value = null
-                            Log.e("VocabularyViewModel", "Audio playback failed: ${exception.javaClass.simpleName}")
-                            if (cached != null) {
-                                try {
-                                    pronunciationAudioCache.invalidate(key)
-                                } catch (cancellation: CancellationException) {
-                                    throw cancellation
-                                } catch (_: Exception) {
-                                    Log.w("VocabularyViewModel", "Failed to invalidate pronunciation audio")
-                                }
-                            }
-                            if (isCurrentAudioRequest(generation, token)) speakViaTts(word, generation, token)
-                        }
-                    }
-                )
-                if (!isCurrentAudioRequest(generation, token)) return@launch
-                _loadingAudioWordId.value = null
-                // 播放启动后独立填充缓存，不阻塞本次发声。
-                if (cached == null && networkChecker.isOnline()) {
-                    viewModelScope.launch {
-                        runCatching { pronunciationAudioCache.download(key, url) }
-                            .onFailure { if (it is CancellationException) throw it }
-                    }
-                }
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (exception: Exception) {
-                if (!isCurrentAudioRequest(generation, token)) return@launch
-                Log.e("VocabularyViewModel", "Failed to start audio playback: ${exception.javaClass.simpleName}")
-                speakViaTts(word, generation, token)
-            } finally {
-                if (generation == audioGeneration) _loadingAudioWordId.value = null
-            }
-        }
-        playAudioJob?.start()
-    }
+    fun playWordAudio(vocabulary: VocabularyEntity) = playStudyWordAudio(StudyWord.Legacy(vocabulary))
 
-    private fun isCurrentAudioRequest(generation: Long, token: AudioPlayer.RequestToken): Boolean =
-        generation == audioGeneration && audioRequestToken === token && audioPlayer.isCurrent(token)
-
-    /** 联网同意与所选音色每次现读，单词语速保持 1 倍。 */
-    private suspend fun speakViaTts(word: String, generation: Long, token: AudioPlayer.RequestToken) {
-        try {
-            val allowNetwork = settingsPreferences.allowNetworkTts.first()
-            val voiceId = settingsPreferences.ttsReadingSettings.first().voiceId
-            if (!isCurrentAudioRequest(generation, token)) return
-            ttsPlayer.speakWord(word, voiceId, allowNetwork) {
-                if (isCurrentAudioRequest(generation, token)) _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable)
-            }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Exception) {
-            if (isCurrentAudioRequest(generation, token)) _uiEvent.trySend(VocabularyUiEvent.AudioUnavailable)
-        }
+    fun playStudyWordAudio(word: StudyWord) {
+        if (word.word.isBlank()) return
+        stopExcerptPlayback()
+        pronunciation.play(word.key, word.word)
     }
 
     fun toggleExcerptPlayback(excerpt: ExcerptEntity) {
@@ -523,19 +408,15 @@ class VocabularyViewModel @Inject constructor(
     fun stopAudio() = stopAudio(preserveTtsPreparation = false)
 
     private fun stopAudio(preserveTtsPreparation: Boolean) {
+        stopExcerptPlayback()
+        pronunciation.stop(preserveTtsPreparation)
+    }
+
+    private fun stopExcerptPlayback() {
         audioGeneration++
         excerptPlaybackJob?.cancel()
         excerptPlaybackJob = null
         _excerptPlayback.value = null
-        playAudioJob?.cancel()
-        playAudioJob = null
-        fallbackJob?.cancel()
-        fallbackJob = null
-        val token = audioRequestToken
-        audioRequestToken = null
-        token?.let(audioPlayer::stop)
-        _loadingAudioWordId.value = null
-        if (preserveTtsPreparation) ttsPlayer.stopBeforeReading() else ttsPlayer.stop()
     }
 
     override fun onCleared() {
@@ -575,6 +456,48 @@ class VocabularyViewModel @Inject constructor(
                 chinese = gloss?.chinese,
                 headword = gloss?.headword,
                 sourceTitle = row.articleTitle
+            )
+        }
+        details.takeIf { revision == dictionaryRepository.revision.value }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val studyDetails: StateFlow<Map<String, VocabularyWordDetail>> = combine(
+        contextLibrary.map { it.words }.distinctUntilChanged(), dictionaryRepository.revision
+    ) { words, revision -> words to revision }
+        .mapLatest { (words, revision) -> resolveStudyDetails(words, revision) }
+        .filterNotNull()
+        .catch { error ->
+            if (error is CancellationException) throw error
+            _uiEvent.send(VocabularyUiEvent.DictionaryLoadFailed)
+            emit(emptyMap())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(SUBSCRIPTION_TIMEOUT_MS), emptyMap())
+
+    private suspend fun resolveStudyDetails(
+        words: List<StudyWord>,
+        revision: Long
+    ): Map<String, VocabularyWordDetail>? = glossCacheMutex.withLock {
+        if (revision != dictionaryRepository.revision.value) return@withLock null
+        if (glossCacheRevision != revision) {
+            glossCache.clear()
+            glossCacheRevision = revision
+        }
+        val details = words.associate { word ->
+            val key = WordLookupKey.normalize(word.word)
+            if (!glossCache.containsKey(key)) {
+                val gloss = lookupGloss(key)
+                currentCoroutineContext().ensureActive()
+                if (revision != dictionaryRepository.revision.value) return@withLock null
+                glossCache[key] = gloss
+            }
+            val gloss = glossCache[key]
+            val dictionaryPhonetic = gloss?.phonetic?.takeIf(String::isNotBlank)
+            word.key to VocabularyWordDetail(
+                phonetic = dictionaryPhonetic ?: (word as? StudyWord.Legacy)?.vocabulary?.phonetic,
+                chinese = gloss?.chinese,
+                headword = gloss?.headword?.takeIf { dictionaryPhonetic != null },
+                sourceTitle = word.sourceTitle
             )
         }
         details.takeIf { revision == dictionaryRepository.revision.value }

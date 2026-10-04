@@ -99,7 +99,7 @@ class ReadingWholeTranslationCompletionTest {
             every { isLoadingArticle } returns MutableStateFlow(false)
             every { vocabularyWords } returns MutableStateFlow(emptySet())
             every { contextCardSaved } returns MutableStateFlow(false)
-            every { contextMeaningDraft } returns MutableStateFlow(null)
+            every { isSavingContextCard } returns MutableStateFlow(false)
             every { contextSaved } returns emptyFlow()
             every { fontSizeOption } returns MutableStateFlow(FontSizeOption.DEFAULT)
             every { themeOption } returns MutableStateFlow(ThemeOption.DEFAULT)

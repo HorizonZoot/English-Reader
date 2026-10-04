@@ -468,17 +468,29 @@ fun EnglishReaderNavigation() {
                 onStartContextReview = {
                     navController.navigate("context-review") { launchSingleTop = true }
                 },
+                onStartStudy = { mode ->
+                    navController.navigate("context-review?mode=${mode.name}") { launchSingleTop = true }
+                },
                 onOpenContext = { articleId, contextCardId ->
                     navController.navigate("reading/$articleId?contextCardId=$contextCardId")
                 }
             )
         }
 
-        composable("context-review") {
+        composable(
+            route = "context-review?mode={mode}",
+            arguments = listOf(navArgument("mode") {
+                type = NavType.StringType
+                defaultValue = "DUE"
+            })
+        ) {
             ContextReviewScreen(
                 onBack = { navController.popBackStack() },
                 onOpenContext = { articleId, contextCardId ->
                     navController.navigate("reading/$articleId?contextCardId=$contextCardId")
+                },
+                onOpenArticle = { articleId, word ->
+                    navController.navigate("reading/$articleId?word=${Uri.encode(word)}")
                 }
             )
         }

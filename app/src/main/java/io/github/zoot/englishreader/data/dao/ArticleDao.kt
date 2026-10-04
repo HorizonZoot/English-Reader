@@ -219,13 +219,16 @@ interface ArticleDao {
      *
      * 背景：vocabulary 有 UNIQUE(word, articleId)，但 SQLite 认为 NULL 彼此不相等，
      * 若同一 word 关联多篇样本文章，解绑后会得到多行 (word, NULL) 且约束不拦截，造成生词本重复。
-     * 因此解绑前删除以下冗余样本关联行，保证每个 word 解绑后最多一行 (word, NULL)：
+     * 有学习状态、编辑释义或会话/历史记录的词条不参与去重，避免删除学习数据。
+     * 因此解绑前删除以下冗余样本关联行，保证未学习的重复收藏不会增加：
      *  - 该 word 在生词本中已存在 articleId IS NULL 的行（那行保留，样本关联行删掉）；
      *  - 或同一 word 有多个样本关联行时，仅保留 id 最小的一行，其余删掉。
      */
     @Query(
         "DELETE FROM vocabulary " +
             "WHERE articleId IN (SELECT id FROM articles WHERE source IN (:sampleSources)) " +
+            "AND lastReviewedAt IS NULL AND studyMeaning IS NULL AND answerRevision = 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM context_review_items r WHERE r.vocabularyId = vocabulary.id) " +
             "AND EXISTS (" +
             "  SELECT 1 FROM vocabulary w WHERE w.word = vocabulary.word AND (" +
             "    w.articleId IS NULL " +
@@ -293,6 +296,8 @@ interface ArticleDao {
     @Query(
         "DELETE FROM vocabulary " +
             "WHERE articleId IN (:articleIds) " +
+            "AND lastReviewedAt IS NULL AND studyMeaning IS NULL AND answerRevision = 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM context_review_items r WHERE r.vocabularyId = vocabulary.id) " +
             "AND EXISTS (" +
             "  SELECT 1 FROM vocabulary w WHERE w.word = vocabulary.word AND (" +
             "    w.articleId IS NULL " +

@@ -8,7 +8,6 @@ import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.data.entity.ContextCardEntity
 import io.github.zoot.englishreader.model.ContextCardSaveResult
-import io.github.zoot.englishreader.model.ContextMeaningDraft
 import io.github.zoot.englishreader.model.ContextWordSelection
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
 import io.github.zoot.englishreader.data.ai.AiExplanationInput
@@ -92,7 +91,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
-import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -356,8 +354,8 @@ class ReadingViewModel @Inject constructor(
     private var contextSelectionGeneration = 0L
     private val _contextCardSaved = MutableStateFlow(false)
     val contextCardSaved = _contextCardSaved.asStateFlow()
-    private val _contextMeaningDraft = MutableStateFlow<ContextMeaningDraft?>(null)
-    val contextMeaningDraft = _contextMeaningDraft.asStateFlow()
+    private val _isSavingContextCard = MutableStateFlow(false)
+    val isSavingContextCard = _isSavingContextCard.asStateFlow()
     private val _contextSaved = Channel<ContextSaveFeedback>(Channel.BUFFERED)
     val contextSaved = _contextSaved.receiveAsFlow()
 
@@ -398,65 +396,42 @@ class ReadingViewModel @Inject constructor(
             selection.article.id == _article.value?.id && selection.article.content == _article.value?.content &&
             VocabularyRepository.isValidSelection(selection)
 
-    fun requestContextMeaning(dictionaryWord: String) {
+    fun saveContextWord(dictionaryWord: String) {
         val selection = contextSelection ?: return
-        if (!isCurrentContextSource(selection) || _contextMeaningDraft.value != null) return
+        if (!isCurrentContextSource(selection) || _isSavingContextCard.value) return
         if (_contextCardSaved.value) {
             _contextSaved.trySend(ContextSaveFeedback.ALREADY_EXISTS)
             return
         }
-        val definition = _wordDefinition.value
-        val choices = if (definition?.word == dictionaryWord) {
-            definition.chineseDefinitions + definition.englishDefinitions
+        val definition = _wordDefinition.value ?: return
+        val (chinese, english) = if (definition.word == dictionaryWord) {
+            definition.chineseDefinitions to definition.englishDefinitions
         } else {
-            definition?.alternates?.firstOrNull { it.word == dictionaryWord }?.let {
-                it.chineseDefinitions + it.englishDefinitions
-            }.orEmpty()
+            val alternate = definition.alternates.firstOrNull { it.word == dictionaryWord } ?: return
+            alternate.chineseDefinitions to alternate.englishDefinitions
         }
-        _contextMeaningDraft.value = ContextMeaningDraft(
-            UUID.randomUUID().toString(), selection, dictionaryWord,
-            choices.map(String::trim).filter(String::isNotEmpty).distinct()
-        )
-    }
-
-    fun updateContextMeaning(meaning: String) {
-        val draft = _contextMeaningDraft.value ?: return
-        if (!draft.saving) _contextMeaningDraft.value = draft.copy(meaning = meaning)
-    }
-
-    fun dismissContextMeaning() {
-        if (_contextMeaningDraft.value?.saving != true) _contextMeaningDraft.value = null
-    }
-
-    fun confirmContextMeaning() {
-        val draft = _contextMeaningDraft.value ?: return
-        if (draft.saving || draft.meaning.isBlank() || !isCurrentContextSource(draft.selection)) return
-        _contextMeaningDraft.value = draft.copy(saving = true)
+        val meaning = chinese.filter(String::isNotBlank).ifEmpty { english }
+            .map(String::trim).filter(String::isNotEmpty).distinct().joinToString("\n")
         val generation = contextSelectionGeneration
+        _isSavingContextCard.value = true
         viewModelScope.launch {
             try {
-                val feedback = when (vocabularyRepository.saveContextCard(draft.selection, draft.dictionaryWord, draft.meaning)) {
+                val feedback = when (vocabularyRepository.saveContextCard(selection, dictionaryWord, meaning)) {
                     ContextCardSaveResult.SAVED -> ContextSaveFeedback.SAVED
                     ContextCardSaveResult.ALREADY_EXISTS -> ContextSaveFeedback.ALREADY_EXISTS
                     ContextCardSaveResult.SOURCE_CHANGED -> ContextSaveFeedback.SOURCE_CHANGED
-                    ContextCardSaveResult.INVALID_MEANING -> ContextSaveFeedback.FAILED
                 }
-                if (generation != contextSelectionGeneration || _contextMeaningDraft.value?.id != draft.id) return@launch
+                if (generation != contextSelectionGeneration || !isCurrentContextSource(selection)) return@launch
                 if (feedback == ContextSaveFeedback.SAVED || feedback == ContextSaveFeedback.ALREADY_EXISTS) {
                     _contextCardSaved.value = true
-                    _contextMeaningDraft.value = null
                 }
                 _contextSaved.trySend(feedback)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
-                if (generation == contextSelectionGeneration && _contextMeaningDraft.value?.id == draft.id) {
-                    _contextSaved.trySend(ContextSaveFeedback.FAILED)
-                }
+                if (generation == contextSelectionGeneration) _contextSaved.trySend(ContextSaveFeedback.FAILED)
             } finally {
-                if (_contextMeaningDraft.value?.id == draft.id) {
-                    _contextMeaningDraft.value = _contextMeaningDraft.value?.copy(saving = false)
-                }
+                if (generation == contextSelectionGeneration) _isSavingContextCard.value = false
             }
         }
     }
@@ -898,7 +873,7 @@ class ReadingViewModel @Inject constructor(
     private fun invalidateWordLookup() {
         contextSelectionGeneration++
         contextSelection = null
-        _contextMeaningDraft.value = null
+        _isSavingContextCard.value = false
         _contextCardSaved.value = false
         wordSelectionGeneration++
         lookupWordJob?.cancel()

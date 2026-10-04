@@ -4,6 +4,9 @@ import io.github.zoot.englishreader.data.entity.ContextCardEntity
 import io.github.zoot.englishreader.data.entity.ContextReviewEntry
 import io.github.zoot.englishreader.data.entity.ContextReviewItemEntity
 import io.github.zoot.englishreader.data.entity.ContextReviewRound
+import io.github.zoot.englishreader.data.entity.VocabularyEntity
+import io.github.zoot.englishreader.core.VocabularyStudyMode
+import io.github.zoot.englishreader.util.SavedVocabularyMeaning
 import io.github.zoot.englishreader.data.entity.ContextReviewSessionEntity
 
 fun contextCard(id: Long = 1, dueDay: Long = 20_000) = ContextCardEntity(
@@ -31,15 +34,39 @@ fun contextEntry(
     )
 }
 
+fun legacyEntry(
+    vocabulary: VocabularyEntity = VocabularyEntity(
+        id = 1, word = "bank", articleId = 7, definitions = "n. 银行", createdAt = 1
+    ),
+    position: Int = 0,
+    revealed: Boolean = false,
+    sessionToken: String = "round"
+) = ContextReviewEntry(
+    item = ContextReviewItemEntity(
+        itemToken = "vocabulary-item-${vocabulary.id}",
+        sessionToken = sessionToken,
+        cardId = null,
+        vocabularyId = vocabulary.id,
+        answerRevision = vocabulary.answerRevision,
+        meaningSnapshot = vocabulary.studyMeaning ?: SavedVocabularyMeaning.parse(vocabulary.definitions).orEmpty(),
+        position = position,
+        revealed = revealed
+    ),
+    card = null,
+    vocabulary = vocabulary
+)
+
 fun contextRound(
     entries: List<ContextReviewEntry> = listOf(contextEntry()),
     day: Long = 20_000,
-    token: String = "round"
+    token: String = "round",
+    mode: VocabularyStudyMode = VocabularyStudyMode.DUE
 ) = ContextReviewRound(
     ContextReviewSessionEntity(
         sessionToken = token, localDay = day, createdAt = 1,
         initialCount = entries.count { !it.item.isRetry },
-        answerCount = entries.count { it.item.grade != null }
+        answerCount = entries.count { it.item.grade != null },
+        mode = mode
     ),
     entries
 )

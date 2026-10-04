@@ -3,11 +3,31 @@ package io.github.zoot.englishreader.data.entity
 import io.github.zoot.englishreader.core.ContextGrade
 import io.github.zoot.englishreader.util.contextEntry
 import io.github.zoot.englishreader.util.contextRound
+import io.github.zoot.englishreader.util.legacyEntry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ContextReviewRoundTest {
+    @Test
+    fun current_sameNumericIdFromBothSources_keepsIndependentTurnsAndRevisionGuards() {
+        val context = contextEntry(1)
+        val legacy = legacyEntry(position = 1)
+        assertEquals(context, contextRound(listOf(legacy, context)).current())
+        val graded = context.copy(item = context.item.copy(grade = ContextGrade.REMEMBERED))
+        assertEquals(legacy, contextRound(listOf(graded, legacy)).current())
+        assertNull(contextRound(listOf(graded, legacy.copy(vocabulary = null))).current())
+        val revised = legacy.copy(vocabulary = checkNotNull(legacy.vocabulary).copy(answerRevision = 1))
+        assertNull(contextRound(listOf(graded, revised)).current())
+    }
+
+    @Test
+    fun item_invalidSourceCombination_isRejected() {
+        val item = legacyEntry().item
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { item.copy(vocabularyId = null) }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) { item.copy(cardId = 1) }
+    }
+
     @Test
     fun current_deletedRatedCard_keepsEarnedRetryAndAnswerCount() {
         val graded = (1L..4L).map { id ->
@@ -17,7 +37,7 @@ class ContextReviewRoundTest {
         val retry = first.copy(item = first.item.copy(itemToken = "retry", grade = null,
             isRetry = true, revealed = true, eligibleAfterCount = 4))
         val before = contextRound(graded + retry)
-        val after = before.copy(entries = before.entries.filter { it.card.id != 2L })
+        val after = before.copy(entries = before.entries.filter { it.card?.id != 2L })
         assertEquals(4, after.answeredCount())
         assertEquals(retry, after.current())
     }
@@ -29,7 +49,7 @@ class ContextReviewRoundTest {
         val third = contextEntry(3)
         val round = contextRound(listOf(third, first, second))
         assertEquals(first, round.current())
-        assertEquals(second, round.copy(entries = listOf(third, first.copy(card = first.card.copy(answerRevision = 1)), second)).current())
+        assertEquals(second, round.copy(entries = listOf(third, first.copy(card = checkNotNull(first.card).copy(answerRevision = 1)), second)).current())
         assertEquals(third, round.copy(entries = listOf(third, first.copy(item = first.item.copy(skipped = true)), second.copy(item = second.item.copy(grade = ContextGrade.REMEMBERED)))).current())
     }
 
@@ -75,7 +95,7 @@ class ContextReviewRoundTest {
         val first = contextEntry(1).let { it.copy(item = it.item.copy(grade = ContextGrade.FUZZY)) }
         val second = contextEntry(2, revealed = true)
         val original = contextRound(listOf(first, second))
-        val restored = ContextReviewRound(original.session.copy(), original.entries.map { it.copy(item = it.item.copy(), card = it.card.copy()) })
+        val restored = ContextReviewRound(original.session.copy(), original.entries.map { it.copy(item = it.item.copy(), card = it.card?.copy()) })
         assertEquals(second, restored.current())
         assertEquals(1, restored.answeredCount())
     }

@@ -88,7 +88,9 @@ class VocabularyViewModel @Inject constructor(
         if (!excerptDeletesInFlight.add(excerpt.id)) return
         viewModelScope.launch {
             try {
-                if (excerptRepository.delete(excerpt.id)) _uiEvent.send(VocabularyUiEvent.ExcerptDeleted(excerpt))
+                excerptRepository.deleteForUndo(excerpt.id)?.let { deleted ->
+                    _uiEvent.send(VocabularyUiEvent.ExcerptDeleted(deleted))
+                }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
@@ -163,7 +165,65 @@ class VocabularyViewModel @Inject constructor(
     )
     val expandedGroups: StateFlow<Set<VocabularyGroupId>> = _expandedGroups.asStateFlow()
 
+    private val _selectedTab = MutableStateFlow(0)
+    val selectedTab = _selectedTab.asStateFlow()
+    private val _sortMenuExpanded = MutableStateFlow(false)
+    val sortMenuExpanded = _sortMenuExpanded.asStateFlow()
+    private val _expandedExcerpts = MutableStateFlow<Set<Long>>(emptySet())
+    val expandedExcerpts = _expandedExcerpts.asStateFlow()
+    private val _showStudyInfo = MutableStateFlow(false)
+    val showStudyInfo = _showStudyInfo.asStateFlow()
+    private val _excerptMenuId = MutableStateFlow<Long?>(null)
+    val excerptMenuId = _excerptMenuId.asStateFlow()
+    private val _wordMenuKey = MutableStateFlow<String?>(null)
+    val wordMenuKey = _wordMenuKey.asStateFlow()
+    private val _wordToDelete = MutableStateFlow<StudyWord?>(null)
+    val wordToDelete = _wordToDelete.asStateFlow()
+
+    fun setExcerptMenu(id: Long?) { _excerptMenuId.value = id }
+    fun setWordMenu(key: String?) { _wordMenuKey.value = key }
+    fun confirmWordDeletion(word: StudyWord?) { _wordToDelete.value = word }
+
+    fun selectTab(index: Int) {
+        cancelExcerptNavigation()
+        cancelContextNavigation()
+        stopAudio()
+        _sortMenuExpanded.value = false
+        _excerptMenuId.value = null
+        _wordMenuKey.value = null
+        _wordToDelete.value = null
+        _selectedTab.value = index.coerceIn(0, 1)
+    }
+
+    fun setSortMenuExpanded(expanded: Boolean) { _sortMenuExpanded.value = expanded }
+    fun setStudyInfoVisible(visible: Boolean) { _showStudyInfo.value = visible }
+    fun toggleExcerptExpanded(id: Long) {
+        _expandedExcerpts.update { if (id in it) it - id else it + id }
+    }
+
+    private val sortWrites = Mutex()
+    private var sortRequest = 0L
+    private var committedGroupType: GroupType = GroupType.ByTime
+
+    init {
+        viewModelScope.launch {
+            try {
+                val request = sortRequest
+                val alphabetical = settingsPreferences.favoritesAlphabetical.first()
+                if (request == sortRequest) {
+                    committedGroupType = if (alphabetical) GroupType.ByAlphabet else GroupType.ByTime
+                    applyGroupType(committedGroupType)
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                _uiEvent.send(VocabularyUiEvent.SortPreferenceFailed)
+            }
+        }
+    }
+
     private val groupingTime = MutableStateFlow(VocabularyGroupingTime.current())
+    val favoritesTime = groupingTime.asStateFlow()
     private val contextRefresh = MutableStateFlow(0)
     private val contextDeletesInFlight = mutableSetOf<String>()
     private var contextSourceRequest: Job? = null
@@ -273,8 +333,31 @@ class VocabularyViewModel @Inject constructor(
      * 切换分组类型
      */
     fun switchGroupType(type: GroupType) {
+        if (type == GroupType.ByArticle) {
+            return
+        }
+        sortRequest += 1
+        val request = sortRequest
+        applyGroupType(type)
+        viewModelScope.launch {
+            sortWrites.withLock {
+                try {
+                    settingsPreferences.setFavoritesAlphabetical(type == GroupType.ByAlphabet)
+                    committedGroupType = type
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    if (request == sortRequest) {
+                        applyGroupType(committedGroupType)
+                    }
+                    _uiEvent.send(VocabularyUiEvent.SortPreferenceFailed)
+                }
+            }
+        }
+    }
+
+    private fun applyGroupType(type: GroupType) {
         _groupType.value = type
-        // 切换分组时重置展开状态
         _expandedGroups.value = when (type) {
             GroupType.ByTime -> setOf(VocabularyGroupId.Today)
             else -> emptySet()

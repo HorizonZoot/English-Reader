@@ -20,6 +20,7 @@ import io.github.zoot.englishreader.data.repository.AiExplanationStartResult
 import io.github.zoot.englishreader.data.repository.AiExplanationOperationRegistry
 import io.github.zoot.englishreader.core.ExcerptRange
 import io.github.zoot.englishreader.data.repository.ExcerptRepository
+import io.github.zoot.englishreader.core.ExcerptOverlapChoice
 import io.github.zoot.englishreader.data.repository.ExcerptSaveResult
 import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.data.repository.BookRepository
@@ -444,25 +445,67 @@ class ReadingViewModel @Inject constructor(
     private val _excerptSaved = Channel<ExcerptSaveFeedback>(Channel.BUFFERED)
     val excerptSaved = _excerptSaved.receiveAsFlow()
 
+    private class PendingExcerptSave(val article: ArticleEntity, val paragraphIndex: Int, val range: ExcerptRange, val generation: Long)
+    private var pendingExcerptSave: PendingExcerptSave? = null
+    private val _excerptOverlapPending = MutableStateFlow(false)
+    val excerptOverlapPending = _excerptOverlapPending.asStateFlow()
+    private val _excerptSaveBusy = MutableStateFlow(false)
+    val excerptSaveBusy = _excerptSaveBusy.asStateFlow()
+    private var excerptSaveRequest = 0L
+
+    fun dismissExcerptOverlap() {
+        pendingExcerptSave = null
+        _excerptOverlapPending.value = false
+        excerptSaveRequest++
+    }
+
+    fun resolveExcerptOverlap(choice: ExcerptOverlapChoice) {
+        val request = pendingExcerptSave ?: return
+        if (request.generation != articleLoadGeneration) {
+            dismissExcerptOverlap()
+            return
+        }
+        saveExcerptRequest(request.article, request.paragraphIndex, request.range, choice)
+    }
+
     fun saveExcerpt(snapshot: ArticleEntity, paragraphIndex: Int, range: ExcerptRange) {
-        if (_isLoadingArticle.value || snapshot.id != requestedArticleId ||
+        if (_excerptSaveBusy.value) return
+        dismissExcerptOverlap()
+        saveExcerptRequest(snapshot, paragraphIndex, range, null)
+    }
+
+    private fun saveExcerptRequest(snapshot: ArticleEntity, paragraphIndex: Int, range: ExcerptRange, choice: ExcerptOverlapChoice?) {
+        if (_excerptSaveBusy.value || _isLoadingArticle.value || snapshot.id != requestedArticleId ||
             snapshot.content != _article.value?.content
-        ) return
+        ) {
+            dismissExcerptOverlap()
+            return
+        }
         val generation = articleLoadGeneration
+        val requestId = ++excerptSaveRequest
+        _excerptSaveBusy.value = true
         viewModelScope.launch {
-            val feedback = try {
-                when (excerptRepository.save(snapshot, paragraphIndex, range)) {
-                    ExcerptSaveResult.SAVED -> ExcerptSaveFeedback.SAVED
-                    ExcerptSaveResult.ALREADY_EXISTS -> ExcerptSaveFeedback.ALREADY_EXISTS
-                    ExcerptSaveResult.SOURCE_CHANGED -> ExcerptSaveFeedback.SOURCE_CHANGED
+            try {
+                val result = excerptRepository.save(snapshot, paragraphIndex, range, choice)
+                if (generation != articleLoadGeneration || requestId != excerptSaveRequest || snapshot.content != _article.value?.content) return@launch
+                if (result == ExcerptSaveResult.OVERLAP) {
+                    pendingExcerptSave = PendingExcerptSave(snapshot, paragraphIndex, range, generation)
+                    _excerptOverlapPending.value = true
+                } else {
+                    dismissExcerptOverlap()
+                    _excerptSaved.trySend(when (result) {
+                        ExcerptSaveResult.SAVED -> ExcerptSaveFeedback.SAVED
+                        ExcerptSaveResult.ALREADY_EXISTS -> ExcerptSaveFeedback.ALREADY_EXISTS
+                        ExcerptSaveResult.SOURCE_CHANGED -> ExcerptSaveFeedback.SOURCE_CHANGED
+                        ExcerptSaveResult.OVERLAP -> error("Handled above")
+                    })
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Exception) {
-                ExcerptSaveFeedback.FAILED
-            }
-            if (generation == articleLoadGeneration && snapshot.content == _article.value?.content) {
-                _excerptSaved.trySend(feedback)
+                if (generation == articleLoadGeneration && requestId == excerptSaveRequest) _excerptSaved.trySend(ExcerptSaveFeedback.FAILED)
+            } finally {
+                _excerptSaveBusy.value = false
             }
         }
     }

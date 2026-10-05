@@ -1,7 +1,9 @@
 package io.github.zoot.englishreader.data.repository
 
+import io.github.zoot.englishreader.core.ExcerptOverlapChoice
 import io.github.zoot.englishreader.core.ExcerptRange
 import io.github.zoot.englishreader.data.dao.ExcerptDao
+import io.github.zoot.englishreader.data.dao.ExcerptWriteResult
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.model.ReadingAnchor
@@ -11,20 +13,26 @@ import java.security.MessageDigest
 import javax.inject.Inject
 import javax.inject.Singleton
 
-enum class ExcerptSaveResult { SAVED, ALREADY_EXISTS, SOURCE_CHANGED }
+enum class ExcerptSaveResult { SAVED, ALREADY_EXISTS, SOURCE_CHANGED, OVERLAP }
 
 @Singleton
 class ExcerptRepository @Inject constructor(private val dao: ExcerptDao) {
     fun observeAll() = dao.observeAll()
     suspend fun getById(id: Long) = dao.getById(id)
     suspend fun delete(id: Long): Boolean = dao.delete(id) > 0
+    suspend fun deleteForUndo(id: Long): ExcerptEntity? = dao.deleteForUndo(id)
     suspend fun restore(excerpt: ExcerptEntity) = dao.restore(excerpt)
     suspend fun hasSource(excerpt: ExcerptEntity): Boolean {
         val articleId = excerpt.articleId ?: return false
         return dao.articleExists(articleId)
     }
 
-    suspend fun save(article: ArticleEntity, paragraphIndex: Int, range: ExcerptRange): ExcerptSaveResult {
+    suspend fun save(
+        article: ArticleEntity,
+        paragraphIndex: Int,
+        range: ExcerptRange,
+        overlapChoice: ExcerptOverlapChoice? = null
+    ): ExcerptSaveResult {
         val paragraph = ParagraphAligner.splitParagraphs(article.content).getOrNull(paragraphIndex)
             ?: return ExcerptSaveResult.SOURCE_CHANGED
         if (range.endOffset > paragraph.length) return ExcerptSaveResult.SOURCE_CHANGED
@@ -40,10 +48,11 @@ class ExcerptRepository @Inject constructor(private val dao: ExcerptDao) {
             endOffset = range.endOffset,
             text = text
         )
-        return when (dao.insertForContent(excerpt, article.content)) {
-            null -> ExcerptSaveResult.SOURCE_CHANGED
-            -1L -> ExcerptSaveResult.ALREADY_EXISTS
-            else -> ExcerptSaveResult.SAVED
+        return when (dao.saveResolvingOverlap(excerpt, article.content, paragraph, overlapChoice)) {
+            ExcerptWriteResult.SOURCE_CHANGED -> ExcerptSaveResult.SOURCE_CHANGED
+            ExcerptWriteResult.ALREADY_EXISTS -> ExcerptSaveResult.ALREADY_EXISTS
+            ExcerptWriteResult.SAVED -> ExcerptSaveResult.SAVED
+            ExcerptWriteResult.OVERLAP -> ExcerptSaveResult.OVERLAP
         }
     }
 

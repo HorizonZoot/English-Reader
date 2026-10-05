@@ -1,48 +1,26 @@
 package io.github.zoot.englishreader.ui.screen
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.material.icons.automirrored.outlined.VolumeUp
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowLeft
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -55,7 +33,7 @@ import io.github.zoot.englishreader.model.StudyWord
 import io.github.zoot.englishreader.ui.component.ContextSentence
 import io.github.zoot.englishreader.ui.screen.vocabulary.observeVocabularyTime
 import io.github.zoot.englishreader.ui.screen.vocabulary.vocabularyTimeSignals
-import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
+import io.github.zoot.englishreader.ui.theme.FavoritesUiTheme
 import io.github.zoot.englishreader.viewmodel.ContextReviewEvent
 import io.github.zoot.englishreader.viewmodel.ContextReviewUiState
 import io.github.zoot.englishreader.viewmodel.ContextReviewViewModel
@@ -67,7 +45,7 @@ fun ContextReviewScreen(
     viewModel: ContextReviewViewModel = hiltViewModel(),
     onOpenContext: ((articleId: Long, contextCardId: Long) -> Unit)? = null,
     onOpenArticle: ((articleId: Long, word: String) -> Unit)? = null
-) = ArticleUiTheme {
+) = FavoritesUiTheme {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val pronunciationDetails by viewModel.pronunciationDetails.collectAsStateWithLifecycle()
     val loadingAudioKey by viewModel.loadingAudioKey.collectAsStateWithLifecycle()
@@ -132,10 +110,8 @@ fun ContextReviewScreen(
     ContextReviewContent(
         state, snackbar, exitReview, viewModel::reveal, viewModel::grade, viewModel::startNextRound, viewModel::retry,
         onOpenSource = if (onOpenContext == null && onOpenArticle == null) null else viewModel::openContextSource,
-        pronunciationDetails = pronunciationDetails,
-        loadingAudioKey = loadingAudioKey,
-        onPlayAudio = viewModel::playWordAudio,
-        onSkipMissingAnswer = viewModel::skipMissingAnswer
+        pronunciationDetails = pronunciationDetails, loadingAudioKey = loadingAudioKey,
+        onPlayAudio = viewModel::playWordAudio, onSkipMissingAnswer = viewModel::skipMissingAnswer
     )
 }
 
@@ -157,24 +133,76 @@ internal fun ContextReviewContent(
 ) {
     val round = state.round
     val mode = round?.session?.mode ?: VocabularyStudyMode.DUE
+    val entry = round?.current()
+    val word = entry?.studyWord()
+    val completedCount = round?.entries?.count { it.item.grade != null || it.item.skipped } ?: 0
+    val totalCount = round?.entries?.size ?: 0
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            TopAppBar(
-                title = { Text(stringResource(if (mode == VocabularyStudyMode.DUE) R.string.context_review_title else R.string.study_title)) },
-                navigationIcon = { IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.nav_back))
-                } }
+            CenterAlignedTopAppBar(
+                title = { Text(stringResource(R.string.study_title), style = MaterialTheme.typography.titleMedium) },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                navigationIcon = {
+                    TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                        Icon(Icons.AutoMirrored.Outlined.KeyboardArrowLeft, null)
+                        Text(stringResource(R.string.nav_back))
+                    }
+                }
             )
+        },
+        bottomBar = {
+            if (!state.failed && entry != null && word != null) {
+                Surface(color = MaterialTheme.colorScheme.background) {
+                    Box(Modifier.fillMaxWidth().navigationBarsPadding()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)), contentAlignment = Alignment.Center) {
+                        Column(Modifier.widthIn(max = 600.dp).fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp)) {
+                            if (!entry.item.revealed) {
+                                Button(onClick = { onReveal(entry.item.itemToken) }, enabled = !state.busy,
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("context-review-reveal")) {
+                                    Text(stringResource(R.string.context_review_reveal))
+                                }
+                            } else if (entry.item.meaningSnapshot.isBlank()) {
+                                Button(onClick = { onSkipMissingAnswer(entry.item.itemToken) }, enabled = !state.busy,
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag("study-review-skip")) {
+                                    Text(stringResource(R.string.study_skip_missing_answer))
+                                }
+                            } else {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    ContextGrade.entries.forEach { grade ->
+                                        Button(onClick = { onGrade(entry.item.itemToken, grade) }, enabled = !state.busy,
+                                            shape = RoundedCornerShape(12.dp), contentPadding = PaddingValues(horizontal = 4.dp, vertical = 12.dp),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = if (grade == ContextGrade.FORGOTTEN) MaterialTheme.colorScheme.errorContainer
+                                                    else MaterialTheme.colorScheme.surface,
+                                                contentColor = if (grade == ContextGrade.FORGOTTEN) MaterialTheme.colorScheme.error
+                                                    else MaterialTheme.colorScheme.primary
+                                            ),
+                                            modifier = Modifier.weight(1f).heightIn(min = 52.dp).testTag("context-grade-${grade.name}")) {
+                                            Text(stringResource(when (grade) {
+                                                ContextGrade.FORGOTTEN -> R.string.context_grade_forgotten
+                                                ContextGrade.FUZZY -> R.string.context_grade_fuzzy
+                                                ContextGrade.REMEMBERED -> R.string.context_grade_remembered
+                                                ContextGrade.FAMILIAR -> R.string.context_grade_familiar
+                                            }), style = MaterialTheme.typography.bodyLarge)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         },
         snackbarHost = { SnackbarHost(snackbar) }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
-            val entry = round?.current()
-            val word = entry?.studyWord()
             LazyColumn(
                 modifier = Modifier.widthIn(max = 600.dp).fillMaxSize().testTag("context-review"),
-                contentPadding = PaddingValues(24.dp),
-                verticalArrangement = Arrangement.spacedBy(20.dp)
+                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp)
             ) {
                 when {
                     state.failed -> item {
@@ -202,74 +230,77 @@ internal fun ContextReviewContent(
                     }
                     else -> {
                         item {
-                            Text(stringResource(R.string.context_review_progress, round.answeredCount(), round.session.initialCount))
-                            if (entry.item.isRetry) Text(stringResource(R.string.context_review_practice), style = MaterialTheme.typography.labelLarge)
-                            else if (!entry.item.updatesSchedule) Text(stringResource(R.string.study_early_practice), style = MaterialTheme.typography.bodySmall)
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    LinearProgressIndicator(
+                                        progress = completedCount.toFloat() / totalCount.coerceAtLeast(1),
+                                        modifier = Modifier.weight(1f).height(4.dp).clip(RoundedCornerShape(2.dp)),
+                                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    Text(stringResource(R.string.favorites_study_progress, completedCount, totalCount),
+                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (entry.item.isRetry || !entry.item.updatesSchedule) Surface(
+                                    shape = RoundedCornerShape(6.dp), color = MaterialTheme.colorScheme.surface
+                                ) {
+                                    Text(stringResource(if (entry.item.isRetry) R.string.context_review_practice else R.string.study_early_practice),
+                                        Modifier.padding(horizontal = 10.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                         }
                         item {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(word.word, style = MaterialTheme.typography.displaySmall, fontFamily = FontFamily.Serif, modifier = Modifier.testTag("study-review-word"))
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Column(Modifier.fillMaxWidth().padding(top = 24.dp), horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(word.word, style = MaterialTheme.typography.displaySmall, fontSize = 44.sp, fontWeight = FontWeight.SemiBold,
+                                    fontFamily = FontFamily.Serif, modifier = Modifier.testTag("study-review-word"))
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     if (pronunciationDetails.itemToken == entry.item.itemToken && !pronunciationDetails.phonetic.isNullOrBlank()) {
-                                        Text(pronunciationDetails.phonetic, fontFamily = FontFamily.Serif, style = MaterialTheme.typography.titleMedium)
+                                        Text(pronunciationDetails.phonetic, style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
-                                    IconButton(
-                                        onClick = { onPlayAudio(entry.item.itemToken) }, enabled = !state.busy,
-                                        modifier = Modifier.size(48.dp).testTag("study-review-audio")
-                                    ) { Icon(Icons.AutoMirrored.Filled.VolumeUp, stringResource(R.string.word_play_pronunciation, word.word)) }
-                                    if (loadingAudioKey == word.key) CircularProgressIndicator(Modifier.size(16.dp))
+                                    IconButton(onClick = { onPlayAudio(entry.item.itemToken) }, enabled = !state.busy,
+                                        modifier = Modifier.size(48.dp).testTag("study-review-audio")) {
+                                        if (loadingAudioKey == word.key) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                        else Icon(Icons.AutoMirrored.Outlined.VolumeUp, stringResource(R.string.word_play_pronunciation, word.word),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 }
                                 if (pronunciationDetails.itemToken == entry.item.itemToken) {
                                     pronunciationDetails.headword?.let {
-                                        Text(stringResource(R.string.vocabulary_word_headword, it), style = MaterialTheme.typography.bodySmall)
+                                        Text(stringResource(R.string.vocabulary_word_headword, it), style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
-                                }
-                                if (pronunciationDetails.itemToken == entry.item.itemToken && pronunciationDetails.failed) {
-                                    Text(stringResource(R.string.study_dictionary_failed), style = MaterialTheme.typography.bodySmall)
+                                    if (pronunciationDetails.failed) Text(stringResource(R.string.study_dictionary_failed),
+                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                         }
-                        if (word is StudyWord.Context) {
-                            item { ContextSentence(word.card.sentence, word.card.targetStartOffset, word.card.targetEndOffset, Modifier.testTag("context-review-sentence")) }
+                        if (word is StudyWord.Context) item {
+                            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
+                                ContextSentence(word.card.sentence, word.card.targetStartOffset, word.card.targetEndOffset,
+                                    Modifier.fillMaxWidth().padding(16.dp).testTag("context-review-sentence"))
+                            }
                         }
-                        if (!entry.item.revealed) {
-                            item { Text(stringResource(R.string.study_recall_hint)) }
-                            item { Button(
-                                onClick = { onReveal(entry.item.itemToken) }, enabled = !state.busy,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("context-review-reveal")
-                            ) { Text(stringResource(R.string.context_review_reveal)) } }
+                        if (!entry.item.revealed) item {
+                            Text(stringResource(R.string.study_recall_hint), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                         } else {
-                            val hasAnswer = entry.item.meaningSnapshot.isNotBlank()
                             item {
-                                Text(stringResource(R.string.study_meaning_label), style = MaterialTheme.typography.labelLarge)
+                                Text(stringResource(R.string.study_meaning_label), style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.height(8.dp))
                                 Text(entry.item.meaningSnapshot.ifBlank { stringResource(R.string.study_answer_missing) },
                                     style = MaterialTheme.typography.titleLarge, modifier = Modifier.testTag("context-review-answer"))
                             }
-                            if (!hasAnswer) item { TextButton(
-                                onClick = { onSkipMissingAnswer(entry.item.itemToken) }, enabled = !state.busy,
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("study-review-skip")
-                            ) { Text(stringResource(R.string.study_skip_missing_answer)) } }
-                            word.sourceTitle?.takeIf(String::isNotBlank)?.let { title -> item { Text(title, style = MaterialTheme.typography.bodySmall) } }
+                            word.sourceTitle?.takeIf(String::isNotBlank)?.let { title -> item {
+                                Text(title, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            } }
                             if (word.articleId == null) item { Text(stringResource(R.string.study_source_missing), style = MaterialTheme.typography.bodySmall) }
-                            if (onOpenSource != null && word.articleId != null) {
-                                item { TextButton(
-                                    onClick = { onOpenSource(entry.item.itemToken) }, enabled = !state.busy,
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("context-review-source")
-                                ) { Text(stringResource(R.string.vocabulary_open_article)) } }
-                            }
-                            item { Text(stringResource(R.string.context_review_grade_hint)) }
-                            item {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    ContextGrade.entries.forEach { grade ->
-                                        OutlinedButton(
-                                            onClick = { onGrade(entry.item.itemToken, grade) }, enabled = !state.busy && hasAnswer,
-                                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("context-grade-${grade.name}")
-                                        ) { Text(stringResource(when (grade) {
-                                            ContextGrade.FORGOTTEN -> R.string.context_grade_forgotten
-                                            ContextGrade.FUZZY -> R.string.context_grade_fuzzy
-                                            ContextGrade.REMEMBERED -> R.string.context_grade_remembered
-                                        })) }
-                                    }
+                            if (onOpenSource != null && word.articleId != null) item {
+                                TextButton(onClick = { onOpenSource(entry.item.itemToken) }, enabled = !state.busy,
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("context-review-source")) {
+                                    Text(stringResource(R.string.vocabulary_open_article))
                                 }
                             }
                         }

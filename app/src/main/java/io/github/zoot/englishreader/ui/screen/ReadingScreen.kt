@@ -214,6 +214,10 @@ fun ReadingScreen(
         onDispose { viewModel.dismissSentenceActions() }
     }
 
+    val excerptOverlapPending by viewModel.excerptOverlapPending.collectAsStateWithLifecycle()
+    val excerptSaveBusy by viewModel.excerptSaveBusy.collectAsStateWithLifecycle()
+    LaunchedEffect(article?.id, article?.content) { viewModel.dismissExcerptOverlap() }
+
     LaunchedEffect(viewModel) {
         viewModel.excerptSaved.collect { result ->
             snackbarHostState.showSnackbar(context.getString(when (result) {
@@ -285,6 +289,28 @@ fun ReadingScreen(
     }
 
     ArticleUiTheme {
+        if (excerptOverlapPending) {
+            AlertDialog(
+                onDismissRequest = { if (!excerptSaveBusy) viewModel.dismissExcerptOverlap() },
+                title = { Text(stringResource(R.string.excerpt_overlap_title)) },
+                text = { Text(stringResource(R.string.excerpt_overlap_message)) },
+                confirmButton = {
+                    TextButton(enabled = !excerptSaveBusy, onClick = {
+                        viewModel.resolveExcerptOverlap(io.github.zoot.englishreader.core.ExcerptOverlapChoice.MERGE)
+                    }) { Text(stringResource(R.string.excerpt_overlap_merge)) }
+                },
+                dismissButton = {
+                    Column {
+                        TextButton(enabled = !excerptSaveBusy, onClick = {
+                            viewModel.resolveExcerptOverlap(io.github.zoot.englishreader.core.ExcerptOverlapChoice.KEEP_LONGEST)
+                        }) { Text(stringResource(R.string.excerpt_overlap_keep_longest)) }
+                        TextButton(enabled = !excerptSaveBusy, onClick = viewModel::dismissExcerptOverlap) {
+                            Text(stringResource(R.string.action_cancel))
+                        }
+                    }
+                }
+            )
+        }
         if (wholeTranslationState != WholeTranslationSheetState.Hidden) {
             WholeTranslationSheet(
                 state = wholeTranslationState,

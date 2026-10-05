@@ -1,9 +1,7 @@
 package io.github.zoot.englishreader.ui.screen.vocabulary
 
 import io.github.zoot.englishreader.model.StudyWord
-import java.time.DayOfWeek
 import java.time.Instant
-import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
 data class StudyWordGroup(
@@ -19,7 +17,6 @@ fun groupStudyWords(
     time: VocabularyGroupingTime
 ): List<StudyWordGroup> {
     val today = Instant.ofEpochMilli(time.nowMillis).atZone(time.zoneId).toLocalDate()
-    val weekStart = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
     val buckets = words.groupBy { word ->
         when (type) {
             GroupType.ByAlphabet -> VocabularyGroupId.Alphabet(
@@ -30,7 +27,6 @@ fun groupStudyWords(
                 when {
                     date >= today -> VocabularyGroupId.Today
                     date == today.minusDays(1) -> VocabularyGroupId.Yesterday
-                    date >= weekStart -> VocabularyGroupId.ThisWeek
                     else -> VocabularyGroupId.OlderDate(date.toString())
                 }
             }
@@ -47,7 +43,8 @@ fun groupStudyWords(
         val grouped = buckets.getValue(id)
         StudyWordGroup(
             id = id,
-            words = if (type == GroupType.ByAlphabet) grouped.sortedBy { it.word.lowercase(Locale.ROOT) } else grouped,
+            words = if (type == GroupType.ByAlphabet) grouped.sortedWith(compareBy<StudyWord> { it.word.lowercase(Locale.ROOT) }.thenBy { it.key })
+                else grouped.sortedWith(compareByDescending<StudyWord> { it.createdAt }.thenBy { it.key }),
             isExpanded = id in expanded
         )
     }

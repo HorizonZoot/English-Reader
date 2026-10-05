@@ -63,14 +63,19 @@ import io.github.zoot.englishreader.ui.navigation.onboardingReplayDestination
 import io.github.zoot.englishreader.ui.screen.ReadingScreen
 import io.github.zoot.englishreader.ui.screen.SettingsScreen
 import io.github.zoot.englishreader.ui.screen.SettingsCacheManagementScreen
+import io.github.zoot.englishreader.ui.screen.SettingsSpeechScreen
+import io.github.zoot.englishreader.ui.screen.SettingsDictionaryScreen
+import io.github.zoot.englishreader.ui.screen.SettingsAboutScreen
+import io.github.zoot.englishreader.ui.screen.SettingsLicensesScreen
+import io.github.zoot.englishreader.ui.component.SettingsNavigationBar
 import io.github.zoot.englishreader.ui.dialog.UpdateDialog
 import io.github.zoot.englishreader.ui.dialog.UpdateDownloadDialog
 import io.github.zoot.englishreader.data.update.UpdateReleasePolicy
 import io.github.zoot.englishreader.util.UpdateInstallLaunchResult
 import io.github.zoot.englishreader.util.openUpdateInstaller
 import io.github.zoot.englishreader.ui.screen.VocabularyScreen
-import io.github.zoot.englishreader.ui.component.LibraryNavigationBar
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
+import io.github.zoot.englishreader.ui.component.LibraryNavigationBar
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
 import io.github.zoot.englishreader.ui.theme.NeutralIconGray
 import io.github.zoot.englishreader.util.TestDataGenerator
@@ -249,7 +254,12 @@ fun EnglishReaderNavigation() {
                     onArticles = { navController.popBackStack("article_list", inclusive = false) },
                     vocabularySelected = true
                 )
-            } else if (currentRoute == "settings" || currentRoute == ONBOARDING_REPLAY_ROUTE) {
+            } else if (currentRoute == "settings") {
+                SettingsNavigationBar(
+                    onArticles = { navController.popBackStack("article_list", inclusive = false) },
+                    onVocabulary = { navController.navigate("vocabulary") { popUpTo("article_list") } }
+                )
+            } else if (currentRoute == ONBOARDING_REPLAY_ROUTE) {
                 ArticleUiTheme {
                     // 选中色降低一点饱和度（叠一层透明度而不是换色相），未选中统一系统灰，
                     // 让底栏退到内容之后；文字不加粗。
@@ -441,7 +451,7 @@ fun EnglishReaderNavigation() {
         ) { backStackEntry ->
             val articleId = backStackEntry.arguments?.getLong("articleId") ?: 0L
             val viewModel: ReadingViewModel = hiltViewModel()
-            TtsSystemActions(viewModel.ttsSystemActions) { navController.navigate("settings") }
+            TtsSystemActions(viewModel.ttsSystemActions) { navController.navigate("settings/speech") }
             ReadingScreen(
                 articleId = articleId,
                 onBack = { navController.popBackStack() },
@@ -509,23 +519,43 @@ fun EnglishReaderNavigation() {
         }
 
         composable("settings") {
-            val viewModel: SettingsViewModel = hiltViewModel()
-            TtsSystemActions(viewModel.ttsSystemActions)
-            // 手动检查复用 shell 的那个 UpdateViewModel 实例（不是在这里另取一个）：
-            // 同实例才能让手动发现的更新走上面那个弹窗宿主。
-            val checkingUpdate by updateViewModel.checkingManually.collectAsStateWithLifecycle()
             SettingsScreen(
                 onOpenAiProfile = { navController.navigate("settings/ai-profile") },
                 onOpenCacheManagement = { navController.navigate("settings/cache") },
                 onOpenOnboarding = {
                     navController.navigate(ONBOARDING_REPLAY_ROUTE) { launchSingleTop = true }
                 },
+                onOpenSpeech = { navController.navigate("settings/speech") },
+                onOpenDictionary = { navController.navigate("settings/dictionary") },
+                onOpenAbout = { navController.navigate("settings/about") }
+            )
+        }
+
+        composable("settings/speech") {
+            val viewModel: SettingsViewModel = hiltViewModel()
+            TtsSystemActions(viewModel.ttsSystemActions)
+            SettingsSpeechScreen(onBack = { navController.popBackStack() }, viewModel = viewModel)
+        }
+
+        composable("settings/dictionary") {
+            SettingsDictionaryScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable("settings/about") {
+            // 沿用 Activity 作用域的更新状态与下载弹窗宿主。
+            val checkingUpdate by updateViewModel.checkingManually.collectAsStateWithLifecycle()
+            SettingsAboutScreen(
+                onBack = { navController.popBackStack() },
+                onOpenLicenses = { navController.navigate("settings/about/licenses") },
                 onCheckForUpdate = updateViewModel::checkManually,
                 checkingForUpdate = checkingUpdate,
                 hasUpdateDownload = updateDownload.hasDownloadTarget || downloadActionBusy,
-                manualUpdateOutcomes = updateViewModel.manualOutcomes,
-                viewModel = viewModel
+                manualUpdateOutcomes = updateViewModel.manualOutcomes
             )
+        }
+
+        composable("settings/about/licenses") {
+            SettingsLicensesScreen(onBack = { navController.popBackStack() })
         }
 
         onboardingReplayDestination(navController)

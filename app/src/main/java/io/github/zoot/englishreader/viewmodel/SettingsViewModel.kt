@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
@@ -160,6 +161,10 @@ class SettingsViewModel @Inject constructor(
 
     val activeProfileId: StateFlow<String?> = profileRepository.activeProfileId
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val hasConfiguredProfile: StateFlow<Boolean> = combine(profiles, activeProfileId) { entries, activeId ->
+        entries.any { it.profileId == activeId }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     private val _profileActionEvents = Channel<ProfileActionEvent>(Channel.BUFFERED)
     val profileActionEvents: Flow<ProfileActionEvent> = _profileActionEvents.receiveAsFlow()

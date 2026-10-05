@@ -28,7 +28,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.CheckCircle
@@ -44,9 +43,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -99,21 +97,27 @@ import io.github.zoot.englishreader.data.local.AiProviderProfile
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
 import io.github.zoot.englishreader.data.repository.ProfileMutationResult
 import io.github.zoot.englishreader.util.toUiMessage
+import io.github.zoot.englishreader.ui.theme.SettingsUiTheme
 import io.github.zoot.englishreader.viewmodel.AiProfileValidation
 import io.github.zoot.englishreader.viewmodel.ProfileMutationSubmission
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
 import java.util.UUID
 
-private val ProfileCardShape = RoundedCornerShape(16.dp)
+private val ProfileCardShape = RoundedCornerShape(12.dp)
 private val ProfileControlShape = RoundedCornerShape(12.dp)
 private val ProfileEditorShape = RoundedCornerShape(24.dp)
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AiProfileConfigScreen(
     onBack: () -> Unit,
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
+    SettingsUiTheme { AiProfileConfigContent(onBack, viewModel) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AiProfileConfigContent(onBack: () -> Unit, viewModel: SettingsViewModel) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val activeProfileId by viewModel.activeProfileId.collectAsStateWithLifecycle()
     val discovery by viewModel.modelDiscovery.collectAsStateWithLifecycle()
@@ -230,16 +234,8 @@ fun AiProfileConfigScreen(
 
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.nav_back)
-                        )
-                    }
-                },
-                title = { Text(stringResource(R.string.settings_ai_profile_title)) },
+            SettingsTopBar(
+                onBack = onBack,
                 actions = {
                     IconButton(
                         onClick = { openEditor(null) },
@@ -254,20 +250,32 @@ fun AiProfileConfigScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f)
+        containerColor = MaterialTheme.colorScheme.background
     ) { contentPadding ->
         Box(
             modifier = Modifier.fillMaxSize().padding(contentPadding)
         ) {
-            ProfileListContent(
-                profiles = profiles,
-                activeProfileId = activeProfileId,
-                onAdd = { openEditor(null) },
-                onSelect = viewModel::selectProfile,
-                onManage = { actionProfile = it },
-                onClearCache = { showClearCache = true },
-                onDeleteAll = { showDeleteAll = true }
-            )
+            Column(Modifier.fillMaxSize()) {
+                Column(
+                    Modifier.widthIn(max = 720.dp).fillMaxWidth().align(Alignment.CenterHorizontally)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    SettingsHeading(stringResource(R.string.settings_ai_profile_title))
+                    AiProfileDisclosure()
+                }
+                Box(Modifier.weight(1f)) {
+                    ProfileListContent(
+                        profiles = profiles,
+                        activeProfileId = activeProfileId,
+                        onAdd = { openEditor(null) },
+                        onSelect = viewModel::selectProfile,
+                        onManage = { actionProfile = it },
+                        onClearCache = { showClearCache = true },
+                        onDeleteAll = { showDeleteAll = true }
+                    )
+                }
+            }
 
             if (editorOpen) {
                 val editor: @Composable () -> Unit = {
@@ -405,7 +413,7 @@ fun AiProfileConfigScreen(
                     openEditor(profile)
                 }
             )
-            HorizontalDivider()
+            Divider(color = MaterialTheme.colorScheme.outlineVariant, thickness = 0.5.dp)
             ProfileSheetAction(
                 icon = { Icon(Icons.Outlined.Delete, contentDescription = null) },
                 label = stringResource(R.string.settings_profile_delete),
@@ -475,7 +483,7 @@ private fun ProfileListContent(
 ) {
     if (profiles.isEmpty()) {
         Box(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
+            modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
             contentAlignment = Alignment.Center
         ) {
             Column(
@@ -565,7 +573,7 @@ private fun ProfileCard(
         onClick = onSelect,
         shape = ProfileCardShape,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         border = BorderStroke(
             width = if (active) 1.5.dp else 0.5.dp,
             color = if (active) settingsAccentColor()
@@ -964,7 +972,7 @@ private fun ProfileSectionLabel(label: Int) {
 }
 
 @Composable
-private fun profileFieldBackground() = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+private fun profileFieldBackground() = MaterialTheme.colorScheme.surface
 
 @Composable
 private fun profileFieldColors() = TextFieldDefaults.colors(
@@ -1112,7 +1120,7 @@ private fun GlobalProfileAction(label: String, onClick: () -> Unit) {
         modifier = Modifier.widthIn(max = 720.dp).fillMaxWidth().clickable(onClick = onClick),
         shape = ProfileControlShape,
         color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 1.dp
+        tonalElevation = 0.dp
     ) {
         Row(
             modifier = Modifier.heightIn(min = 54.dp).padding(horizontal = 16.dp),

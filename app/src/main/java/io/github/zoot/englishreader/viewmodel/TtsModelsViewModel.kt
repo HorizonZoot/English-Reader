@@ -8,11 +8,15 @@ import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.tts.TtsModelCatalog
 import io.github.zoot.englishreader.data.tts.TtsModelRepository
 import io.github.zoot.englishreader.data.tts.TtsModelException
+import io.github.zoot.englishreader.data.tts.TtsModelState
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
@@ -22,6 +26,9 @@ class TtsModelsViewModel @Inject constructor(
     private val preferences: SettingsPreferences
 ) : ViewModel() {
     val states = repository.states
+    val installedCount = states.map { states ->
+        TtsModelCatalog.entries.count { states[it.id] == TtsModelState.Installed }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     private val eventsChannel = Channel<Int>(Channel.BUFFERED)
     val events = eventsChannel.receiveAsFlow()
     private val jobs = mutableMapOf<String, Job>()

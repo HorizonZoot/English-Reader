@@ -699,4 +699,26 @@
     <string name="favorites_time_today">今天 %1$s</string>
     <string name="favorites_time_yesterday">昨天 %1$s</string>
     <string name="favorites_word_actions">单词操作</string>
+    <string name="settings_group_speech_ai">语音与 AI</string>
+    <string name="settings_group_data">数据</string>
+    <string name="settings_voice_count">%1$d 个语音包</string>
+    <string name="settings_ai_profile_short">AI profile</string>
+    <string name="settings_status_not_installed">未安装</string>
+    <string name="settings_voice_installed">已安装</string>
+    <string name="settings_status_configured">已配置</string>
+    <string name="settings_status_unconfigured">未配置</string>
+    <string name="settings_status_downloading">下载中</string>
+    <string name="settings_status_installing">安装中</string>
+    <string name="settings_status_install_failed">安装失败</string>
+    <string name="settings_voice_packages">语音包</string>
+    <string name="settings_voice_summary">%1$.0f MB · %2$s</string>
+    <string name="settings_voice_get">获取</string>
+    <string name="settings_voice_footnote">内置音色 Jen，安装后即可离线朗读。更多音色可在阅读页的语音设置中选择。</string>
+    <string name="settings_voice_details_hint">轻点语音包查看全部音色与大小；已下载的扩展语音包可在详情中卸载。</string>
+    <string name="settings_network_voice">网络语音</string>
+    <string name="settings_troubleshooting">故障排查</string>
+    <string name="settings_licenses">开源许可</string>
+    <string name="settings_license_engine">语音引擎与数据集</string>
+    <string name="settings_license_models">语音包许可</string>
+    <string name="action_close">关闭</string>
 </resources>

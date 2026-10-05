@@ -68,4 +68,6 @@ sealed interface ArticleListUiEvent {
     ) : ImportResult
 
     data object DeleteFailed : ArticleListUiEvent
+
+    data object SortPreferencesFailed : ArticleListUiEvent
 }

@@ -4,6 +4,13 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.zoot.englishreader.data.local.SettingsPreferences
+import io.github.zoot.englishreader.model.LibrarySort
+import io.github.zoot.englishreader.model.LibrarySortField
+import io.github.zoot.englishreader.model.LibrarySortDirection
+import io.github.zoot.englishreader.model.filterAndSortLibrary
+import java.io.IOException
+import kotlinx.coroutines.flow.catch
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
@@ -40,7 +47,8 @@ class ArticleListViewModel @Inject constructor(
     private val articleImporter: ArticleImporter,
     private val bookRepository: BookRepository,
     private val bookImporter: BookImporter,
-    private val formatProbe: ImportFormatProbe
+    private val formatProbe: ImportFormatProbe,
+    private val settingsPreferences: SettingsPreferences
 ) : ViewModel() {
 
     val articles: StateFlow<List<ArticleEntity>> = articleRepository.getAllArticles()
@@ -53,29 +61,48 @@ class ArticleListViewModel @Inject constructor(
         _searchQuery.value = query
     }
 
-    /**
-     * 书架条目：单篇文章 + 书籍，按标题／作者过滤并按时间倒序合并。
-     *
-     * 用 [ArticleRepository.getStandaloneArticles] 而不是 [articles]：章节也是
-     * `ArticleEntity`，直接用全量文章会让一本 500 章的书在列表里铺出 500 行。
-     *
-     * 书的排序用 `lastReadAt ?: createdAt`：读过的书应该浮上来，而单篇文章目前
-     * 没有可靠的阅读时间语义（`lastReadAt` 存在但很多路径不写），故先统一用
-     * 创建时间，避免两类条目用不同语义的时间戳排在一起而顺序难以解释。
-     */
+    val librarySort: StateFlow<LibrarySort> = settingsPreferences.librarySort
+        .catch { error ->
+            if (error !is IOException) throw error
+            _uiEvent.send(ArticleListUiEvent.SortPreferencesFailed)
+            emit(LibrarySort())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LibrarySort())
+
+    private val _sortMenuExpanded = MutableStateFlow(false)
+    val sortMenuExpanded: StateFlow<Boolean> = _sortMenuExpanded.asStateFlow()
+
+    fun setSortMenuExpanded(expanded: Boolean) { _sortMenuExpanded.value = expanded }
+
+    fun setSortField(field: LibrarySortField) = saveSort { settingsPreferences.setLibrarySortField(field) }
+
+    fun setSortDirection(direction: LibrarySortDirection) =
+        saveSort { settingsPreferences.setLibrarySortDirection(direction) }
+
+    private fun saveSort(save: suspend () -> Unit) {
+        _sortMenuExpanded.value = false
+        viewModelScope.launch {
+            try {
+                save()
+            } catch (error: IOException) {
+                _uiEvent.send(ArticleListUiEvent.SortPreferencesFailed)
+            }
+        }
+    }
+
+    /** Narrow shelf projections; the shared StateFlow caches filtering and locale-aware sorting. */
     val libraryItems: StateFlow<List<LibraryItem>> = combine(
         articleRepository.getStandaloneArticles(),
-        bookRepository.getAllBooks(),
-        searchQuery
-    ) { standalone, books, query ->
-        val keyword = query.trim()
-        val matchingArticles = standalone.filter { it.title.contains(keyword, ignoreCase = true) }
-        val matchingBooks = books.filter {
-            it.title.contains(keyword, ignoreCase = true) ||
-                it.author?.contains(keyword, ignoreCase = true) == true
-        }
-        (matchingArticles.map { LibraryItem.Article(it) } + matchingBooks.map { LibraryItem.Book(it) })
-            .sortedByDescending { it.sortKey }
+        bookRepository.getLibraryBooks(),
+        searchQuery,
+        librarySort
+    ) { standalone, books, query, sort ->
+        filterAndSortLibrary(
+            standalone.map { LibraryItem.Article(it) } +
+                books.map { LibraryItem.Book(it.book, it.readingProgress) },
+            query,
+            sort
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // 单一事件流，界面只需一个 collector（详见 ArticleListUiEvent 的说明）

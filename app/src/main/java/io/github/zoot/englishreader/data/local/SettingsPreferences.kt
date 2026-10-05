@@ -10,6 +10,9 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import io.github.zoot.englishreader.model.LibrarySort
+import io.github.zoot.englishreader.model.LibrarySortField
+import io.github.zoot.englishreader.model.LibrarySortDirection
 import io.github.zoot.englishreader.model.TtsReadingSettings
 import io.github.zoot.englishreader.data.update.PendingUpdateDownload
 import io.github.zoot.englishreader.data.update.UpdateReleasePolicy
@@ -81,6 +84,8 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
     companion object {
         private val ONBOARDING_COMPLETED_KEY = booleanPreferencesKey("onboarding_completed")
         private val FAVORITES_ALPHABETICAL_KEY = booleanPreferencesKey("favorites_alphabetical")
+        private val LIBRARY_SORT_FIELD_KEY = stringPreferencesKey("library_sort_field")
+        private val LIBRARY_SORT_DIRECTION_KEY = stringPreferencesKey("library_sort_direction")
         private val FONT_SIZE_KEY = stringPreferencesKey("font_size_option")
         private val THEME_KEY = stringPreferencesKey("theme_option")
         private val READING_MODE_KEY = stringPreferencesKey("reading_mode")
@@ -90,6 +95,23 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
         private val LAST_UPDATE_CHECK_KEY = longPreferencesKey("last_update_check_at")
         private val UPDATE_DOWNLOAD_ID_KEY = longPreferencesKey("update_download_id")
         private val UPDATE_DOWNLOAD_TAG_KEY = stringPreferencesKey("update_download_tag")
+    }
+
+    val librarySort: Flow<LibrarySort> = dataStore.data.map { preferences ->
+        LibrarySort(
+            field = LibrarySortField.entries.firstOrNull { it.name == preferences[LIBRARY_SORT_FIELD_KEY] }
+                ?: LibrarySortField.LAST_READ,
+            direction = LibrarySortDirection.entries.firstOrNull { it.name == preferences[LIBRARY_SORT_DIRECTION_KEY] }
+                ?: LibrarySortDirection.DESCENDING
+        )
+    }
+
+    suspend fun setLibrarySortField(field: LibrarySortField) {
+        dataStore.edit { it[LIBRARY_SORT_FIELD_KEY] = field.name }
+    }
+
+    suspend fun setLibrarySortDirection(direction: LibrarySortDirection) {
+        dataStore.edit { it[LIBRARY_SORT_DIRECTION_KEY] = direction.name }
     }
 
     val favoritesAlphabetical: Flow<Boolean> = dataStore.data

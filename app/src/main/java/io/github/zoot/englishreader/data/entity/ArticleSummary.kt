@@ -4,5 +4,7 @@ package io.github.zoot.englishreader.data.entity
 data class ArticleSummary(
     val id: Long,
     val title: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val lastReadAt: Long? = null,
+    val readingProgress: Float = 0f
 )

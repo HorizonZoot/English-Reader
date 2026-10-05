@@ -68,8 +68,8 @@ import io.github.zoot.englishreader.ui.dialog.UpdateDownloadDialog
 import io.github.zoot.englishreader.data.update.UpdateReleasePolicy
 import io.github.zoot.englishreader.util.UpdateInstallLaunchResult
 import io.github.zoot.englishreader.util.openUpdateInstaller
-import io.github.zoot.englishreader.ui.component.LibraryNavigationBar
 import io.github.zoot.englishreader.ui.screen.VocabularyScreen
+import io.github.zoot.englishreader.ui.component.LibraryNavigationBar
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
 import io.github.zoot.englishreader.ui.theme.NeutralIconGray
@@ -237,14 +237,19 @@ fun EnglishReaderNavigation() {
         // 在这里再套一层默认的系统栏 insets，会让每个内嵌页面被二次下移。
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (currentRoute == "vocabulary") {
+            if (currentRoute == "article_list") {
+                LibraryNavigationBar(
+                    onVocabulary = { navController.navigate("vocabulary") { popUpTo("article_list") } },
+                    onSettings = { navController.navigate("settings") { popUpTo("article_list") } }
+                )
+            } else if (currentRoute == "vocabulary") {
                 LibraryNavigationBar(
                     onVocabulary = {},
                     onSettings = { navController.navigate("settings") { popUpTo("article_list") } },
                     onArticles = { navController.popBackStack("article_list", inclusive = false) },
                     vocabularySelected = true
                 )
-            } else if (currentRoute == "article_list" || currentRoute == "settings" || currentRoute == ONBOARDING_REPLAY_ROUTE) {
+            } else if (currentRoute == "settings" || currentRoute == ONBOARDING_REPLAY_ROUTE) {
                 ArticleUiTheme {
                     // 选中色降低一点饱和度（叠一层透明度而不是换色相），未选中统一系统灰，
                     // 让底栏退到内容之后；文字不加粗。

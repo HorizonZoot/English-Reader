@@ -18,6 +18,9 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.lifecycle.ViewModelStore
 import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
+import io.github.zoot.englishreader.data.entity.BookSummary
+import io.github.zoot.englishreader.data.local.SettingsPreferences
+import io.github.zoot.englishreader.model.LibrarySort
 import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.data.repository.BookRepository
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
@@ -26,6 +29,8 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -41,7 +46,7 @@ class LibrarySearchScreenTest {
     val compose = createComposeRule()
 
     private val articles = MutableStateFlow(
-        listOf(ArticleSummary(id = 11, title = "A Quiet Walk", createdAt = 10))
+        listOf(ArticleSummary(id = 11, title = "A Quiet Walk", createdAt = 10, lastReadAt = 10))
     )
     private val books = MutableStateFlow(
         listOf(
@@ -53,7 +58,8 @@ class LibrarySearchScreenTest {
                 sourceFormat = "epub3",
                 chapterCount = 2,
                 totalChars = 200,
-                createdAt = 20
+                createdAt = 20,
+                lastReadAt = 20
             )
         )
     )
@@ -130,8 +136,10 @@ class LibrarySearchScreenTest {
 
     @Test
     fun scrollPosition_restoredOnRecreation_keptUntilQueryChanges() {
-        // createdAt 递增、列表倒序：index 0 是分组标题，index 30 对应 Article 10。
-        articles.value = (0 until 40).map { ArticleSummary(id = it + 100L, title = "Article $it", createdAt = it.toLong()) }
+        // 最近阅读倒序；标题位于列表外，index 29 对应 Article 10。
+        articles.value = (0 until 40).map {
+            ArticleSummary(id = it + 100L, title = "Article $it", createdAt = it.toLong(), lastReadAt = it.toLong())
+        }
         books.value = emptyList()
         val viewModel = library()
         val restoration = StateRestorationTester(compose)
@@ -140,7 +148,7 @@ class LibrarySearchScreenTest {
                 ArticleListScreen(onArticleClick = {}, onBookClick = {}, viewModel = viewModel)
             }
         }
-        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(30)
+        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(29)
         compose.onNodeWithText("Article 10").assertIsDisplayed()
 
         restoration.emulateSavedInstanceStateRestore()
@@ -156,10 +164,13 @@ class LibrarySearchScreenTest {
             every { getAllArticles() } returns flow { error("Search must not load article bodies") }
         }
         val bookRepository = mockk<BookRepository> {
-            every { getAllBooks() } returns books
+            every { getLibraryBooks() } returns books.map { entries -> entries.map { BookSummary(it) } }
+        }
+        val settingsPreferences = mockk<SettingsPreferences> {
+            every { librarySort } returns flowOf(LibrarySort())
         }
         return ArticleListViewModel(
-            articleRepository, mockk(), bookRepository, mockk(), mockk()
+            articleRepository, mockk(), bookRepository, mockk(), mockk(), settingsPreferences
         ).also { store.put("library", it) }
     }
 

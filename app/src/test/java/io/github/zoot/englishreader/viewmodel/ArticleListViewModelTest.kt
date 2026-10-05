@@ -5,6 +5,9 @@ import app.cash.turbine.test
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
+import io.github.zoot.englishreader.data.entity.BookSummary
+import io.github.zoot.englishreader.data.local.SettingsPreferences
+import io.github.zoot.englishreader.model.LibrarySort
 import io.github.zoot.englishreader.data.importer.BookFormat
 import io.github.zoot.englishreader.data.importer.BookMetadata
 import io.github.zoot.englishreader.data.importer.ImportedBook
@@ -21,6 +24,7 @@ import io.github.zoot.englishreader.data.importer.ImportFormatProbe
 import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.mockk.coEvery
 import io.mockk.coVerify
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.CompletableDeferred
@@ -30,6 +34,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -63,6 +68,7 @@ class ArticleListViewModelTest {
     private lateinit var bookRepository: BookRepository
     private lateinit var bookImporter: BookImporter
     private lateinit var formatProbe: ImportFormatProbe
+    private lateinit var settingsPreferences: SettingsPreferences
     private lateinit var viewModel: ArticleListViewModel
 
     @Before
@@ -72,10 +78,13 @@ class ArticleListViewModelTest {
         bookRepository = mockk(relaxed = true)
         bookImporter = mockk(relaxed = true)
         formatProbe = mockk(relaxed = true)
+        settingsPreferences = mockk {
+            every { librarySort } returns flowOf(LibrarySort())
+        }
         // 两条 StateFlow 都需要可收集的上游
         coEvery { articleRepository.getAllArticles() } returns flowOf(emptyList())
         coEvery { articleRepository.getStandaloneArticles() } returns flowOf(emptyList())
-        coEvery { bookRepository.getAllBooks() } returns flowOf(emptyList())
+        coEvery { bookRepository.getLibraryBooks() } returns flowOf(emptyList())
         // 默认非 EPUB：既有用例全部走单篇文章路径，行为与改动前一致
         coEvery { formatProbe.detect(any()) } returns ImportFormat.PLAIN_TEXT
         viewModel = ArticleListViewModel(
@@ -83,7 +92,8 @@ class ArticleListViewModelTest {
             articleImporter,
             bookRepository,
             bookImporter,
-            formatProbe
+            formatProbe,
+            settingsPreferences
         )
     }
 
@@ -509,7 +519,7 @@ class ArticleListViewModelTest {
 
     @Test
     fun libraryItems_summaryAndBookUpdates_preserveOrderingWithoutCollectingFullArticles() = runTest {
-        val summaries = MutableStateFlow(listOf(ArticleSummary(3, "Article", 500)))
+        val summaries = MutableStateFlow(listOf(ArticleSummary(3, "Article", 500, lastReadAt = 500)))
         val book = BookEntity(
             id = 3, title = "Book", contentFingerprint = "fingerprint", sourceFormat = "epub3",
             chapterCount = 2, totalChars = 100, createdAt = 100
@@ -521,15 +531,19 @@ class ArticleListViewModelTest {
             fullArticleCollections++
             emit(emptyList())
         }
-        coEvery { bookRepository.getAllBooks() } returns books
-        val model = ArticleListViewModel(articleRepository, articleImporter, bookRepository, bookImporter, formatProbe)
+        coEvery { bookRepository.getLibraryBooks() } returns books.map { entries ->
+            entries.map { BookSummary(it) }
+        }
+        val model = ArticleListViewModel(
+            articleRepository, articleImporter, bookRepository, bookImporter, formatProbe, settingsPreferences
+        )
 
         model.libraryItems.test {
             val first = awaitItem().ifEmpty { awaitItem() }
             assertEquals(listOf("article-3", "book-3"), first.map { it.listKey })
             books.value = listOf(book.copy(lastReadAt = 900))
             assertEquals(listOf("book-3", "article-3"), awaitItem().map { it.listKey })
-            summaries.value = listOf(ArticleSummary(3, "Renamed article", 500))
+            summaries.value = listOf(ArticleSummary(3, "Renamed article", 500, lastReadAt = 500))
             assertEquals("Renamed article", (awaitItem().last() as LibraryItem.Article).article.title)
             assertEquals(0, fullArticleCollections)
         }

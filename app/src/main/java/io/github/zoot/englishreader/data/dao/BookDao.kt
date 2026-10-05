@@ -8,6 +8,7 @@ import androidx.room.Transaction
 import androidx.room.Upsert
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
+import io.github.zoot.englishreader.data.entity.BookSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
 import io.github.zoot.englishreader.data.importer.ImportException
@@ -28,6 +29,16 @@ interface BookDao {
 
     @Query("SELECT * FROM books ORDER BY createdAt DESC")
     fun getAllBooks(): Flow<List<BookEntity>>
+
+    @Query(
+        "SELECT b.*, CASE WHEN b.lastReadAt IS NULL OR b.chapterCount <= 0 THEN 0.0 " +
+            "ELSE COALESCE((c.chapterIndex + COALESCE(p.progress, 0)) * 1.0 / b.chapterCount, 0.0) " +
+            "END AS readingProgress FROM books b " +
+            "LEFT JOIN book_reading_progress bp ON bp.bookId = b.id " +
+            "LEFT JOIN book_chapters c ON c.articleId = bp.chapterArticleId AND c.bookId = b.id " +
+            "LEFT JOIN reading_positions p ON p.articleId = c.articleId"
+    )
+    fun getLibraryBooks(): Flow<List<BookSummary>>
 
     @Query("SELECT * FROM books WHERE id = :bookId")
     suspend fun getBookById(bookId: Long): BookEntity?

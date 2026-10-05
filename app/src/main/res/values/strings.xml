@@ -84,6 +84,23 @@
     <string name="library_item_book">书籍</string>
     <string name="library_item_article">文章</string>
     <string name="library_section_title">我的阅读</string>
+    <string name="library_reading_count">我的阅读 · %1$d 篇</string>
+    <string name="library_sort_by">按%1$s</string>
+    <string name="library_sort_field_heading">排序依据</string>
+    <string name="library_sort_direction_heading">方向</string>
+    <string name="library_sort_last_read">最近阅读</string>
+    <string name="library_sort_created">最近添加</string>
+    <string name="library_sort_title">标题</string>
+    <string name="library_sort_progress">阅读进度</string>
+    <string name="library_sort_descending">降序</string>
+    <string name="library_sort_ascending">升序</string>
+    <string name="library_sort_save_failed">无法保存排序设置，请重试</string>
+    <string name="library_today">今天</string>
+    <string name="library_yesterday">昨天</string>
+    <string name="library_days_ago">%1$d 天前</string>
+    <string name="library_unread">未读</string>
+    <string name="library_read_percent">已读 %1$d%%</string>
+    <string name="library_reading_metadata">%1$s · %2$s</string>
     <string name="library_more_actions">%1$s 的更多操作</string>
     <string name="library_importing">正在导入</string>
     <string name="library_search_hint">搜索标题或作者</string>
@@ -682,8 +699,4 @@
     <string name="favorites_time_today">今天 %1$s</string>
     <string name="favorites_time_yesterday">昨天 %1$s</string>
     <string name="favorites_word_actions">单词操作</string>
-    <string name="library_sort_ascending">升序</string>
-    <string name="library_sort_descending">降序</string>
-    <string name="library_sort_direction_heading">方向</string>
-    <string name="library_sort_field_heading">排序依据</string>
 </resources>

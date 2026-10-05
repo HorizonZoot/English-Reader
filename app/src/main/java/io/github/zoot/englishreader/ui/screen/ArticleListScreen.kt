@@ -3,10 +3,11 @@ package io.github.zoot.englishreader.ui.screen
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,7 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
@@ -26,6 +27,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
@@ -35,13 +38,10 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.zoot.englishreader.R
@@ -51,7 +51,16 @@ import io.github.zoot.englishreader.data.importer.ImportFormatDetector
 import io.github.zoot.englishreader.ui.component.ImportStatusOverlay
 import io.github.zoot.englishreader.ui.dialog.ImportDialog
 import io.github.zoot.englishreader.ui.dialog.PasteTextDialog
-import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
+import io.github.zoot.englishreader.ui.theme.LibraryUiTheme
+import io.github.zoot.englishreader.ui.component.SortMenuButton
+import io.github.zoot.englishreader.model.LibrarySort
+import io.github.zoot.englishreader.model.LibrarySortField
+import io.github.zoot.englishreader.model.LibrarySortDirection
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
+import kotlin.math.roundToInt
 import io.github.zoot.englishreader.util.ErrorMessageMapper
 import io.github.zoot.englishreader.viewmodel.ArticleListUiEvent
 import io.github.zoot.englishreader.viewmodel.ArticleListViewModel
@@ -66,13 +75,16 @@ internal const val LIBRARY_SEARCH_TAG = "library-search"
 /**
  * 文章列表界面
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ArticleListScreen(
     onArticleClick: (Long) -> Unit,
     onBookClick: (Long) -> Unit,
     viewModel: ArticleListViewModel = hiltViewModel(),
     onEditArticle: ((Long) -> Unit)? = null
-) = ArticleUiTheme {
+) = LibraryUiTheme {
+    val sort by viewModel.librarySort.collectAsStateWithLifecycle()
+    val sortMenuExpanded by viewModel.sortMenuExpanded.collectAsStateWithLifecycle()
     val libraryItems by viewModel.libraryItems.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -125,6 +137,9 @@ fun ArticleListScreen(
 
                 is ArticleListUiEvent.DeleteFailed ->
                     context.getString(R.string.error_delete_article_failed)
+
+                ArticleListUiEvent.SortPreferencesFailed ->
+                    context.getString(R.string.library_sort_save_failed)
             }
             snackbarHostState.showSnackbar(message)
         }
@@ -213,7 +228,13 @@ fun ArticleListScreen(
                 isImporting = isImporting,
                 onImport = { if (!isImporting) showImportDialog = true },
                 searchQuery = searchQuery,
-                onSearchQueryChange = viewModel::updateSearchQuery
+                onSearchQueryChange = viewModel::updateSearchQuery,
+                count = libraryItems.size,
+                sort = sort,
+                sortMenuExpanded = sortMenuExpanded,
+                onSortMenuExpandedChange = viewModel::setSortMenuExpanded,
+                onSortField = viewModel::setSortField,
+                onSortDirection = viewModel::setSortDirection
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -269,42 +290,50 @@ fun ArticleListScreen(
                 LazyColumn(
                     modifier = Modifier
                         .widthIn(max = 600.dp)
-                        .fillMaxSize(),
+                        .fillMaxSize()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal)),
                     state = listState,
-                    contentPadding = PaddingValues(start = 24.dp, end = 24.dp, bottom = 20.dp)
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 20.dp)
                 ) {
-                    item(key = "library-section") {
-                        Text(
-                            text = stringResource(R.string.library_section_title),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier
-                                .padding(top = 4.dp, bottom = 8.dp)
-                                .semantics { heading() }
+                    // Separate lazy items form one rounded group without eagerly composing the library.
+                    itemsIndexed(libraryItems, key = { _, item -> item.listKey }) { index, item ->
+                        val first = index == 0
+                        val last = index == libraryItems.lastIndex
+                        val shape = RoundedCornerShape(
+                            topStart = if (first) 12.dp else 0.dp,
+                            topEnd = if (first) 12.dp else 0.dp,
+                            bottomStart = if (last) 12.dp else 0.dp,
+                            bottomEnd = if (last) 12.dp else 0.dp
                         )
-                    }
-                    // 两种实体的数字 id 会撞号，条目状态必须跟随带类型前缀的 listKey。
-                    items(libraryItems, key = { it.listKey }) { item ->
-                        when (item) {
-                            is LibraryItem.Article -> LibraryRow(
-                                title = item.article.title,
-                                subtitle = null,
-                                isBook = false,
-                                onClick = { onArticleClick(item.article.id) },
-                                onDelete = { articleToDelete = item.article },
-                                onEdit = onEditArticle?.let { edit -> { edit(item.article.id) } }
-                            )
-
-                            is LibraryItem.Book -> LibraryRow(
-                                title = item.book.title,
-                                subtitle = stringResource(
-                                    R.string.book_chapters_count,
-                                    item.book.chapterCount
-                                ),
-                                isBook = true,
-                                onClick = { onBookClick(item.book.id) },
-                                onDelete = { bookToDelete = item.book }
-                            )
+                        Surface(
+                            shape = shape,
+                            modifier = Modifier.animateItemPlacement().clip(shape),
+                            color = MaterialTheme.colorScheme.surface
+                        ) {
+                            Column {
+                                when (item) {
+                                    is LibraryItem.Article -> LibraryRow(
+                                        title = item.title,
+                                        subtitle = librarySubtitle(item),
+                                        isBook = false,
+                                        onClick = { onArticleClick(item.article.id) },
+                                        onDelete = { articleToDelete = item.article },
+                                        onEdit = onEditArticle?.let { edit -> { edit(item.article.id) } }
+                                    )
+                                    is LibraryItem.Book -> LibraryRow(
+                                        title = item.title,
+                                        subtitle = librarySubtitle(item),
+                                        isBook = true,
+                                        onClick = { onBookClick(item.book.id) },
+                                        onDelete = { bookToDelete = item.book }
+                                    )
+                                }
+                                if (!last) Divider(
+                                    modifier = Modifier.padding(start = 80.dp),
+                                    thickness = 0.5.dp,
+                                    color = MaterialTheme.colorScheme.outlineVariant
+                                )
+                            }
                         }
                     }
                 }
@@ -329,7 +358,13 @@ private fun LibraryHeader(
     isImporting: Boolean,
     onImport: () -> Unit,
     searchQuery: String,
-    onSearchQueryChange: (String) -> Unit
+    onSearchQueryChange: (String) -> Unit,
+    count: Int,
+    sort: LibrarySort,
+    sortMenuExpanded: Boolean,
+    onSortMenuExpandedChange: (Boolean) -> Unit,
+    onSortField: (LibrarySortField) -> Unit,
+    onSortDirection: (LibrarySortDirection) -> Unit
 ) {
     val focusManager = LocalFocusManager.current
     val searchDescription = stringResource(R.string.library_search_hint)
@@ -345,7 +380,7 @@ private fun LibraryHeader(
                 .windowInsetsPadding(
                     WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
                 )
-                .padding(horizontal = 24.dp, vertical = 12.dp)
+                .padding(horizontal = 20.dp, vertical = 8.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -376,13 +411,20 @@ private fun LibraryHeader(
             Text(
                 text = stringResource(R.string.nav_articles),
                 style = MaterialTheme.typography.headlineLarge,
-                fontSize = 34.sp,
-                fontWeight = FontWeight.Bold,
                 modifier = Modifier
                     .padding(top = 8.dp, bottom = 8.dp)
                     .semantics { heading() }
             )
-            OutlinedTextField(
+            TextField(
+                shape = RoundedCornerShape(12.dp),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
+                    disabledIndicatorColor = Color.Transparent
+                ),
+                textStyle = MaterialTheme.typography.bodyLarge,
                 value = searchQuery,
                 onValueChange = onSearchQueryChange,
                 // 无障碍名称由 placeholder 提供；再设 contentDescription 会在有输入时重复朗读提示。
@@ -408,160 +450,135 @@ private fun LibraryHeader(
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() })
             )
+            val options = listOf(
+                LibrarySortField.LAST_READ to stringResource(R.string.library_sort_last_read),
+                LibrarySortField.ADDED to stringResource(R.string.library_sort_created),
+                LibrarySortField.TITLE to stringResource(R.string.library_sort_title),
+                LibrarySortField.PROGRESS to stringResource(R.string.library_sort_progress)
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    stringResource(R.string.library_reading_count, count),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f).semantics { heading() }
+                )
+                SortMenuButton(
+                    label = stringResource(R.string.library_sort_by, options.first { it.first == sort.field }.second),
+                    options = options,
+                    selectedField = sort.field,
+                    ascending = sort.direction == LibrarySortDirection.ASCENDING,
+                    expanded = sortMenuExpanded,
+                    onExpandedChange = onSortMenuExpandedChange,
+                    onFieldSelected = onSortField,
+                    preferBelowAnchor = true,
+                    onAscendingSelected = { ascending ->
+                        onSortDirection(if (ascending) LibrarySortDirection.ASCENDING else LibrarySortDirection.DESCENDING)
+                    }
+                )
+            }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LibraryRow(
     title: String,
-    subtitle: String?,
+    subtitle: String,
     isBook: Boolean,
     onClick: () -> Unit,
     onDelete: () -> Unit,
     onEdit: (() -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val typeLabel = stringResource(
-        if (isBook) R.string.library_item_book else R.string.library_item_article
-    )
-
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 112.dp)
-                    .clickable(role = Role.Button, onClick = onClick)
-                    .padding(vertical = 18.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                LibraryThumbnail(title = title, typeLabel = typeLabel, isBook = isBook)
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (isBook) {
-                                Icons.AutoMirrored.Outlined.MenuBook
-                            } else {
-                                Icons.Outlined.Description
-                            },
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = typeLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+    val moreActions = stringResource(R.string.library_more_actions, title)
+    Box {
+        ListItem(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 84.dp)
+                .combinedClickable(
+                    role = Role.Button,
+                    onClick = onClick,
+                    onLongClickLabel = moreActions,
+                    onLongClick = { showMenu = true }
+                ),
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            leadingContent = { LibraryThumbnail(isBook) },
+            headlineContent = {
+                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            },
+            supportingContent = {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            trailingContent = {
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        )
+        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+            if (!isBook && onEdit != null) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.action_edit_article)) },
+                    leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
+                    onClick = { showMenu = false; onEdit() }
+                )
+            }
+            DropdownMenuItem(
+                text = {
                     Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontFamily = FontFamily.Serif,
-                        fontWeight = FontWeight.Normal,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 6.dp)
+                        stringResource(if (isBook) R.string.book_delete_title else R.string.article_delete_title),
+                        color = MaterialTheme.colorScheme.error
                     )
-                    if (subtitle != null) {
-                        Text(
-                            text = subtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 6.dp)
-                        )
-                    }
-                }
-            }
-            Box {
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreHoriz,
-                        contentDescription = stringResource(R.string.library_more_actions, title),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                DropdownMenu(
-                    expanded = showMenu,
-                    onDismissRequest = { showMenu = false }
-                ) {
-                    if (!isBook && onEdit != null) {
-                        DropdownMenuItem(
-                            text = { Text(stringResource(R.string.action_edit_article)) },
-                            leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
-                            onClick = {
-                                showMenu = false
-                                onEdit()
-                            }
-                        )
-                    }
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = stringResource(
-                                    if (isBook) R.string.book_delete_title else R.string.article_delete_title
-                                ),
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Outlined.Delete,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        },
-                        onClick = {
-                            showMenu = false
-                            onDelete()
-                        }
-                    )
-                }
-            }
+                },
+                leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                onClick = { showMenu = false; onDelete() }
+            )
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 
 @Composable
-private fun LibraryThumbnail(title: String, typeLabel: String, isBook: Boolean) {
-    val colors = MaterialTheme.colorScheme
+private fun LibraryThumbnail(isBook: Boolean) {
+    // Importers do not persist cover images. Keep an honest placeholder rather than a fake cover.
     Surface(
-        color = if (isBook) colors.tertiary else colors.tertiaryContainer,
-        contentColor = if (isBook) colors.onTertiary else colors.onTertiaryContainer,
-        shape = RoundedCornerShape(topStart = 3.dp, topEnd = 6.dp, bottomEnd = 6.dp, bottomStart = 3.dp),
-        modifier = Modifier
-            .size(width = 64.dp, height = 92.dp)
-            .clearAndSetSemantics { }
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        contentColor = MaterialTheme.colorScheme.primary,
+        shape = RoundedCornerShape(4.dp),
+        modifier = Modifier.size(width = 48.dp, height = 66.dp).clearAndSetSemantics { }
     ) {
-        Column(
-            modifier = Modifier.padding(8.dp),
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(text = typeLabel, fontSize = 8.sp, maxLines = 1)
-            Text(
-                text = title,
-                fontFamily = FontFamily.Serif,
-                fontSize = 15.sp,
-                lineHeight = 17.sp,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis
-            )
-            HorizontalDivider(
-                modifier = Modifier.width(18.dp),
-                color = LocalContentColor.current.copy(alpha = 0.45f)
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                if (isBook) Icons.AutoMirrored.Outlined.MenuBook else Icons.Outlined.Description,
+                contentDescription = null,
+                modifier = Modifier.size(24.dp)
             )
         }
     }
+}
+
+@Composable
+private fun librarySubtitle(item: LibraryItem): String {
+    val timestamp = (item.lastReadAt ?: item.createdAt).coerceAtLeast(0L)
+    val date = Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).toLocalDate()
+    val days = ChronoUnit.DAYS.between(date, LocalDate.now()).coerceAtLeast(0L)
+    val relative = when (days) {
+        0L -> stringResource(R.string.library_today)
+        1L -> stringResource(R.string.library_yesterday)
+        else -> stringResource(R.string.library_days_ago, days)
+    }
+    val progress = if (item.lastReadAt == null) stringResource(R.string.library_unread)
+        else stringResource(R.string.library_read_percent, (item.progress * 100).roundToInt())
+    return stringResource(R.string.library_reading_metadata, relative, progress)
 }

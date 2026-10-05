@@ -1,5 +1,6 @@
 package io.github.zoot.englishreader.data.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.PrimaryKey
@@ -20,5 +21,6 @@ data class ReadingPositionEntity(
     val paragraphIndex: Int,
     val textKind: String,
     val characterOffset: Int,
-    val updatedAt: Long
+    val updatedAt: Long,
+    @ColumnInfo(defaultValue = "0") val progress: Float = 0f
 )

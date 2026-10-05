@@ -4,6 +4,9 @@ import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
 import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
+import io.github.zoot.englishreader.data.entity.BookSummary
+import io.github.zoot.englishreader.data.local.SettingsPreferences
+import io.github.zoot.englishreader.model.LibrarySort
 import io.github.zoot.englishreader.data.repository.ArticleRepository
 import io.github.zoot.englishreader.data.repository.BookRepository
 import io.github.zoot.englishreader.util.MainDispatcherRule
@@ -12,6 +15,8 @@ import io.mockk.mockk
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -27,7 +32,7 @@ class LibrarySearchTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule(StandardTestDispatcher())
 
-    private val article = ArticleSummary(id = 7, title = "A Quiet Walk", createdAt = 10)
+    private val article = ArticleSummary(id = 7, title = "A Quiet Walk", createdAt = 10, lastReadAt = 10)
     private val book = BookEntity(
         id = 7,
         title = "Reading Well",
@@ -36,7 +41,8 @@ class LibrarySearchTest {
         sourceFormat = "epub3",
         chapterCount = 2,
         totalChars = 200,
-        createdAt = 20
+        createdAt = 20,
+        lastReadAt = 20
     )
     private val articles = MutableStateFlow(listOf(article))
     private val books = MutableStateFlow(listOf(book))
@@ -50,9 +56,14 @@ class LibrarySearchTest {
             every { getAllArticles() } returns flow { error("Search must not load article bodies") }
         }
         val bookRepository = mockk<BookRepository> {
-            every { getAllBooks() } returns books
+            every { getLibraryBooks() } returns books.map { entries -> entries.map { BookSummary(it) } }
         }
-        viewModel = ArticleListViewModel(articleRepository, mockk(), bookRepository, mockk(), mockk())
+        val settingsPreferences = mockk<SettingsPreferences> {
+            every { librarySort } returns flowOf(LibrarySort())
+        }
+        viewModel = ArticleListViewModel(
+            articleRepository, mockk(), bookRepository, mockk(), mockk(), settingsPreferences
+        )
         store.put("library", viewModel)
     }
 

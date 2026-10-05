@@ -4,6 +4,8 @@ import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 
+private fun Float.safeProgress(): Float = if (isFinite()) coerceIn(0f, 1f) else 0f
+
 /**
  * 书架条目：一篇单独的文章，或一本书。
  *
@@ -25,15 +27,23 @@ import io.github.zoot.englishreader.data.entity.BookEntity
  */
 sealed interface LibraryItem {
 
-    /** 排序键：书用 `lastReadAt ?: createdAt`，文章用 `createdAt`，取值统一为毫秒。 */
+    /** Legacy time key retained for existing callers. */
     val sortKey: Long
+    val title: String
+    val createdAt: Long
+    val lastReadAt: Long?
+    val progress: Float
 
     /** 列表 key，必须在两类条目间全局唯一（见 [Book.listKey] 的说明）。 */
     val listKey: String
 
     /** 单篇导入或内置样本文章。 */
     data class Article(val article: ArticleSummary) : LibraryItem {
-        override val sortKey: Long get() = article.createdAt
+        override val sortKey: Long get() = article.lastReadAt ?: article.createdAt
+        override val title: String get() = article.title
+        override val createdAt: Long get() = article.createdAt
+        override val lastReadAt: Long? get() = article.lastReadAt
+        override val progress: Float get() = article.readingProgress.safeProgress()
         override val listKey: String get() = "article-${article.id}"
     }
 
@@ -44,7 +54,11 @@ sealed interface LibraryItem {
      * 必然出现 `books.id == articles.id`。若直接用数字当 `LazyColumn` 的 key，
      * Compose 会认为两条不同条目是同一项，复用错误的 composable 状态。
      */
-    data class Book(val book: BookEntity) : LibraryItem {
+    data class Book(val book: BookEntity, val readingProgress: Float = 0f) : LibraryItem {
+        override val title: String get() = book.title
+        override val createdAt: Long get() = book.createdAt
+        override val lastReadAt: Long? get() = book.lastReadAt
+        override val progress: Float get() = readingProgress.safeProgress()
         override val sortKey: Long get() = book.lastReadAt ?: book.createdAt
         override val listKey: String get() = "book-${book.id}"
     }

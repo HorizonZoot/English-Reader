@@ -10,11 +10,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
@@ -34,6 +34,7 @@ import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.data.entity.ArticleSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.importer.ImportFailure
+import io.github.zoot.englishreader.model.LibrarySort
 import io.github.zoot.englishreader.ui.component.IMPORT_STATUS_TEST_TAG
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
 import io.github.zoot.englishreader.viewmodel.ArticleListUiEvent
@@ -89,6 +90,8 @@ class ArticleListScreenTest {
     private val openedBooks = mutableListOf<Long>()
     private val viewModel = mockk<ArticleListViewModel>(relaxed = true).also { model ->
         every { model.libraryItems } returns libraryItemsState
+        every { model.librarySort } returns MutableStateFlow(LibrarySort())
+        every { model.sortMenuExpanded } returns MutableStateFlow(false)
         every { model.searchQuery } returns MutableStateFlow("")
         every { model.importState } returns importState
         every { model.uiEvent } returns uiEvents.receiveAsFlow()
@@ -506,9 +509,14 @@ class ArticleListScreenTest {
 
     private fun openMore(title: String) {
         val description = string(R.string.library_more_actions, title)
-        composeRule.onNode(hasScrollToIndexAction())
-            .performScrollToNode(hasContentDescription(description))
-        composeRule.onNodeWithContentDescription(description).assertIsDisplayed().performClick()
+        val row = hasText(title) and SemanticsMatcher("Long-click action: $description") { node ->
+            node.config.getOrNull(SemanticsActions.OnLongClick)?.label == description
+        }
+        composeRule.onNode(hasScrollToIndexAction()).performScrollToNode(row)
+        composeRule.onNode(row).assertIsDisplayed()
+            .performSemanticsAction(SemanticsActions.OnLongClick) { longClick ->
+                assertTrue(longClick())
+            }
     }
 
     private fun confirmDeleteTwiceBeforeRecomposition() {

@@ -10,6 +10,7 @@ import io.github.zoot.englishreader.model.ArticleEditSnapshot
 import io.github.zoot.englishreader.model.ReadingTextKind
 import io.github.zoot.englishreader.model.ReadingArticleRecord
 import io.github.zoot.englishreader.model.ReadingPublication
+import io.github.zoot.englishreader.util.readingProgress
 import kotlinx.coroutines.flow.Flow
 
 private const val READING_ARTICLE_QUERY =
@@ -39,9 +40,10 @@ interface ArticleDao {
      * 索引，子查询走索引扫描；且语义更直白——这里要表达的就是「不属于任何一本书」。
      */
     @Query(
-        "SELECT id, title, createdAt FROM articles " +
-            "WHERE id NOT IN (SELECT articleId FROM book_chapters) " +
-            "ORDER BY createdAt DESC, id DESC"
+        "SELECT a.id, a.title, a.createdAt, a.lastReadAt, COALESCE(p.progress, 0) AS readingProgress " +
+            "FROM articles a LEFT JOIN reading_positions p ON p.articleId = a.id " +
+            "WHERE a.id NOT IN (SELECT articleId FROM book_chapters) " +
+            "ORDER BY a.createdAt DESC, a.id DESC"
     )
     fun getStandaloneArticles(): Flow<List<ArticleSummary>>
 
@@ -98,10 +100,12 @@ interface ArticleDao {
     /** 字符锚点和书架的当前章指针同事务提交，较旧的保存不能把书退回上一章。 */
     @Transaction
     suspend fun saveReadingPosition(position: ReadingPositionEntity) {
-        if (!articleExists(position.articleId)) return
+        val article = getArticleById(position.articleId) ?: return
         val stored = getReadingPosition(position.articleId)
         if (stored != null && stored.updatedAt > position.updatedAt) return
-        upsertReadingPosition(position)
+        upsertReadingPosition(position.copy(progress = readingProgress(
+            article.content, position.paragraphIndex, position.textKind, position.characterOffset
+        )))
         updateLastReadTime(position.articleId, position.updatedAt)
         val bookId = readingBookId(position.articleId) ?: return
         if ((bookPositionUpdatedAt(bookId) ?: 0) > position.updatedAt) return

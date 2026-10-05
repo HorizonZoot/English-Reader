@@ -4,6 +4,7 @@ import io.github.zoot.englishreader.data.dao.ArticleDao
 import io.github.zoot.englishreader.data.dao.BookDao
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.BookChapterEntity
+import io.github.zoot.englishreader.data.entity.BookSummary
 import io.github.zoot.englishreader.data.entity.BookEntity
 import io.github.zoot.englishreader.data.entity.BookReadingProgressEntity
 import io.github.zoot.englishreader.data.entity.BookSourceFormat
@@ -32,6 +33,8 @@ class BookRepository @Inject constructor(
 ) {
 
     fun getAllBooks(): Flow<List<BookEntity>> = bookDao.getAllBooks()
+
+    fun getLibraryBooks(): Flow<List<BookSummary>> = bookDao.getLibraryBooks()
 
     fun getChapters(bookId: Long): Flow<List<BookChapterEntity>> = bookDao.getChapters(bookId)
 

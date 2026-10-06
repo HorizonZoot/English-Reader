@@ -49,13 +49,15 @@ class LocalTtsUiTest {
                 LocalVoiceModelsSection(emptyMap(), installs::add, {}, {})
             }
         } }
-        compose.onNodeWithText("下载模型").performScrollTo().performClick()
+        val getModel = hasText("获取") and
+            hasAnyAncestor(hasTestTag("tts-model-${TtsModelCatalog.kokoro.id}"))
+        compose.onNode(getModel).performScrollTo().performClick()
         compose.runOnIdle { assertTrue(installs.isEmpty()) }
         compose.onNodeWithText("下载 Kokoro · 英语多音色？").assertExists()
         compose.onNodeWithText("将下载 103.2 MB", substring = true).assertExists()
         compose.onNodeWithText("取消").performClick()
         compose.runOnIdle { assertTrue(installs.isEmpty()) }
-        compose.onNodeWithText("下载模型").performScrollTo().performClick()
+        compose.onNode(getModel).performScrollTo().performClick()
         compose.onNode(hasText("下载模型") and hasAnyAncestor(isDialog())).performClick()
         compose.runOnIdle { assertEquals(listOf(TtsModelCatalog.kokoro.id), installs) }
     }

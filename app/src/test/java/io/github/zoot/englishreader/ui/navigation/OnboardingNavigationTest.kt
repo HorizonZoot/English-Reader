@@ -8,6 +8,8 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.preferencesOf
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -27,7 +29,6 @@ import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.ui.screen.OnboardingGate
 import io.github.zoot.englishreader.ui.screen.SettingsScreen
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
-import io.github.zoot.englishreader.util.TtsCapability
 import io.github.zoot.englishreader.viewmodel.OnboardingViewModel
 import io.github.zoot.englishreader.viewmodel.SettingsViewModel
 import io.github.zoot.englishreader.viewmodel.TtsModelsViewModel
@@ -35,7 +36,6 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.emptyFlow
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -62,20 +62,13 @@ class OnboardingNavigationTest {
     }
     private lateinit var startup: OnboardingViewModel
     private val voiceModels = mockk<TtsModelsViewModel>(relaxed = true).also {
-        every { it.states } returns MutableStateFlow(emptyMap())
-        every { it.events } returns emptyFlow()
+        every { it.installedCount } returns MutableStateFlow(0)
     }
     private val settings = mockk<SettingsViewModel>(relaxed = true).also {
         every { it.fontSizeOption } returns MutableStateFlow(FontSizeOption.DEFAULT)
         every { it.themeOption } returns MutableStateFlow(ThemeOption.DEFAULT)
-        every { it.profiles } returns MutableStateFlow(emptyList())
-        every { it.activeProfileId } returns MutableStateFlow(null)
+        every { it.hasConfiguredProfile } returns MutableStateFlow(false)
         every { it.dictionaryPackState } returns MutableStateFlow(DictionaryPackState.NotInstalled)
-        every { it.ttsCapability } returns MutableStateFlow(TtsCapability.Checking)
-        every { it.allowNetworkTts } returns MutableStateFlow(false)
-        every { it.savingTtsPreference } returns MutableStateFlow(false)
-        every { it.ttsPreferenceErrors } returns emptyFlow()
-        every { it.dictionaryPackRemovalEvents } returns emptyFlow()
     }
 
     @After
@@ -98,7 +91,12 @@ class OnboardingNavigationTest {
                             SettingsScreen(
                                 viewModel = settings,
                                 modelsViewModel = voiceModels,
-                                onOpenOnboarding = { nav.navigate(ONBOARDING_REPLAY_ROUTE) }
+                                onOpenOnboarding = { nav.navigate(ONBOARDING_REPLAY_ROUTE) },
+                                onOpenAiProfile = {},
+                                onOpenCacheManagement = {},
+                                onOpenSpeech = {},
+                                onOpenDictionary = {},
+                                onOpenAbout = {}
                             )
                         }
                         onboardingReplayDestination(nav)
@@ -107,10 +105,11 @@ class OnboardingNavigationTest {
             }
         }
         repeat(3) { exit ->
-            compose.onNodeWithTag("settings-onboarding").performScrollTo().performClick()
+            compose.onNodeWithTag("settings-onboarding-entry").performScrollTo().performClick()
             compose.onNode(isDialog()).assertExists()
-            compose.onNodeWithText(text(R.string.onboarding_title)).assertIsDisplayed()
-            compose.onNodeWithTag("settings-onboarding").assertExists()
+            compose.onNode(hasText(text(R.string.onboarding_title)) and hasAnyAncestor(isDialog()))
+                .assertIsDisplayed()
+            compose.onNodeWithTag("settings-onboarding-entry").assertExists()
             compose.onNodeWithText(position(1)).assertIsDisplayed()
             compose.runOnIdle { assertEquals(ONBOARDING_REPLAY_ROUTE, nav.currentDestination?.route) }
             when (exit) {
@@ -127,8 +126,8 @@ class OnboardingNavigationTest {
                     compose.onNodeWithText(text(R.string.onboarding_return_settings)).performClick()
                 }
             }
-            compose.onNodeWithTag("settings-onboarding").performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText(text(R.string.onboarding_title)).assertDoesNotExist()
+            compose.onNodeWithTag("settings-onboarding-entry").performScrollTo().assertIsDisplayed()
+            compose.onNode(isDialog()).assertDoesNotExist()
             compose.runOnIdle {
                 assertEquals("settings", nav.currentDestination?.route)
                 assertNull(nav.previousBackStackEntry)

@@ -17,8 +17,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import io.github.zoot.englishreader.data.dictionary.DictionaryPackFailure
 import io.github.zoot.englishreader.data.dictionary.DictionaryPackState
-import io.github.zoot.englishreader.data.local.FontSizeOption
-import io.github.zoot.englishreader.data.local.ThemeOption
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -181,18 +179,11 @@ class SettingsDictionaryPackTest {
     ) {
         composeTestRule.setContent {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                SettingsOverviewContent(
-                    fontSize = FontSizeOption.MEDIUM,
-                    onFontSizeChange = {},
-                    theme = ThemeOption.SYSTEM,
-                    onThemeChange = {},
-                    profiles = emptyList(),
-                    activeProfileId = null,
-                    onOpenAiProfile = {},
-                    dictionaryPackState = state,
-                    onInstallDictionaryPack = onInstall,
-                    onCancelDictionaryPack = onCancel,
-                    onRemoveDictionaryPack = onRemove
+                DictionaryPackRow(
+                    state = state,
+                    onInstall = onInstall,
+                    onCancel = onCancel,
+                    onRemove = onRemove
                 )
             }
         }

@@ -644,7 +644,7 @@ class AiProfileConfigScreenTest {
         composeTestRule.onNodeWithText("新增 AI 配置").assertDoesNotExist()
         composeTestRule.onNodeWithText(firstMessage).assertExists()
 
-        composeTestRule.onNodeWithTag("profile_add_empty").performClick()
+        composeTestRule.onNodeWithTag("profile_add_top").assertIsDisplayed().performClick()
         advanceUiUntil { composeTestRule.onAllNodesWithTag("profile_display_name").fetchSemanticsNodes().size == 1 }
         composeTestRule.onNodeWithTag("profile_display_name").performTextReplacement("Draft B")
         dismissSnackbar(firstMessage)

@@ -12,9 +12,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
-import io.github.zoot.englishreader.data.local.AiAuthStrategy
-import io.github.zoot.englishreader.data.local.AiProviderProfile
-import io.github.zoot.englishreader.data.local.AiProviderTemplate
+import io.github.zoot.englishreader.data.dictionary.DictionaryPackState
 import io.github.zoot.englishreader.data.local.FontSizeOption
 import io.github.zoot.englishreader.data.local.ThemeOption
 import java.util.concurrent.atomic.AtomicInteger
@@ -33,15 +31,14 @@ class SettingsOverviewTest {
     val composeTestRule = createComposeRule()
 
     @Test
-    fun aiProfileRow_reportsOpenActionAndActiveProfile() {
+    fun aiProfileRow_reportsOpenActionAndConfiguredStatus() {
         val openCount = AtomicInteger()
         render(
-            profiles = listOf(testProfile()),
-            activeProfileId = "profile-1",
+            hasConfiguredProfile = true,
             onOpenAiProfile = { openCount.incrementAndGet() }
         )
 
-        composeTestRule.onNodeWithText("Test profile").assertIsDisplayed()
+        composeTestRule.onNodeWithText("已配置").performScrollTo().assertIsDisplayed()
         composeTestRule.onNodeWithTag("settings_ai_profile_entry")
             .performScrollTo()
             .performClick()
@@ -54,7 +51,7 @@ class SettingsOverviewTest {
         render(modifier = Modifier.width(240.dp))
 
         composeTestRule.onNodeWithText("字体大小").assertIsDisplayed()
-        composeTestRule.onNodeWithText("AI 服务").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("settings_ai_profile_entry").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -64,15 +61,15 @@ class SettingsOverviewTest {
 
         composeTestRule.onNodeWithTag("settings-cache-management").performScrollTo().performClick()
         composeTestRule.runOnIdle { assertEquals(1, opened) }
-        composeTestRule.onNodeWithTag("settings-dict-pack").assertExists()
+        composeTestRule.onNodeWithTag("settings-dictionary-entry").assertExists()
+        composeTestRule.onNodeWithTag("settings-dict-pack").assertDoesNotExist()
         composeTestRule.onNodeWithTag("settings-pron-cache").assertDoesNotExist()
         composeTestRule.onNodeWithText("清除全部 AI 缓存").assertDoesNotExist()
     }
 
     private fun render(
         modifier: Modifier = Modifier,
-        profiles: List<AiProviderProfile> = emptyList(),
-        activeProfileId: String? = null,
+        hasConfiguredProfile: Boolean = false,
         onOpenAiProfile: () -> Unit = {},
         onOpenCacheManagement: () -> Unit = {}
     ) {
@@ -83,22 +80,18 @@ class SettingsOverviewTest {
                     onFontSizeChange = {},
                     theme = ThemeOption.SYSTEM,
                     onThemeChange = {},
-                    profiles = profiles,
-                    activeProfileId = activeProfileId,
+                    hasConfiguredProfile = hasConfiguredProfile,
+                    installedVoiceCount = 0,
+                    dictionaryPackState = DictionaryPackState.NotInstalled,
                     onOpenAiProfile = onOpenAiProfile,
-                    onOpenCacheManagement = onOpenCacheManagement
+                    onOpenCacheManagement = onOpenCacheManagement,
+                    onOpenOnboarding = {},
+                    onOpenSpeech = {},
+                    onOpenDictionary = {},
+                    onOpenAbout = {}
                 )
             }
         }
     }
 
-    private fun testProfile() = AiProviderProfile(
-        profileId = "profile-1",
-        displayName = "Test profile",
-        providerTemplate = AiProviderTemplate.DEEPSEEK,
-        baseUrl = "https://api.deepseek.com",
-        modelId = "deepseek-chat",
-        authStrategy = AiAuthStrategy.API_KEY,
-        temperature = 0.2
-    )
 }

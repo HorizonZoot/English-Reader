@@ -5,19 +5,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import io.github.zoot.englishreader.BuildConfig
-import io.github.zoot.englishreader.data.dictionary.DictionaryPackState
-import io.github.zoot.englishreader.data.local.FontSizeOption
-import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.ui.theme.EnglishReaderTheme
-import io.github.zoot.englishreader.util.TtsCapability
 import io.github.zoot.englishreader.viewmodel.ManualCheckOutcome
-import io.github.zoot.englishreader.viewmodel.SettingsViewModel
-import io.github.zoot.englishreader.viewmodel.TtsModelsViewModel
-import io.mockk.every
-import io.mockk.mockk
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -34,34 +24,18 @@ class SettingsUpdateTest {
     private val hasDownload = mutableStateOf(false)
     private val outcomes = Channel<ManualCheckOutcome>(Channel.BUFFERED)
     private var clicks = 0
-    private val voiceModels = mockk<TtsModelsViewModel>(relaxed = true).also {
-        every { it.states } returns MutableStateFlow(emptyMap())
-        every { it.events } returns emptyFlow()
-    }
-    private val model = mockk<SettingsViewModel>(relaxed = true).also {
-        every { it.fontSizeOption } returns MutableStateFlow(FontSizeOption.DEFAULT)
-        every { it.themeOption } returns MutableStateFlow(ThemeOption.DEFAULT)
-        every { it.profiles } returns MutableStateFlow(emptyList())
-        every { it.activeProfileId } returns MutableStateFlow(null)
-        every { it.dictionaryPackState } returns MutableStateFlow(DictionaryPackState.NotInstalled)
-        every { it.ttsCapability } returns MutableStateFlow(TtsCapability.Checking)
-        every { it.allowNetworkTts } returns MutableStateFlow(false)
-        every { it.savingTtsPreference } returns MutableStateFlow(false)
-        every { it.ttsPreferenceErrors } returns emptyFlow()
-        every { it.dictionaryPackRemovalEvents } returns emptyFlow()
-    }
 
     private fun render() {
         val events = outcomes.receiveAsFlow()
         compose.setContent {
             EnglishReaderTheme {
-                SettingsScreen(
+                SettingsAboutScreen(
+                    onBack = {},
+                    onOpenLicenses = {},
                     onCheckForUpdate = { clicks++; checking.value = true },
                     checkingForUpdate = checking.value,
                     hasUpdateDownload = hasDownload.value,
-                    manualUpdateOutcomes = events,
-                    viewModel = model,
-                    modelsViewModel = voiceModels
+                    manualUpdateOutcomes = events
                 )
             }
         }

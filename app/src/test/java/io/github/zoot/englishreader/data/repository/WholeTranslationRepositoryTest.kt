@@ -1081,7 +1081,10 @@ class WholeTranslationRepositoryTest {
             remoteGate.await()
             AiClientResult.Success("译文")
         }
-        val repo = WholeTranslationRepository(db.wholeTranslationDao(), reader, resolver, executor, this, { NOW }, POLICY)
+        val repo = WholeTranslationRepository(
+            db.wholeTranslationDao(), reader, resolver, executor, this, { NOW }, POLICY,
+            planningDispatcher = StandardTestDispatcher(testScheduler)
+        )
         val first = async { repo.start(scope) }
         advanceUntilIdle()
         assertTrue(snapshotStarted.isCompleted)

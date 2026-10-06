@@ -203,7 +203,11 @@ object TranslationBlockPlanner {
      * 一个有区分度的问题。替换是一对一的，所以返回的 offset 可以直接用在原段落上。
      */
     private fun withoutLineBreaks(paragraph: String): String =
-        paragraph.map { if (it in MANDATORY_LINE_BREAKS) ' ' else it }.joinToString("")
+        buildString(paragraph.length) {
+            for (character in paragraph) {
+                append(if (character in MANDATORY_LINE_BREAKS) ' ' else character)
+            }
+        }
 
     /** 从 [index] 起向前跳过空白，返回最后一个非空白字符之后的位置。 */
     private fun lastNonWhitespaceEnd(paragraph: String, index: Int): Int {

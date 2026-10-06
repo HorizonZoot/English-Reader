@@ -2,11 +2,13 @@ package io.github.zoot.englishreader.ui.component
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -111,14 +113,16 @@ internal data class ReadingPageLayout(
 @Composable
 internal fun rememberReadingPageLayout(
     blocks: List<ReadingTextBlock>,
-    size: IntSize
+    size: IntSize,
+    measurer: TextMeasurer = rememberTextMeasurer(cacheSize = 8)
 ): State<ReadingPageLayout?> {
     val density = LocalDensity.current
-    val measurer = rememberTextMeasurer(cacheSize = 8)
-    return produceState<ReadingPageLayout?>(null, blocks, size, density, measurer) {
-        value = null
-        if (size.width <= 0 || size.height <= 0) return@produceState
-        val metrics = blocks.map { block ->
+    val metrics = remember(blocks, size.width, density.density, density.fontScale, measurer) {
+        mutableStateOf<List<ReadingBlockMetrics>?>(null)
+    }
+    LaunchedEffect(metrics) {
+        if (size.width <= 0) return@LaunchedEffect
+        metrics.value = blocks.map { block ->
             yield()
             val layout = measurer.measure(
                 text = block.text,
@@ -140,6 +144,15 @@ internal fun rememberReadingPageLayout(
                 }
             )
         }
-        value = ReadingPageLayout(blocks, size, density.density, density.fontScale, paginateReadingBlocks(metrics, size.height))
     }
+    val result = remember(metrics, size) { mutableStateOf<ReadingPageLayout?>(null) }
+    val measured = metrics.value
+    LaunchedEffect(result, measured) {
+        if (measured == null || size.height <= 0) return@LaunchedEffect
+        result.value = ReadingPageLayout(
+            blocks, size, density.density, density.fontScale,
+            paginateReadingBlocks(measured, size.height)
+        )
+    }
+    return result
 }

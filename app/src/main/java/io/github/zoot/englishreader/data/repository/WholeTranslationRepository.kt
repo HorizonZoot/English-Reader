@@ -40,7 +40,9 @@ import kotlinx.coroutines.yield
 import io.github.zoot.englishreader.model.toParagraphSnapshot
 import io.github.zoot.englishreader.util.ParagraphAligner
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -55,6 +57,7 @@ import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -136,7 +139,8 @@ class WholeTranslationRepository internal constructor(
      * 路径只能在设备或 Robolectric 下测，也让测试无法用确定性边界断言块长。默认值仍是生产实现，
      * 因此调用方不传就得到真实行为；真实 ICU 的接线由规划器自己的 Robolectric 用例覆盖。
      */
-    private val sentenceSplitter: (String) -> List<SentenceRange> = SentenceSplitter::split
+    private val sentenceSplitter: (String) -> List<SentenceRange> = SentenceSplitter::split,
+    private val planningDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
 
     @Inject
@@ -213,30 +217,31 @@ class WholeTranslationRepository internal constructor(
     }
 
     /** 本地预览不解析 profile，不读凭据，不访问缓存或网络。 */
-    suspend fun preview(scope: WholeTranslationScope): WholeTranslationPreviewResult {
-        val plans = mutableListOf<io.github.zoot.englishreader.model.TranslationBlockPlan>()
-        var hasTranslation = false
-        for (articleId in scope.articleIds) {
-            yield()
-            val article = articleDao.getArticleById(articleId)
-                ?: return WholeTranslationPreviewResult.Rejected(AiError.NoContent)
-            hasTranslation = hasTranslation || !article.translation.isNullOrBlank()
-            when (val result = planBlocks(articleId, article.content, preferredMode(articleId))) {
-                TranslationBlockPlanner.Result.NoContent -> return WholeTranslationPreviewResult.Rejected(AiError.NoContent)
-                is TranslationBlockPlanner.Result.TooManyBlocks -> return WholeTranslationPreviewResult.TooManyBlocks(
-                    articleId, result.actualBlocks, result.maxBlocks
-                )
-                is TranslationBlockPlanner.Result.Planned -> {
-                    for (block in result.plan.blocks) {
-                        val prepared = AiPromptPolicy.prepare(AiExplanationInput.ParagraphTranslation(block.text))
-                        if (prepared is AiPromptPreparationResult.Rejected) return WholeTranslationPreviewResult.Rejected(prepared.error)
+    suspend fun preview(scope: WholeTranslationScope): WholeTranslationPreviewResult =
+        withContext(planningDispatcher) {
+            val plans = mutableListOf<io.github.zoot.englishreader.model.TranslationBlockPlan>()
+            var hasTranslation = false
+            for (articleId in scope.articleIds) {
+                yield()
+                val article = articleDao.getArticleById(articleId)
+                    ?: return@withContext WholeTranslationPreviewResult.Rejected(AiError.NoContent)
+                hasTranslation = hasTranslation || !article.translation.isNullOrBlank()
+                when (val result = planBlocks(articleId, article.content, preferredMode(articleId))) {
+                    TranslationBlockPlanner.Result.NoContent -> return@withContext WholeTranslationPreviewResult.Rejected(AiError.NoContent)
+                    is TranslationBlockPlanner.Result.TooManyBlocks -> return@withContext WholeTranslationPreviewResult.TooManyBlocks(
+                        articleId, result.actualBlocks, result.maxBlocks
+                    )
+                    is TranslationBlockPlanner.Result.Planned -> {
+                        for (block in result.plan.blocks) {
+                            val prepared = AiPromptPolicy.prepare(AiExplanationInput.ParagraphTranslation(block.text))
+                            if (prepared is AiPromptPreparationResult.Rejected) return@withContext WholeTranslationPreviewResult.Rejected(prepared.error)
+                        }
+                        plans += result.plan
                     }
-                    plans += result.plan
                 }
             }
+            WholeTranslationPreviewResult.Ready(WholeTranslationPreview(scope, plans.toList(), hasTranslation))
         }
-        return WholeTranslationPreviewResult.Ready(WholeTranslationPreview(scope, plans.toList(), hasTranslation))
-    }
 
     /**
      * 建任务，每篇目标按它自己保存的分块方式规划。

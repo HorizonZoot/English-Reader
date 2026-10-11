@@ -39,6 +39,7 @@ class VocabularyExcerptViewModelTest {
     private val settings = mockk<SettingsPreferences>(relaxed = true) {
         every { ttsReadingSettings } returns flowOf(TtsReadingSettings("reader-voice", 1.4f))
         every { allowNetworkTts } returns flowOf(false)
+        every { favoritesAlphabetical } returns flowOf(false)
     }
     private val callbacks = mutableListOf<(TtsPlaybackResult) -> Unit>()
     private val spokenText = mutableListOf<String>()
@@ -106,6 +107,17 @@ class VocabularyExcerptViewModelTest {
         runCurrent()
         assertNull(vm.excerptPlayback.value)
         vm.uiEvent.test { expectNoEvents() }
+
+        vm.selectTab(1)
+        vm.toggleExcerptPlayback(excerpt)
+        runCurrent()
+        assertEquals(ExcerptPlaybackState(1, true), vm.excerptPlayback.value)
+        vm.selectTab(0)
+        callbacks.last()(TtsPlaybackResult.Started("after-tab-change", TtsVoiceMode.LOCAL))
+        runCurrent()
+        assertEquals(0, vm.selectedTab.value)
+        assertNull(vm.excerptPlayback.value)
+        vm.uiEvent.test { expectNoEvents() }
     }
 
     @Test
@@ -141,7 +153,7 @@ class VocabularyExcerptViewModelTest {
     @Test
     fun deleteExcerpt_whilePlaying_clearsPlaybackAndRejectsLateCompletion() = runTest {
         val vm = create()
-        coEvery { repository.delete(1) } returns true
+        coEvery { repository.deleteForUndo(1) } returns excerpt
         vm.toggleExcerptPlayback(excerpt)
         runCurrent()
         vm.deleteExcerpt(excerpt)
@@ -155,7 +167,7 @@ class VocabularyExcerptViewModelTest {
     @Test
     fun openExcerpt_withQueuedSnackbar_navigatesIndependently() = runTest {
         val vm = create()
-        coEvery { repository.delete(1) } returns true
+        coEvery { repository.deleteForUndo(1) } returns excerpt
         coEvery { repository.hasSource(excerpt) } returns true
         vm.excerptToOpen.test {
             vm.deleteExcerpt(excerpt)
@@ -216,7 +228,7 @@ class VocabularyExcerptViewModelTest {
     fun deleteExcerpt_repeatedTap_emitsOnlyAfterSingleSuccessfulWrite() = runTest {
         val vm = create()
         val gate = CompletableDeferred<Unit>()
-        coEvery { repository.delete(1) } coAnswers { gate.await(); true }
+        coEvery { repository.deleteForUndo(1) } coAnswers { gate.await(); excerpt }
         vm.uiEvent.test {
             vm.deleteExcerpt(excerpt)
             vm.deleteExcerpt(excerpt)
@@ -224,7 +236,7 @@ class VocabularyExcerptViewModelTest {
             expectNoEvents()
             gate.complete(Unit)
             assertEquals(VocabularyUiEvent.ExcerptDeleted(excerpt), awaitItem())
-            coVerify(exactly = 1) { repository.delete(1) }
+            coVerify(exactly = 1) { repository.deleteForUndo(1) }
         }
     }
 }

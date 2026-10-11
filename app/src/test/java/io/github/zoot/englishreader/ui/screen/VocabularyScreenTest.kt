@@ -9,6 +9,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.isDialog
@@ -34,6 +38,7 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroup
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyWordDetail
+import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupingTime
 import io.github.zoot.englishreader.viewmodel.ContextLibraryState
 import io.github.zoot.englishreader.viewmodel.VocabularyUiEvent
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
@@ -77,6 +82,14 @@ class VocabularyScreenTest {
     private val excerptPlaybackState = MutableStateFlow<io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState?>(null)
     private val excerptToOpen = MutableSharedFlow<ExcerptEntity>(extraBufferCapacity = 1)
     private val openedExcerpts = mutableListOf<Pair<Long, Long>>()
+    private val selectedTabState = MutableStateFlow(0)
+    private val expandedExcerptsState = MutableStateFlow<Set<Long>>(emptySet())
+    private val sortMenuState = MutableStateFlow(false)
+    private val studyInfoState = MutableStateFlow(false)
+    private val excerptMenuState = MutableStateFlow<Long?>(null)
+    private val wordMenuState = MutableStateFlow<String?>(null)
+    private val wordToDeleteState = MutableStateFlow<StudyWord?>(null)
+    private val favoritesTimeState = MutableStateFlow(VocabularyGroupingTime.current())
 
     /** 一次性事件用无重放的 SharedFlow 模拟 Channel：测试自行 tryEmit 触发界面反应。 */
     private val uiEvents = MutableSharedFlow<VocabularyUiEvent>(extraBufferCapacity = 4)
@@ -92,6 +105,24 @@ class VocabularyScreenTest {
         every { model.excerptToOpen } returns excerptToOpen
         every { model.contextLibrary } returns libraryState
         every { model.contextToOpen } returns MutableSharedFlow()
+        every { model.selectedTab } returns selectedTabState
+        every { model.expandedExcerpts } returns expandedExcerptsState
+        every { model.sortMenuExpanded } returns sortMenuState
+        every { model.showStudyInfo } returns studyInfoState
+        every { model.excerptMenuId } returns excerptMenuState
+        every { model.wordMenuKey } returns wordMenuState
+        every { model.wordToDelete } returns wordToDeleteState
+        every { model.favoritesTime } returns favoritesTimeState
+        every { model.selectTab(any()) } answers { selectedTabState.value = firstArg() }
+        every { model.setSortMenuExpanded(any()) } answers { sortMenuState.value = firstArg() }
+        every { model.setExcerptMenu(any()) } answers { excerptMenuState.value = firstArg() }
+        every { model.setWordMenu(any()) } answers { wordMenuState.value = firstArg() }
+        every { model.confirmWordDeletion(any()) } answers { wordToDeleteState.value = firstArg() }
+        every { model.toggleExcerptExpanded(any()) } answers {
+            val id = firstArg<Long>()
+            expandedExcerptsState.value = if (id in expandedExcerptsState.value) expandedExcerptsState.value - id
+                else expandedExcerptsState.value + id
+        }
     }
 
     @Test
@@ -107,11 +138,9 @@ class VocabularyScreenTest {
             )
         )
 
-        scrollToText(string(R.string.vocabulary_group_today))
-        composeRule.onNodeWithText(string(R.string.vocabulary_group_today)).assertIsDisplayed()
-        // 「今天」用「N 个新单词」，其它分组用「N 个单词」。
-        composeRule.onNodeWithText(string(R.string.vocabulary_group_words_new, 1))
-            .assertIsDisplayed()
+        val header = string(R.string.favorites_group_words, string(R.string.vocabulary_group_today), 1)
+        scrollToText(header)
+        composeRule.onNodeWithText(header).assertIsDisplayed()
         scrollToText("noticing")
         composeRule.onNodeWithText("noticing").assertIsDisplayed()
         composeRule.onNodeWithText("/ˈnəʊtɪsɪŋ/").assertIsDisplayed()
@@ -123,32 +152,35 @@ class VocabularyScreenTest {
         groupTypeState.value = GroupType.ByAlphabet
         render(groups = listOf(group(VocabularyGroupId.Alphabet("A"), listOf(word(1L, "apple")))))
 
-        scrollToText("A")
-        composeRule.onNodeWithText("A").assertIsDisplayed()
-        composeRule.onNodeWithText(string(R.string.vocabulary_group_words, 1)).assertIsDisplayed()
+        val header = string(R.string.favorites_group_letters, "A", 1)
+        scrollToText(header)
+        composeRule.onNodeWithText(header).assertIsDisplayed()
         scrollToText("apple")
         composeRule.onNodeWithText("apple").assertIsDisplayed()
     }
 
     @Test
-    fun emptyVocabulary_showsEmptyStateAndHidesGroupingControl() {
+    fun emptyVocabulary_showsEmptyStateAndCollapsedSortMenu() {
         render(groups = emptyList())
 
+        scrollToText(string(R.string.study_words_empty))
         composeRule.onNodeWithText(string(R.string.study_words_empty)).assertIsDisplayed()
-        composeRule.onNodeWithText(string(R.string.vocabulary_group_by_time)).assertDoesNotExist()
+        composeRule.onNodeWithText(string(R.string.favorites_sort_alphabet)).assertDoesNotExist()
     }
 
     @Test
-    fun segmentedControl_choosingAlphabet_dispatchesGroupType() {
+    fun sortMenu_choosingAlphabet_dispatchesGroupType() {
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word(1L, "noticing")))))
 
-        composeRule.onNodeWithText(string(R.string.vocabulary_group_by_alphabet)).performClick()
+        scrollToText(string(R.string.favorites_sort_time))
+        composeRule.onNodeWithText(string(R.string.favorites_sort_time)).performClick()
+        composeRule.onNodeWithText(string(R.string.favorites_sort_alphabet)).performScrollTo().performClick()
 
         verify(exactly = 1) { viewModel.switchGroupType(GroupType.ByAlphabet) }
     }
 
     @Test
-    fun sourceArticleRow_showsTitleAndOpensThatArticle() {
+    fun sourceArticleMenu_opensThatArticleAfterStoppingAudio() {
         val word = word(1L, "noticing", articleId = 42L)
         val events = mutableListOf<String>()
         every { viewModel.stopAudio() } answers { events += "stop" }
@@ -163,8 +195,8 @@ class VocabularyScreenTest {
             }
         )
 
-        scrollToText("The Future of AI")
-        composeRule.onNodeWithText("The Future of AI").assertIsDisplayed()
+        openWordMenu("noticing")
+        composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).assertIsDisplayed()
         composeRule.runOnIdle { events.clear() }
         composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performScrollTo().performClick()
 
@@ -295,7 +327,7 @@ class VocabularyScreenTest {
         val word = word(1L, "noticing")
         render(groups = listOf(group(VocabularyGroupId.Today, listOf(word))))
 
-        scrollToText(string(R.string.action_delete))
+        openWordMenu("noticing")
         composeRule.onNodeWithText(string(R.string.action_delete)).performScrollTo().performClick()
         verify(exactly = 0) { viewModel.deleteStudyWord(any()) }
         composeRule.onNodeWithText(string(R.string.study_delete_title)).assertIsDisplayed()
@@ -369,16 +401,20 @@ class VocabularyScreenTest {
         composeRule.onNodeWithText("noticing").assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
         composeRule.onNodeWithText(excerpt.text).assertIsDisplayed()
-        composeRule.onNodeWithText(string(R.string.excerpt_expand)).performClick()
-        composeRule.onNodeWithText(string(R.string.excerpt_collapse)).assertIsDisplayed()
+        composeRule.onNodeWithText(excerpt.text).performClick()
+        composeRule.onNodeWithText(excerpt.text).assert(SemanticsMatcher("collapse action") {
+            it.config[SemanticsActions.OnClick].label == string(R.string.excerpt_collapse)
+        })
+        verify(exactly = 1) { viewModel.toggleExcerptExpanded(excerpt.id) }
         composeRule.runOnIdle { assertTrue(openedExcerpts.isEmpty()) }
+        openExcerptMenu()
         composeRule.onNodeWithText(string(R.string.excerpt_copy)).performClick()
         composeRule.runOnIdle {
             val clipboard = RuntimeEnvironment.getApplication()
                 .getSystemService(android.content.ClipboardManager::class.java)
             assertEquals(excerpt.text, clipboard.primaryClip?.getItemAt(0)?.text?.toString())
         }
-        composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).performClick()
+        composeRule.onNodeWithText(excerpt.sourceTitle).performClick()
         verify(exactly = 1) { viewModel.openExcerpt(excerpt) }
         composeRule.onNodeWithText(string(R.string.favorites_words)).performClick()
         scrollToText("noticing")
@@ -391,6 +427,7 @@ class VocabularyScreenTest {
         excerptsState.value = listOf(excerpt)
         render(groups = emptyList())
         composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
+        openExcerptMenu()
         composeRule.onNodeWithText(string(R.string.excerpt_delete)).performClick()
         verify(exactly = 1) { viewModel.deleteExcerpt(excerpt) }
         composeRule.runOnIdle { uiEvents.tryEmit(VocabularyUiEvent.ExcerptDeleted(excerpt)) }
@@ -406,8 +443,10 @@ class VocabularyScreenTest {
         excerptsState.value = listOf(excerpt().copy(articleId = null))
         render(groups = emptyList())
         composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
+        composeRule.onNodeWithText(excerpt().sourceTitle).assertIsNotEnabled()
+        openExcerptMenu()
         composeRule.onNodeWithText("无法获取来源，文章可能被删除").assertIsDisplayed()
-        composeRule.onNodeWithText(string(R.string.vocabulary_open_article)).assertIsNotEnabled()
+        verify(exactly = 0) { viewModel.openExcerpt(any()) }
     }
 
     @Test
@@ -416,19 +455,22 @@ class VocabularyScreenTest {
         excerptsState.value = listOf(excerpt)
         render(groups = emptyList())
         composeRule.onNodeWithText(string(R.string.favorites_excerpts)).performClick()
-        composeRule.onNodeWithText(string(R.string.excerpt_play)).performClick()
+        composeRule.onNodeWithTag("excerpt-play-${excerpt.id}").assertIsDisplayed().performClick()
         verify(exactly = 1) { viewModel.toggleExcerptPlayback(excerpt) }
         composeRule.runOnIdle {
             excerptPlaybackState.value = io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState(excerpt.id, loading = true)
         }
-        composeRule.onNodeWithText(string(R.string.excerpt_stop)).assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("excerpt-play-${excerpt.id}").assertIsDisplayed()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, string(R.string.excerpt_audio_loading)))
+            .performClick()
         verify(exactly = 2) { viewModel.toggleExcerptPlayback(excerpt) }
         composeRule.runOnIdle {
             excerptPlaybackState.value = io.github.zoot.englishreader.viewmodel.ExcerptPlaybackState(excerpt.id, loading = false)
         }
-        composeRule.onNodeWithText(string(R.string.excerpt_stop)).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription(string(R.string.excerpt_stop)).assertIsDisplayed()
         composeRule.onNodeWithText(string(R.string.favorites_words)).performClick()
-        verify(atLeast = 1) { viewModel.stopAudio() }
+        verify(exactly = 1) { viewModel.selectTab(0) }
+        composeRule.onNodeWithTag("excerpts-list").assertDoesNotExist()
     }
 
     private fun excerpt() = ExcerptEntity(
@@ -467,6 +509,15 @@ class VocabularyScreenTest {
             }
         }
         groups.firstOrNull()?.words?.firstOrNull()?.let { scrollToText(it.word) }
+    }
+
+    private fun openWordMenu(word: String) {
+        scrollToText(word)
+        composeRule.onNodeWithContentDescription(string(R.string.favorites_word_actions, word)).performScrollTo().performClick()
+    }
+
+    private fun openExcerptMenu() {
+        composeRule.onNodeWithContentDescription(string(R.string.favorites_excerpt_actions)).performScrollTo().performClick()
     }
 
     private fun scrollToText(text: String) {

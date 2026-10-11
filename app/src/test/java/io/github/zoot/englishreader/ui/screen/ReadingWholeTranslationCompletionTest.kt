@@ -99,6 +99,8 @@ class ReadingWholeTranslationCompletionTest {
             every { isLoadingArticle } returns MutableStateFlow(false)
             every { vocabularyWords } returns MutableStateFlow(emptySet())
             every { contextCardSaved } returns MutableStateFlow(false)
+            every { excerptOverlapPending } returns MutableStateFlow(false)
+            every { excerptSaveBusy } returns MutableStateFlow(false)
             every { isSavingContextCard } returns MutableStateFlow(false)
             every { contextSaved } returns emptyFlow()
             every { fontSizeOption } returns MutableStateFlow(FontSizeOption.DEFAULT)

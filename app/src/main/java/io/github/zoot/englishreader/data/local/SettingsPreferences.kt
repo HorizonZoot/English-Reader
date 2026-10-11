@@ -97,6 +97,13 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
         private val UPDATE_DOWNLOAD_TAG_KEY = stringPreferencesKey("update_download_tag")
     }
 
+    val favoritesAlphabetical: Flow<Boolean> = dataStore.data
+        .map { it[FAVORITES_ALPHABETICAL_KEY] ?: false }
+
+    suspend fun setFavoritesAlphabetical(alphabetical: Boolean) {
+        dataStore.edit { it[FAVORITES_ALPHABETICAL_KEY] = alphabetical }
+    }
+
     val librarySort: Flow<LibrarySort> = dataStore.data.map { preferences ->
         LibrarySort(
             field = LibrarySortField.entries.firstOrNull { it.name == preferences[LIBRARY_SORT_FIELD_KEY] }
@@ -112,13 +119,6 @@ class SettingsPreferences internal constructor(private val dataStore: DataStore<
 
     suspend fun setLibrarySortDirection(direction: LibrarySortDirection) {
         dataStore.edit { it[LIBRARY_SORT_DIRECTION_KEY] = direction.name }
-    }
-
-    val favoritesAlphabetical: Flow<Boolean> = dataStore.data
-        .map { it[FAVORITES_ALPHABETICAL_KEY] ?: false }
-
-    suspend fun setFavoritesAlphabetical(alphabetical: Boolean) {
-        dataStore.edit { it[FAVORITES_ALPHABETICAL_KEY] = alphabetical }
     }
 
     // 首次引导由 ViewModel 区分读取失败与未完成，不能在存储层静默回退。

@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.data.repository
 
 import io.github.zoot.englishreader.core.ExcerptRange
 import io.github.zoot.englishreader.data.dao.ExcerptDao
+import io.github.zoot.englishreader.data.dao.ExcerptWriteResult
 import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.entity.ExcerptEntity
 import io.github.zoot.englishreader.model.ReadingAnchor
@@ -31,14 +32,15 @@ class ExcerptRepositoryTest {
     @Test
     fun save_exactSlice_preservesTextAndSourceCoordinates() = runTest {
         val saved = slot<ExcerptEntity>()
-        coEvery { dao.insertForContent(capture(saved), article.content) } returns 9L
+        coEvery { dao.saveResolvingOverlap(capture(saved), article.content, "Alpha  beta, gamma.", null) } returns ExcerptWriteResult.SAVED
         assertEquals(ExcerptSaveResult.SAVED, repository.save(article, 1, ExcerptRange(7, 18)))
         assertEquals(excerpt.copy(id = 0, createdAt = saved.captured.createdAt), saved.captured)
     }
 
     @Test
     fun save_duplicateOrChangedSource_returnsTypedResult() = runTest {
-        coEvery { dao.insertForContent(any(), article.content) } returnsMany listOf(-1L, null)
+        coEvery { dao.saveResolvingOverlap(any(), article.content, "Alpha  beta, gamma.", null) } returnsMany
+            listOf(ExcerptWriteResult.ALREADY_EXISTS, ExcerptWriteResult.SOURCE_CHANGED)
         assertEquals(ExcerptSaveResult.ALREADY_EXISTS, repository.save(article, 1, ExcerptRange(7, 18)))
         assertEquals(ExcerptSaveResult.SOURCE_CHANGED, repository.save(article, 1, ExcerptRange(7, 18)))
     }
@@ -48,13 +50,13 @@ class ExcerptRepositoryTest {
         assertEquals(ExcerptSaveResult.SOURCE_CHANGED, repository.save(article, 9, ExcerptRange(0, 2)))
         assertEquals(ExcerptSaveResult.SOURCE_CHANGED, repository.save(article, 1, ExcerptRange(0, 99)))
         assertEquals(ExcerptSaveResult.SOURCE_CHANGED, repository.save(article, 1, ExcerptRange(5, 7)))
-        coVerify(exactly = 0) { dao.insertForContent(any(), any()) }
+        coVerify(exactly = 0) { dao.saveResolvingOverlap(any(), any(), any(), any()) }
     }
 
     @Test
     fun save_cancelled_propagatesCancellation() = runTest {
         val cancellation = CancellationException("cancelled")
-        coEvery { dao.insertForContent(any(), any()) } throws cancellation
+        coEvery { dao.saveResolvingOverlap(any(), any(), any(), any()) } throws cancellation
         val thrown = try {
             repository.save(article, 1, ExcerptRange(7, 18))
             null

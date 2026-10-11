@@ -10,7 +10,6 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -141,7 +140,7 @@ class ContextReviewScreenTest {
             verify(exactly = 1) { viewModel.consumeContextSource(any()) }
             assertTrue(actions.isEmpty())
         }
-        compose.onNodeWithContentDescription(RuntimeEnvironment.getApplication().getString(R.string.nav_back)).performClick()
+        compose.onNodeWithText(RuntimeEnvironment.getApplication().getString(R.string.nav_back)).performClick()
         compose.runOnIdle { assertEquals(listOf("cancel", "back"), actions) }
     }
 
@@ -156,7 +155,7 @@ class ContextReviewScreenTest {
             .config[SemanticsProperties.Text].single()
         assertEquals("The bank is quiet.", sentence.text)
         assertTrue(sentence.spanStyles.any { it.start == 4 && it.end == 8 })
-        compose.onNodeWithTag("context-review-reveal").performScrollTo().performClick()
+        compose.onNodeWithTag("context-review-reveal").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(listOf("item-1"), revealed) }
         compose.onNodeWithText("n. 河岸", useUnmergedTree = true).assertDoesNotExist()
         compose.onNodeWithTag("context-review-source", useUnmergedTree = true).assertDoesNotExist()
@@ -166,17 +165,16 @@ class ContextReviewScreenTest {
     fun revealedStoredTurn_displaysSnapshotAndPassesOpaqueTokenToGrade() {
         state.value = ContextReviewUiState(round = contextRound(listOf(contextEntry(revealed = true))), busy = false)
         render()
-        compose.onNodeWithTag("context-review-answer").performScrollTo().assertIsDisplayed()
+        reviewNode("context-review-answer").assertIsDisplayed()
         compose.onNodeWithTag("context-review-reveal").assertDoesNotExist()
         compose.onNodeWithTag("study-review-skip").assertDoesNotExist()
         compose.onNodeWithTag("study-review-edit").assertDoesNotExist()
         reviewNode("context-review-source").assertIsDisplayed().performClick()
         compose.runOnIdle { assertEquals(listOf("item-1"), sources) }
         ContextGrade.entries.forEach {
-            compose.onNodeWithTag("context-review").performScrollToNode(hasTestTag("context-grade-${it.name}"))
-            compose.onNodeWithTag("context-grade-${it.name}").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithTag("context-grade-${it.name}").assertIsDisplayed()
         }
-        compose.onNodeWithTag("context-grade-FUZZY").performScrollTo().performClick()
+        compose.onNodeWithTag("context-grade-FUZZY").performClick()
         compose.runOnIdle { assertEquals(listOf("item-1" to ContextGrade.FUZZY), grades) }
     }
 
@@ -184,13 +182,12 @@ class ContextReviewScreenTest {
     fun busyWrite_disablesRevealAndEveryGrade() {
         state.value = state.value.copy(busy = true)
         render()
-        compose.onNodeWithTag("context-review-reveal").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("context-review-reveal").assertIsDisplayed().assertIsNotEnabled()
         compose.runOnIdle {
             state.value = ContextReviewUiState(round = contextRound(listOf(contextEntry(revealed = true))), busy = true)
         }
         ContextGrade.entries.forEach {
-            compose.onNodeWithTag("context-review").performScrollToNode(hasTestTag("context-grade-${it.name}"))
-            compose.onNodeWithTag("context-grade-${it.name}").performScrollTo().assertIsNotEnabled()
+            compose.onNodeWithTag("context-grade-${it.name}").assertIsDisplayed().assertIsNotEnabled()
         }
         reviewNode("context-review-source").assertIsNotEnabled()
     }
@@ -199,31 +196,31 @@ class ContextReviewScreenTest {
     fun revealedTurn_withoutSourceCallback_hasNoSourceAction() {
         state.value = ContextReviewUiState(round = contextRound(listOf(contextEntry(revealed = true))), busy = false)
         render(onOpenSource = null)
-        compose.onNodeWithTag("context-review-answer").performScrollTo().assertIsDisplayed()
-        reviewNode("context-grade-REMEMBERED").assertIsDisplayed()
+        reviewNode("context-review-answer").assertIsDisplayed()
+        compose.onNodeWithTag("context-grade-REMEMBERED").assertIsDisplayed()
         compose.onNodeWithTag("context-review-source", useUnmergedTree = true).assertDoesNotExist()
     }
 
     @Test
-    fun missingAnswer_revealedTurnDisablesGradesAndOffersSkipWithoutEditor() {
+    fun missingAnswer_revealedTurnHidesGradesAndOffersSkipWithoutEditor() {
         val entry = contextEntry(revealed = true)
         state.value = ContextReviewUiState(
             round = contextRound(listOf(entry.copy(item = entry.item.copy(meaningSnapshot = "")))),
             busy = false
         )
         render()
-        compose.onNodeWithTag("context-review-answer").performScrollTo().assertIsDisplayed()
+        reviewNode("context-review-answer").assertIsDisplayed()
         compose.onNodeWithText(RuntimeEnvironment.getApplication().getString(R.string.study_answer_missing)).assertIsDisplayed()
         compose.onNodeWithTag("study-review-edit").assertDoesNotExist()
         compose.onNodeWithTag("context-meaning-input").assertDoesNotExist()
-        ContextGrade.entries.forEach { reviewNode("context-grade-${it.name}").assertIsNotEnabled() }
-        reviewNode("study-review-skip").assertIsDisplayed().performClick()
+        ContextGrade.entries.forEach { compose.onNodeWithTag("context-grade-${it.name}").assertDoesNotExist() }
+        compose.onNodeWithTag("study-review-skip").assertIsDisplayed().performClick()
         compose.runOnIdle {
             assertEquals(listOf("item-1"), skipped)
             assertTrue(grades.isEmpty())
             state.value = state.value.copy(busy = true)
         }
-        reviewNode("study-review-skip").assertIsNotEnabled()
+        compose.onNodeWithTag("study-review-skip").assertIsDisplayed().assertIsNotEnabled()
         compose.runOnIdle {
             state.value = ContextReviewUiState(
                 round = contextRound(listOf(entry.copy(item = entry.item.copy(meaningSnapshot = "", revealed = false)))),
@@ -255,7 +252,7 @@ class ContextReviewScreenTest {
         compose.runOnIdle {
             state.value = ContextReviewUiState(round = contextRound(listOf(contextEntry(id = 2))), busy = false)
         }
-        compose.onNodeWithTag("context-review-reveal").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("context-review-reveal").assertIsDisplayed()
         compose.onNodeWithTag("context-review-answer", useUnmergedTree = true).assertDoesNotExist()
         compose.onNodeWithText("n. 河岸", useUnmergedTree = true).assertDoesNotExist()
         compose.onNodeWithTag("context-review-source", useUnmergedTree = true).assertDoesNotExist()

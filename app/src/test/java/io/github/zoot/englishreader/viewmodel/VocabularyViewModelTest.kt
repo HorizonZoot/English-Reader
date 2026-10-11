@@ -12,6 +12,7 @@ import io.github.zoot.englishreader.data.repository.OfflineLookupResult
 import io.github.zoot.englishreader.data.repository.VocabularyInsertResult
 import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.repository.VocabularyRepository
+import io.github.zoot.englishreader.model.StudyWord
 import io.github.zoot.englishreader.model.TtsReadingSettings
 import io.github.zoot.englishreader.ui.screen.vocabulary.GroupType
 import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
@@ -21,6 +22,7 @@ import io.github.zoot.englishreader.util.AudioPlayer
 import io.github.zoot.englishreader.util.MainDispatcherRule
 import io.github.zoot.englishreader.util.NetworkChecker
 import io.github.zoot.englishreader.util.TtsPlayer
+import io.github.zoot.englishreader.util.contextCard
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.clearMocks
@@ -106,7 +108,9 @@ class VocabularyViewModelTest {
      * ArticleListViewModelTest 的「@Before 建一次，用例只改上游」约定一致。
      */
     private val dictionaryRevision = MutableStateFlow(0L)
+    private val offlineResults = mutableMapOf<String, OfflineLookupResult?>()
     private val rowsFlow = MutableStateFlow<List<VocabularyWithSource>>(emptyList())
+    private val studyWordsFlow = MutableStateFlow<List<StudyWord>>(emptyList())
 
     @Before
     fun setup() {
@@ -120,8 +124,14 @@ class VocabularyViewModelTest {
         ttsPlayer = mockk(relaxed = true)
         pronunciationAudioCache = mockk(relaxed = true)
         settingsPreferences = mockk(relaxed = true)
+        every { settingsPreferences.favoritesAlphabetical } returns flowOf(false)
         every { dictionaryRepository.revision } returns dictionaryRevision
+        coEvery { dictionaryRepository.lookupOfflineBatch(any()) } answers {
+            firstArg<Collection<String>>().associateWith(offlineResults::get)
+        }
         every { vocabularyRepository.getAllVocabularyWithSource() } returns rowsFlow
+        every { vocabularyRepository.observeStudyWords() } returns studyWordsFlow
+        every { vocabularyRepository.observeContextReview() } returns flowOf(null)
         every { networkChecker.isOnline() } returns true
         // 默认未授权联网 TTS：与产品默认值一致（SettingsPreferences.allowNetworkTts 缺省 false），
         // 于是既有用例断言的仍是「单词发音只用本地语音」这个改动前的行为。
@@ -303,7 +313,7 @@ class VocabularyViewModelTest {
         val now = Instant.parse("2024-07-18T12:00:00Z").toEpochMilli()
         val utc = ZoneId.of("UTC")
         withWords(listOf(vocab("apple", 1).copy(createdAt = now - 3_600_000)))
-        coEvery { dictionaryRepository.lookupOffline("apple") } returns offlineEntry("apple", null, "苹果")
+        offlineResults["apple"] = offlineEntry("apple", null, "苹果")
         viewModel.updateGroupingTime(VocabularyGroupingTime(now, utc))
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.groups.collect() }
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.details.collect() }
@@ -322,7 +332,7 @@ class VocabularyViewModelTest {
         assertEquals(GroupType.ByAlphabet, viewModel.groupType.value)
         assertEquals(setOf(VocabularyGroupId.Alphabet("A")), viewModel.expandedGroups.value)
         assertSame(alphabetWords, viewModel.groups.value.single().words)
-        coVerify(exactly = 1) { dictionaryRepository.lookupOffline("apple") }
+        coVerify(exactly = 1) { dictionaryRepository.lookupOfflineBatch(listOf("apple")) }
     }
 
     @Test
@@ -429,8 +439,7 @@ class VocabularyViewModelTest {
     fun details_resolvesPhoneticGlossAndSourceTitle() = runTest {
         withRows(listOf(row("Apple", id = 1L, articleTitle = "The Future of AI")))
         // 生词存的是原文大小写，查词典必须走 lowercase。
-        coEvery { dictionaryRepository.lookupOffline("apple") } returns
-            offlineEntry("apple", "/ˈæpl/", "n. 苹果；苹果树")
+        offlineResults["apple"] = offlineEntry("apple", "/ˈæpl/", "n. 苹果；苹果树")
 
         val detail = awaitDetails().getValue(1L)
 
@@ -444,19 +453,19 @@ class VocabularyViewModelTest {
     @Test
     fun details_apostropheVariants_shareLookupWithoutChangingSavedSurface() = runTest {
         withRows(listOf(row("DON’T", 1), row("don't", 2)))
-        coEvery { dictionaryRepository.lookupOffline("don't") } returns offlineEntry("don't", null, "不要")
+        offlineResults["don't"] = offlineEntry("don't", null, "不要")
 
         val details = awaitDetails()
         assertEquals("不要", details.getValue(1).chinese)
         assertEquals("不要", details.getValue(2).chinese)
         assertEquals(listOf("DON’T", "don't"), viewModel.vocabulary.first { it.size == 2 }.map { it.word })
-        coVerify(exactly = 1) { dictionaryRepository.lookupOffline("don't") }
+        coVerify(exactly = 1) { dictionaryRepository.lookupOfflineBatch(listOf("don't")) }
     }
 
     @Test
     fun details_inflectedForm_reportsHeadword() = runTest {
         withRows(listOf(row("lives", id = 7L)))
-        coEvery { dictionaryRepository.lookupOffline("lives") } returns
+        offlineResults["lives"] =
             OfflineLookupResult(
                 entry = DictionaryEntry("live", "/lɪv/", "vi. 活；居住", null),
                 inflectedForm = "lives"
@@ -471,7 +480,7 @@ class VocabularyViewModelTest {
     @Test
     fun details_wordMissingFromDictionary_hasNoGlossButKeepsSource() = runTest {
         withRows(listOf(row("Zyxwvu", id = 3L, articleTitle = "Obscure Words")))
-        coEvery { dictionaryRepository.lookupOffline("zyxwvu") } returns null
+        offlineResults["zyxwvu"] = null
 
         val detail = awaitDetails().getValue(3L)
 
@@ -485,22 +494,21 @@ class VocabularyViewModelTest {
     @Test
     fun details_revisionChanges_refreshesCachedMissAndHitWithoutChangingRows() = runTest {
         withRows(listOf(row("apple", 1), row("missing", 2)))
-        coEvery { dictionaryRepository.lookupOffline("apple") } returns offlineEntry("apple", null, "旧释义")
-        coEvery { dictionaryRepository.lookupOffline("missing") } returns null
+        offlineResults["apple"] = offlineEntry("apple", null, "旧释义")
+        offlineResults["missing"] = null
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.details.collect() }
         runCurrent()
         assertEquals("旧释义", viewModel.details.value.getValue(1).chinese)
         assertNull(viewModel.details.value.getValue(2).chinese)
 
-        coEvery { dictionaryRepository.lookupOffline("apple") } returns null
-        coEvery { dictionaryRepository.lookupOffline("missing") } returns offlineEntry("missing", null, "新释义")
+        offlineResults["apple"] = null
+        offlineResults["missing"] = offlineEntry("missing", null, "新释义")
         dictionaryRevision.value++
         runCurrent()
 
         assertNull(viewModel.details.value.getValue(1).chinese)
         assertEquals("新释义", viewModel.details.value.getValue(2).chinese)
-        coVerify(exactly = 2) { dictionaryRepository.lookupOffline("apple") }
-        coVerify(exactly = 2) { dictionaryRepository.lookupOffline("missing") }
+        coVerify(exactly = 2) { dictionaryRepository.lookupOfflineBatch(listOf("apple", "missing")) }
     }
 
     @Test
@@ -509,12 +517,12 @@ class VocabularyViewModelTest {
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         var calls = 0
-        coEvery { dictionaryRepository.lookupOffline("apple") } coAnswers {
+        coEvery { dictionaryRepository.lookupOfflineBatch(listOf("apple")) } coAnswers {
             if (++calls == 1) {
                 entered.complete(Unit)
                 withContext(NonCancellable) { release.await() }
-                offlineEntry("apple", null, "旧释义")
-            } else offlineEntry("apple", null, "新释义")
+                mapOf("apple" to offlineEntry("apple", null, "旧释义"))
+            } else mapOf("apple" to offlineEntry("apple", null, "新释义"))
         }
         val observed = mutableListOf<String?>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
@@ -540,14 +548,98 @@ class VocabularyViewModelTest {
     @Test
     fun details_revisionChangedWhileUnsubscribed_refreshesRetainedViewModel() = runTest {
         withRows(listOf(row("apple", 1)))
-        coEvery { dictionaryRepository.lookupOffline("apple") } returns null
+        offlineResults["apple"] = null
         assertNull(awaitDetails().getValue(1).chinese)
         advanceTimeBy(16_000)
         runCurrent()
-        coEvery { dictionaryRepository.lookupOffline("apple") } returns offlineEntry("apple", null, "新释义")
+        offlineResults["apple"] = offlineEntry("apple", null, "新释义")
         dictionaryRevision.value++
         val refreshed = viewModel.details.first { it[1]?.chinese == "新释义" }
         assertEquals("新释义", refreshed.getValue(1).chinese)
+    }
+
+    @Test
+    fun details_rowsChange_batchesOnlyNewWordsAndRetainsCachedHitsAndMisses() = runTest {
+        withRows(listOf(row("Apple", 1), row("missing", 2), row("APPLE", 3)))
+        offlineResults["apple"] = offlineEntry("apple", null, "苹果")
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.details.collect() }
+        runCurrent()
+        assertEquals(3, viewModel.details.value.size)
+        assertNull(viewModel.details.value.getValue(2).chinese)
+
+        offlineResults["banana"] = offlineEntry("banana", null, "香蕉")
+        withRows(listOf(row("apple", 1, "new source"), row("banana", 4)))
+        runCurrent()
+        assertEquals("new source", viewModel.details.value.getValue(1).sourceTitle)
+        assertEquals("香蕉", viewModel.details.value.getValue(4).chinese)
+        withRows(listOf(row("apple", 1), row("missing", 2)))
+        runCurrent()
+        assertNull(viewModel.details.value.getValue(2).chinese)
+        coVerify(exactly = 1) { dictionaryRepository.lookupOfflineBatch(listOf("apple", "missing")) }
+        coVerify(exactly = 1) { dictionaryRepository.lookupOfflineBatch(listOf("banana")) }
+        coVerify(exactly = 2) { dictionaryRepository.lookupOfflineBatch(any()) }
+        coVerify(exactly = 0) { dictionaryRepository.lookupOffline(any()) }
+    }
+
+    @Test
+    fun details_rowsChangeDuringBatch_discardsCancelledResultsBeforeCachingOrPublishing() = runTest {
+        withRows(listOf(row("apple", 1)))
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var calls = 0
+        coEvery { dictionaryRepository.lookupOfflineBatch(listOf("apple")) } coAnswers {
+            if (++calls == 1) {
+                entered.complete(Unit)
+                withContext(NonCancellable) { release.await() }
+                mapOf("apple" to offlineEntry("apple", null, "迟到结果"))
+            } else mapOf("apple" to offlineEntry("apple", null, "当前结果"))
+        }
+        offlineResults["banana"] = offlineEntry("banana", null, "香蕉")
+        val observed = mutableListOf<Map<Long, VocabularyWordDetail>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            viewModel.details.collect { observed += it }
+        }
+        try {
+            entered.await()
+            withRows(listOf(row("banana", 2)))
+            runCurrent()
+            release.complete(Unit)
+            runCurrent()
+            assertEquals(setOf(2L), viewModel.details.value.keys)
+            assertEquals("香蕉", viewModel.details.value.getValue(2).chinese)
+            assertTrue(observed.none { 1L in it })
+
+            withRows(listOf(row("apple", 1)))
+            runCurrent()
+            assertEquals("当前结果", viewModel.details.value.getValue(1).chinese)
+            assertEquals(2, calls)
+        } finally {
+            release.complete(Unit)
+        }
+    }
+
+    @Test
+    fun studyDetails_legacyAndContext_shareBatchCacheAndRefreshTogetherOnRevision() = runTest {
+        withRows(listOf(row("Apple", 1)))
+        studyWordsFlow.value = listOf(
+            StudyWord.Legacy(vocab("apple", 1)),
+            StudyWord.Context(contextCard().copy(word = "APPLE"))
+        )
+        offlineResults["apple"] = offlineEntry("apple", "/apple/", "旧释义")
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.details.collect() }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.studyDetails.collect() }
+        runCurrent()
+        assertEquals("旧释义", viewModel.details.value.getValue(1).chinese)
+        assertEquals(listOf("旧释义", "旧释义"), viewModel.studyDetails.value.values.map { it.chinese })
+        coVerify(exactly = 1) { dictionaryRepository.lookupOfflineBatch(listOf("apple")) }
+
+        offlineResults["apple"] = offlineEntry("apple", "/new/", "新释义")
+        dictionaryRevision.value++
+        runCurrent()
+        assertEquals("新释义", viewModel.details.value.getValue(1).chinese)
+        assertEquals(listOf("新释义", "新释义"), viewModel.studyDetails.value.values.map { it.chinese })
+        assertTrue(viewModel.studyDetails.value.values.all { it.phonetic == "/new/" })
+        coVerify(exactly = 2) { dictionaryRepository.lookupOfflineBatch(listOf("apple")) }
     }
 
     /** 取第一份非空的 details：stateIn 的初始值是空 map，解析完成后才发第二份。 */

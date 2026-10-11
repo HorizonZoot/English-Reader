@@ -316,7 +316,7 @@ class VocabularyViewModel @Inject constructor(
     /**
      * 卡片补充信息，按生词 id 索引。
      *
-     * 释义要在打开生词本时逐词查库（[DictionaryRepository.lookupOffline]），所以结果按词缓存：
+     * 释义按词缓存，只对未缓存的词调用 [DictionaryRepository.lookupOfflineBatch]；
      * 生词列表每次变动只补查新出现的词，删除/撤销不会让整屏重新查一遍。
      * 缓存 key 统一大小写与内部排版撇号；不更改生词的显示文本。
      */
@@ -511,28 +511,18 @@ class VocabularyViewModel @Inject constructor(
     /**
      * 解析整屏生词的补充信息。
      *
-     * 逐词串行查询（词典查询本身会命中 `dictionary.word` 的主键索引，单次约微秒级），
-     * 并用 [glossCacheMutex] 串行化：`WhileSubscribed` 重启时新旧收集协程可能短暂重叠，
+     * 批量补查缺少的释义，并用 [glossCacheMutex] 串行化：
+     * `WhileSubscribed` 重启时新旧收集协程可能短暂重叠，
      * 而 [glossCache] 是普通 MutableMap。
      */
     private suspend fun resolveDetails(
         rows: List<VocabularyWithSource>,
         revision: Long
     ): Map<Long, VocabularyWordDetail>? = glossCacheMutex.withLock {
-        if (revision != dictionaryRepository.revision.value) return@withLock null
-        if (glossCacheRevision != revision) {
-            glossCache.clear()
-            glossCacheRevision = revision
-        }
+        if (!fillGlossCache(rows.map { it.vocabulary.word }, revision)) return@withLock null
         val details = rows.associate { row ->
             val word = row.vocabulary
             val key = WordLookupKey.normalize(word.word)
-            if (!glossCache.containsKey(key)) {
-                val gloss = lookupGloss(key)
-                currentCoroutineContext().ensureActive()
-                if (revision != dictionaryRepository.revision.value) return@withLock null
-                glossCache[key] = gloss
-            }
             val gloss = glossCache[key]
             word.id to VocabularyWordDetail(
                 phonetic = gloss?.phonetic,
@@ -561,19 +551,9 @@ class VocabularyViewModel @Inject constructor(
         words: List<StudyWord>,
         revision: Long
     ): Map<String, VocabularyWordDetail>? = glossCacheMutex.withLock {
-        if (revision != dictionaryRepository.revision.value) return@withLock null
-        if (glossCacheRevision != revision) {
-            glossCache.clear()
-            glossCacheRevision = revision
-        }
+        if (!fillGlossCache(words.map { it.word }, revision)) return@withLock null
         val details = words.associate { word ->
             val key = WordLookupKey.normalize(word.word)
-            if (!glossCache.containsKey(key)) {
-                val gloss = lookupGloss(key)
-                currentCoroutineContext().ensureActive()
-                if (revision != dictionaryRepository.revision.value) return@withLock null
-                glossCache[key] = gloss
-            }
             val gloss = glossCache[key]
             val dictionaryPhonetic = gloss?.phonetic?.takeIf(String::isNotBlank)
             word.key to VocabularyWordDetail(
@@ -586,15 +566,32 @@ class VocabularyViewModel @Inject constructor(
         details.takeIf { revision == dictionaryRepository.revision.value }
     }
 
-    /** 离线词典查询；词库未收录时返回 null。 */
-    private suspend fun lookupGloss(word: String): GlossLookup? {
-        val hit = dictionaryRepository.lookupOffline(word) ?: return null
-        return GlossLookup(
-            phonetic = hit.entry.phonetic,
-            chinese = hit.entry.chinese,
-            // 变形词（lives）收回原形（live）时标注；直接命中时两者相同，不标注。
-            headword = hit.entry.word.takeIf { it != word }
-        )
+    /** 仅在持有 glossCacheMutex 时调用；整批返回后检查取消与词库版本，再写缓存。 */
+    private suspend fun fillGlossCache(words: List<String>, revision: Long): Boolean {
+        if (revision != dictionaryRepository.revision.value) return false
+        if (glossCacheRevision != revision) {
+            glossCache.clear()
+            glossCacheRevision = revision
+        }
+        val missing = words.asSequence()
+            .map(WordLookupKey::normalize)
+            .distinct()
+            .filterNot(glossCache::containsKey)
+            .toList()
+        if (missing.isEmpty()) return true
+        val hits = dictionaryRepository.lookupOfflineBatch(missing)
+        currentCoroutineContext().ensureActive()
+        if (revision != dictionaryRepository.revision.value) return false
+        for (word in missing) {
+            glossCache[word] = hits[word]?.let { hit ->
+                GlossLookup(
+                    phonetic = hit.entry.phonetic,
+                    chinese = hit.entry.chinese,
+                    headword = hit.entry.word.takeIf { it != word }
+                )
+            }
+        }
+        return true
     }
 
     /** 词典命中的最小信息集，界面只需要这三项。 */

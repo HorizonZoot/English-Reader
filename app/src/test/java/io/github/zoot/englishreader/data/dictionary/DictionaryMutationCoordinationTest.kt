@@ -425,6 +425,10 @@ class DictionaryMutationCoordinationTest {
         }
 
         override suspend fun lookup(word: String) = committed.get()[word]
+        override suspend fun lookupBatch(words: List<String>): List<DictionaryEntry> {
+            val snapshot = committed.get()
+            return words.distinct().mapNotNull(snapshot::get)
+        }
         override suspend fun getCount() = candidate?.size ?: committedCount
         override suspend fun decodeLiteralEscapes() = 0
         override suspend fun deleteAll() { committed.set(emptyMap()) }

@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.viewmodel
 
 import androidx.lifecycle.ViewModelStore
 import app.cash.turbine.test
+import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.entity.ContextReviewRound
 import io.github.zoot.englishreader.data.entity.DictionaryEntry
 import io.github.zoot.englishreader.data.entity.VocabularyEntity
@@ -58,8 +59,11 @@ class ContextVocabularyViewModelTest {
         every { repository.observeContextReview() } returns round
         every { dictionary.revision } returns MutableStateFlow(0L)
         every { excerpts.observeAll() } returns flowOf(emptyList())
+        val settings = mockk<SettingsPreferences>(relaxed = true) {
+            every { favoritesAlphabetical } returns flowOf(false)
+        }
         viewModel = VocabularyViewModel(repository, dictionary, mockk(relaxed = true), mockk(relaxed = true),
-            mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), excerpts)
+            mockk(relaxed = true), mockk(relaxed = true), settings, excerpts)
         store.put("context-library", viewModel)
     }
 
@@ -107,11 +111,11 @@ class ContextVocabularyViewModelTest {
         val legacy = StudyWord.Legacy(VocabularyEntity(id = 1, word = "lives", articleId = null, phonetic = "/laɪvz/"))
         val context = StudyWord.Context(contextCard().copy(word = "bank"))
         every { repository.observeStudyWords() } returns flowOf(listOf(legacy, context))
-        coEvery { dictionary.lookupOffline("lives") } returns OfflineLookupResult(
-            DictionaryEntry("live", "  ", "生活", null), inflectedForm = "lives"
-        )
-        coEvery { dictionary.lookupOffline("bank") } returns OfflineLookupResult(
-            DictionaryEntry("bank", "/bæŋk/", "银行", null)
+        coEvery { dictionary.lookupOfflineBatch(listOf("lives", "bank")) } returns mapOf(
+            "lives" to OfflineLookupResult(
+                DictionaryEntry("live", "  ", "生活", null), inflectedForm = "lives"
+            ),
+            "bank" to OfflineLookupResult(DictionaryEntry("bank", "/bæŋk/", "银行", null))
         )
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { viewModel.studyDetails.collect() }
         runCurrent()

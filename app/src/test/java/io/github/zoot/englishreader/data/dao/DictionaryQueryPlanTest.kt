@@ -172,6 +172,25 @@ class DictionaryQueryPlanTest {
         )
     }
 
+    @Test
+    fun lookupBatch_normalizedKeysAndParameterBudget_returnsOnlyExactMatchesUsingIndex() = runBlocking {
+        val entries = (1..800).map { DictionaryEntry("word$it", null, "meaning$it", null) }
+        db.dictionaryDao().replaceAll(entries)
+        assertEquals(entries.toSet(), db.dictionaryDao().lookupBatch(entries.map { it.word }).toSet())
+        assertTrue(db.dictionaryDao().lookupBatch(emptyList()).isEmpty())
+        assertEquals(listOf(entries.first()), db.dictionaryDao().lookupBatch(listOf("word1", "WORD2", "missing")))
+
+        val source = java.io.File(
+            System.getProperty("user.dir"),
+            "src/main/java/io/github/zoot/englishreader/data/dao/DictionaryDao.kt"
+        ).readText()
+        val query = Regex("@Query\\(\"([^\"]+)\"\\)\\s+suspend fun lookupBatch")
+            .find(source)?.groupValues?.get(1) ?: error("lookupBatch @Query not found")
+        val plan = explain(query.replace(":words", "?"))
+        assertTrue("batch must use the primary-key index: $plan", plan.contains("USING INDEX") || plan.contains("USING PRIMARY KEY"))
+        assertTrue("batch must not scan: $plan", !plan.contains("SCAN", ignoreCase = true))
+    }
+
     private fun explain(sql: String): String {
         val cursor = db.openHelper.readableDatabase.query("EXPLAIN QUERY PLAN $sql", arrayOf("probe"))
         cursor.use {

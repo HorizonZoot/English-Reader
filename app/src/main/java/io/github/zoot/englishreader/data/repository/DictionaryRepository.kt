@@ -125,6 +125,72 @@ class DictionaryRepository @Inject constructor(
         }
     }
 
+    /** 批量离线查词；返回归一化后的 key，未命中或失败的分块保留 null。 */
+    suspend fun lookupOfflineBatch(words: Collection<String>): Map<String, OfflineLookupResult?> {
+        if (words.isEmpty()) return emptyMap()
+        return withContext(Dispatchers.IO) {
+            try {
+                ensureInitialized()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                coroutineContext.ensureActive()
+                Log.w("DictionaryRepository", "Ensure init failed before batch lookup")
+            }
+
+            val results = linkedMapOf<String, OfflineLookupResult?>()
+            for (chunk in words.map(WordLookupKey::normalize).distinct().chunked(LOOKUP_WORD_CHUNK_SIZE)) {
+                coroutineContext.ensureActive()
+                val resolved = try {
+                    lookupOfflineChunk(chunk)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    coroutineContext.ensureActive()
+                    Log.e("DictionaryRepository", "Offline batch lookup failed")
+                    emptyMap()
+                }
+                for (word in chunk) results[word] = resolved[word]
+            }
+            results
+        }
+    }
+
+    private suspend fun lookupOfflineChunk(words: List<String>): Map<String, OfflineLookupResult?> {
+        val entries = dictionaryDao.lookupBatch(words).associateByTo(mutableMapOf()) { it.word }
+        val missing = words.filterNot(entries::containsKey)
+        val ambiguous = missing.associateWith(WordLemmatizer::ambiguousBases)
+        val candidates = missing.associateWith(WordLemmatizer::candidates)
+        // 原词（包括已确认的 miss）不重复查询；SQL 返回顺序不参与词形优先级。
+        val queried = words.toHashSet()
+        val candidateKeys = linkedSetOf<String>()
+        for (word in missing) {
+            candidateKeys.addAll(ambiguous.getValue(word))
+            candidateKeys.addAll(candidates.getValue(word))
+        }
+        candidateKeys.removeAll(queried)
+        for (batch in candidateKeys.chunked(LOOKUP_SQL_CHUNK_SIZE)) {
+            coroutineContext.ensureActive()
+            dictionaryDao.lookupBatch(batch).associateByTo(entries) { it.word }
+        }
+        coroutineContext.ensureActive()
+        return words.associateWith { word ->
+            val exact = entries[word]
+            if (exact != null) {
+                OfflineLookupResult(exact)
+            } else {
+                val ambiguousHits = ambiguous.getValue(word).mapNotNull(entries::get)
+                if (ambiguousHits.isNotEmpty()) {
+                    OfflineLookupResult(ambiguousHits.first(), word, ambiguousHits.drop(1))
+                } else {
+                    candidates.getValue(word).firstNotNullOfOrNull(entries::get)?.let {
+                        OfflineLookupResult(it, word)
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * 查询在线词典（Free Dictionary API）。
      *
@@ -273,6 +339,9 @@ class DictionaryRepository @Inject constructor(
     }
 
     companion object {
+        private const val LOOKUP_WORD_CHUNK_SIZE = 200
+        // 低于旧版 SQLite 的 999 个绑定参数上限。
+        private const val LOOKUP_SQL_CHUNK_SIZE = 800
         private const val DICT_PREFS = "dictionary_prefs"
         private const val KEY_DICT_VERSION = "dict_version"
 

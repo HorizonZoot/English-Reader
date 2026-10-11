@@ -54,6 +54,9 @@ interface DictionaryDao {
     @Query("SELECT * FROM dictionary WHERE word = :word LIMIT 1")
     suspend fun lookup(word: String): DictionaryEntry?
 
+    @Query("SELECT * FROM dictionary WHERE word IN (:words)")
+    suspend fun lookupBatch(words: List<String>): List<DictionaryEntry>
+
     /**
      * 批量插入词条（用于初始化）
      */

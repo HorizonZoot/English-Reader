@@ -3,11 +3,6 @@
 # sherpa-onnx JNI resolves configuration classes and fields by name.
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 
-# Keep Hilt generated components
--keep class dagger.hilt.** { *; }
--keep class javax.inject.** { *; }
--keep class * extends dagger.hilt.android.internal.managers.ViewComponentManager$FragmentContextWrapper { *; }
-
 # Keep Room
 -keep class * extends androidx.room.RoomDatabase
 -keep @androidx.room.Entity class *
@@ -33,10 +28,6 @@
 # Keep data classes
 -keep class io.github.zoot.englishreader.model.** { *; }
 -keep class io.github.zoot.englishreader.data.** { *; }
-
-# Keep Compose
--keep class androidx.compose.** { *; }
--dontwarn androidx.compose.**
 
 # Tink references these optional Error Prone annotations, which are not packaged
 # by androidx.security:security-crypto but are not needed at runtime.

@@ -85,11 +85,14 @@ import io.github.zoot.englishreader.viewmodel.ReadingViewModel
 import io.github.zoot.englishreader.viewmodel.UpdateViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 internal suspend fun installContentAfterInitialTheme(
@@ -106,6 +109,23 @@ internal suspend fun installContentAfterInitialTheme(
 
     currentCoroutineContext().ensureActive()
     installContent(initialTheme)
+}
+
+internal suspend fun refreshSampleArticlesIfNeeded(
+    context: Context,
+    articleRepository: ArticleRepository,
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+) = withContext(ioDispatcher) {
+    val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+    val installedVersion = prefs.getInt("sample_data_version", 0)
+    if (installedVersion < TestDataGenerator.SAMPLE_DATA_VERSION) {
+        articleRepository.refreshSampleArticles(
+            sampleSources = TestDataGenerator.SAMPLE_SOURCES,
+            samples = TestDataGenerator.getSampleArticles()
+        )
+        currentCoroutineContext().ensureActive()
+        prefs.edit().putInt("sample_data_version", TestDataGenerator.SAMPLE_DATA_VERSION).apply()
+    }
 }
 
 @AndroidEntryPoint
@@ -139,27 +159,14 @@ class MainActivity : ComponentActivity() {
 
         // 按版本号刷新内置样本数据：版本落后时原子重灌（解绑生词→删旧样本→插新样本），
         // 只影响样本 source 白名单内的文章，用户导入的文章及生词均保留。
-        val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
-        val installedVersion = prefs.getInt("sample_data_version", 0)
-        if (installedVersion < TestDataGenerator.SAMPLE_DATA_VERSION) {
-            lifecycleScope.launch {
-                // 刷新失败不写版本号，下次启动重试；捕获异常避免 onCreate 崩溃导致启动循环
-                try {
-                    articleRepository.refreshSampleArticles(
-                        sampleSources = TestDataGenerator.SAMPLE_SOURCES,
-                        samples = TestDataGenerator.getSampleArticles()
-                    )
-                    prefs.edit().putInt("sample_data_version", TestDataGenerator.SAMPLE_DATA_VERSION).apply()
-                } catch (cancellation: CancellationException) {
-                    // refreshSampleArticles 是 suspend，Activity 在刷新期间销毁（首启即旋转/退出）
-                    // 会让它抛 CancellationException。必须原样上抛：被通用 catch 吞掉的话，
-                    // 协程会以「正常完成」收尾而非「已取消」，而且每次正常取消都会打出一条
-                    // 声称刷新失败的 ERROR 日志。本文件 installContentAfterInitialTheme 用的
-                    // 就是这个成对写法。
-                    throw cancellation
-                } catch (e: Exception) {
-                    Log.e("MainActivity", "Failed to refresh sample articles", e)
-                }
+        lifecycleScope.launch {
+            // 包括 SharedPreferences 的首次读取也在 IO；失败不写版本号，下次启动重试。
+            try {
+                refreshSampleArticlesIfNeeded(this@MainActivity, articleRepository)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (e: Exception) {
+                Log.e("MainActivity", "Failed to refresh sample articles", e)
             }
         }
 

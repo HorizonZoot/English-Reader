@@ -40,6 +40,7 @@ import java.util.concurrent.TimeUnit
 @OptIn(ExperimentalCoroutinesApi::class)
 class AiArticleGenerationRepositoryTest {
     private val generator: AiArticleGenerator = mockk()
+    private val articleRepository: ArticleRepository = mockk()
     private val draft = AiArticleGenerationDraft(
         AiArticleGenerationParameters(topic = "private topic"),
         "private profile"
@@ -47,7 +48,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun state_newSession_hasDefaultsAndNoImplicitRequest() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         assertEquals(AiArticleGenerationDraft(), repository.state.value.draft)
         assertEquals(AiArticleDifficulty.BEGINNER, repository.state.value.draft.parameters.difficulty)
         assertEquals(AiArticleLength.MEDIUM, repository.state.value.draft.parameters.length)
@@ -58,7 +59,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun generate_concurrentClicks_acceptsOnlyOneRequest() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         repository.updateDraft(draft)
         val release = CompletableDeferred<AiArticleGenerationResult>()
         coEvery { generator.generate(any(), any()) } coAnswers { release.await() }
@@ -80,7 +81,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun generate_running_preservesOldPreviewAndLocksDraftAndDiscard() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         repository.updateDraft(draft)
         coEvery { generator.generate(any(), any()) } returns success()
         assertTrue(repository.generate())
@@ -111,7 +112,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun state_editingDraft_doesNotRelabelExistingPreview() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         repository.updateDraft(draft)
         coEvery { generator.generate(any(), any()) } returns success()
         repository.generate()
@@ -124,7 +125,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun generate_failedRegeneration_keepsOldPreviewAndRequiresManualRetry() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         repository.updateDraft(draft)
         coEvery { generator.generate(any(), any()) } returns success()
         repository.generate()
@@ -150,7 +151,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun generate_rejectedOutput_keepsOldPreview() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         coEvery { generator.generate(any(), any()) } returns success()
         repository.generate()
         runCurrent()
@@ -165,7 +166,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun state_observerLeavesAndReturns_requestContinuesWithoutResubmission() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         repository.updateDraft(draft)
         val release = CompletableDeferred<AiArticleGenerationResult>()
         coEvery { generator.generate(any(), any()) } coAnswers { release.await() }
@@ -188,7 +189,7 @@ class AiArticleGenerationRepositoryTest {
     @Test
     fun generate_ownerCancelledBeforeDispatch_releasesReservationWithoutCallingGenerator() = runTest {
         val owner = CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[Job]))
-        val repository = AiArticleGenerationRepository(generator, owner)
+        val repository = AiArticleGenerationRepository(generator, owner, articleRepository)
         assertTrue(repository.generate())
         owner.cancel()
         runCurrent()
@@ -200,7 +201,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun generate_requestCancellation_isDistinctFromFailureAndAllowsNextExplicitRequest() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         coEvery { generator.generate(any(), any()) } returns success()
         repository.generate()
         runCurrent()
@@ -218,7 +219,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun generate_wrappedCancellation_isNotConvertedToUnknownFailure() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         coEvery { generator.generate(any(), any()) } throws
             IllegalStateException("private wrapper", CancellationException("private cause"))
         repository.generate()
@@ -231,7 +232,7 @@ class AiArticleGenerationRepositoryTest {
     @Test
     fun generate_nonCooperativeCompletionAfterOwnerCancellation_doesNotReplacePreview() = runTest {
         val owner = CoroutineScope(backgroundScope.coroutineContext + SupervisorJob(backgroundScope.coroutineContext[Job]))
-        val repository = AiArticleGenerationRepository(generator, owner)
+        val repository = AiArticleGenerationRepository(generator, owner, articleRepository)
         coEvery { generator.generate(any(), any()) } returns success()
         repository.generate()
         runCurrent()
@@ -253,7 +254,7 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun discardPreview_staleResultId_doesNotRemoveReplacement() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         coEvery { generator.generate(any(), any()) } returnsMany listOf(success(), success("New"))
         repository.generate()
         runCurrent()
@@ -269,19 +270,19 @@ class AiArticleGenerationRepositoryTest {
 
     @Test
     fun state_freshRepository_doesNotRestorePreviewOrRestartRequest() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         coEvery { generator.generate(any(), any()) } returns success()
         repository.updateDraft(draft)
         repository.generate()
         runCurrent()
-        val fresh = AiArticleGenerationRepository(generator, backgroundScope)
+        val fresh = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         assertEquals(AiArticleGenerationState(), fresh.state.value)
         coVerify(exactly = 1) { generator.generate(any(), any()) }
     }
 
     @Test
     fun state_successAndFailureDiagnostics_redactAllSensitiveContent() = runTest {
-        val repository = AiArticleGenerationRepository(generator, backgroundScope)
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articleRepository)
         repository.updateDraft(draft)
         val success = success("private title")
         coEvery { generator.generate(any(), any()) } returns success

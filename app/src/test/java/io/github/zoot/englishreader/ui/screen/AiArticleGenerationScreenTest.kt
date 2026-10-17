@@ -18,15 +18,19 @@ import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.Density
+import com.squareup.moshi.JsonWriter
 import io.github.zoot.englishreader.data.ai.AiArticleDifficulty
 import io.github.zoot.englishreader.data.ai.AiArticleGenerationFailure
 import io.github.zoot.englishreader.data.ai.AiArticleGenerationParameters
 import io.github.zoot.englishreader.data.ai.AiArticleLength
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.ai.AiGeneratedArticle
+import io.github.zoot.englishreader.data.ai.AiGeneratedArticleParseResult
+import io.github.zoot.englishreader.data.ai.AiGeneratedArticleParser
 import io.github.zoot.englishreader.data.local.AiAuthStrategy
 import io.github.zoot.englishreader.data.local.AiProviderProfile
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
+import io.github.zoot.englishreader.data.remote.ai.AiChatTransportResult
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationDraft
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationState
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationStatus
@@ -41,7 +45,9 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import okio.Buffer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -100,6 +106,50 @@ class AiArticleGenerationScreenTest {
         composeRule.onNodeWithTag("ai_article_content").performScrollToNode(hasTestTag("ai_article_save"))
         composeRule.onNodeWithTag("ai_article_save").performScrollTo().performClick()
         composeRule.runOnIdle { assertEquals(listOf("result"), saved); assertEquals(0, generated) }
+    }
+
+    @Test
+    fun preview_blankLineVariants_keepsValidatedLongContentInSeparateLazyItems() {
+        val paragraphs = List(20) { index -> "Paragraph $index. ".padEnd(599, 'a') }
+        render()
+
+        listOf("\n\n", "\n \n", "\n\t\n", "\r\n \r\n").forEachIndexed { caseIndex, separator ->
+            val article = parsedArticle(paragraphs.joinToString(separator))
+            composeRule.runOnIdle {
+                state.value = readyState().copy(session = readyState().session.copy(
+                    preview = preview().copy(resultId = "result_$caseIndex", article = article)
+                ))
+            }
+
+            paragraphs.forEachIndexed { index, paragraph ->
+                composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(index + 2)
+                composeRule.onNodeWithText(paragraph).assertIsDisplayed()
+            }
+            composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(paragraphs.size + 2)
+            composeRule.onNodeWithTag("ai_article_save").assertIsDisplayed()
+        }
+    }
+
+    @Test
+    fun preview_hardLineBreaksAndBlankEdges_preservesTextWithoutEmptyItems() {
+        val article = parsedArticle(" \n \n  First line.\nSecond line.  \n\t\n\n  Last paragraph. \n \n ")
+        state.value = readyState().copy(session = readyState().session.copy(
+            preview = preview().copy(article = article)
+        ))
+        render()
+
+        composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(2)
+        composeRule.onNodeWithText("First line.\nSecond line.").assertIsDisplayed()
+        composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(3)
+        composeRule.onNodeWithText("Last paragraph.").assertIsDisplayed()
+        composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(4)
+        composeRule.onNodeWithTag("ai_article_save").assertIsDisplayed()
+        composeRule.runOnIdle {
+            assertEquals(
+                "First line.\nSecond line.  \n\t\n\n  Last paragraph.",
+                state.value.session.preview?.article?.content
+            )
+        }
     }
 
     @Test
@@ -254,6 +304,22 @@ class AiArticleGenerationScreenTest {
         profiles = listOf(AiProviderProfile("p", "Test profile", AiProviderTemplate.OPENAI_COMPATIBLE, "https://example.com", "model", AiAuthStrategy.API_KEY, 0.7)),
         profilesLoaded = true
     )
+
+    private fun parsedArticle(content: String): AiGeneratedArticle {
+        val buffer = Buffer()
+        JsonWriter.of(buffer).use { writer ->
+            writer.beginObject()
+            writer.name("title").value("A synthetic article")
+            writer.name("content").value(content)
+            writer.endObject()
+        }
+        val result = AiGeneratedArticleParser.parse(
+            AiChatTransportResult.Content(buffer.readUtf8()),
+            AiArticleGenerationParameters()
+        )
+        assertTrue("expected accepted article, was $result", result is AiGeneratedArticleParseResult.Ready)
+        return (result as AiGeneratedArticleParseResult.Ready).article
+    }
 
     private fun preview() = AiArticlePreview(
         resultId = "result", profileId = "p",

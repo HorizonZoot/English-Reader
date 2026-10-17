@@ -62,6 +62,7 @@ import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.ai.AiGeneratedArticleRejection
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationStatus
 import io.github.zoot.englishreader.data.repository.AiArticleSaveStatus
+import io.github.zoot.englishreader.util.ParagraphAligner
 import io.github.zoot.englishreader.util.toUiMessage
 import io.github.zoot.englishreader.viewmodel.AiArticleGenerationUiState
 import io.github.zoot.englishreader.viewmodel.AiArticleGenerationViewModel
@@ -146,7 +147,9 @@ internal fun AiArticleGenerationContent(
     val preview = session.preview
     var profileMenuOpen by remember { mutableStateOf(false) }
     var regenerateResultId by remember { mutableStateOf<String?>(null) }
-    val paragraphs = remember(preview?.resultId) { preview?.article?.content?.split("\n\n").orEmpty() }
+    val paragraphs = remember(preview?.resultId) {
+        preview?.article?.content?.let(ParagraphAligner::splitParagraphs).orEmpty()
+    }
 
     Scaffold(
         topBar = {

@@ -122,6 +122,22 @@ class AiArticleGeneratorIntegrationTest {
     }
 
     @Test
+    fun generate_serviceUnavailableWithImmediateRetry_requiresExplicitRetry() = runTest {
+        fixture.server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0"))
+        fixture.server.enqueue(response("{\"title\":\"Retry\",\"content\":\"A quiet day.\"}"))
+
+        val failed = generator.generate("chosen", parameters)
+
+        assertEquals("A single generation must not replay a billed POST", 1, fixture.server.requestCount)
+        assertEquals(
+            AiArticleGenerationResult.Failure(AiArticleGenerationFailure.Request(AiError.Server(503))),
+            failed
+        )
+        assertTrue(generator.generate("chosen", parameters) is AiArticleGenerationResult.Success)
+        assertEquals(2, fixture.server.requestCount)
+    }
+
+    @Test
     fun generate_malformedTransportResponse_doesNotExposeBodyOrRetry() = runTest {
         fixture.server.enqueue(MockResponse().setBody("<html>private response</html>"))
         val result = generator.generate("chosen", parameters)

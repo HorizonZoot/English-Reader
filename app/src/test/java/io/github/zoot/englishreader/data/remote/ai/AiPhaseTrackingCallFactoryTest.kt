@@ -2,15 +2,22 @@ package io.github.zoot.englishreader.data.remote.ai
 
 import io.github.zoot.englishreader.data.ai.AiTimeoutException
 import io.github.zoot.englishreader.data.ai.TimeoutPhase
+import io.github.zoot.englishreader.di.AiNetworkPolicy
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.mockwebserver.MockResponse
+import okio.Buffer
 import okio.Timeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,6 +30,60 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 class AiPhaseTrackingCallFactoryTest {
+    @Test
+    fun newCall_bodyAndClone_areOneShotWithoutChangingRequestData() {
+        val originalBody = "{}".toRequestBody("application/json".toMediaType())
+        val original = request().newBuilder().post(originalBody).header("X-Test", "test").build()
+        val factory = AiPhaseTrackingCallFactory(ThrowingCallFactory(IOException()))
+        val call = factory.newCall(original)
+        val cloned = call.clone()
+
+        for (request in listOf(call.request(), cloned.request())) {
+            assertEquals(original.url, request.url)
+            assertEquals(original.method, request.method)
+            assertEquals(original.headers, request.headers)
+            val body = requireNotNull(request.body)
+            assertTrue(body.isOneShot())
+            assertEquals(originalBody.isDuplex(), body.isDuplex())
+            assertEquals(originalBody.contentType(), body.contentType())
+            assertEquals(originalBody.contentLength(), body.contentLength())
+            val buffer = Buffer()
+            body.writeTo(buffer)
+            assertEquals("{}", buffer.readUtf8())
+        }
+        assertFalse(originalBody.isOneShot())
+        assertNull(original.tag(AiCallPhaseTracker::class.java))
+        assertNotSame(
+            call.request().tag(AiCallPhaseTracker::class.java),
+            cloned.request().tag(AiCallPhaseTracker::class.java)
+        )
+        assertNull(factory.newCall(request()).request().body)
+    }
+
+    @Test
+    fun execute_serviceUnavailableWithImmediateRetry_preservesStatusUntilExplicitClone() {
+        withTlsFixture { fixture ->
+            fixture.server.enqueue(MockResponse().setResponseCode(503).setHeader("Retry-After", "0"))
+            fixture.server.enqueue(MockResponse().setBody("{}"))
+            val client = AiNetworkPolicy.applyTo(fixture.client.newBuilder()).build()
+            val factory = AiPhaseTrackingCallFactory(client)
+            val call = factory.newCall(
+                Request.Builder().url(fixture.server.url("/paid"))
+                    .post("{}".toRequestBody("application/json".toMediaType()))
+                    .build()
+            )
+
+            val failure = runCatching { call.execute().use { } }.exceptionOrNull()
+
+            assertEquals(1, fixture.server.requestCount)
+            assertTrue(failure is AiHttpStatusException)
+            assertEquals(503, (failure as AiHttpStatusException).status)
+            assertEquals("0", failure.retryAfter)
+            call.clone().execute().use { assertEquals(200, it.code) }
+            assertEquals(2, fixture.server.requestCount)
+        }
+    }
+
     @Test
     fun execute_connectSocketTimeout_isWrappedWithConnectPhaseAndTagged() {
         val delegate = ThrowingCallFactory(SocketTimeoutException("connect")) { tracker ->

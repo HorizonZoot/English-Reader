@@ -8,7 +8,9 @@ import okhttp3.EventListener
 import okhttp3.Handshake
 import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.Response
+import okio.BufferedSink
 import okio.Timeout
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -24,7 +26,7 @@ class AiCallPhaseTracker {
     fun markCall() = _phase.compareAndSet(null, TimeoutPhase.CALL)
 }
 
-/** 挂上 tracker tag，并同时包装 OkHttp 的同步与异步失败。 */
+/** 挂上 tracker tag，禁止 body 自动重发，并包装 OkHttp 的同步与异步失败。 */
 class AiPhaseTrackingCallFactory(
     private val delegate: Call.Factory
 ) : Call.Factory {
@@ -32,8 +34,20 @@ class AiPhaseTrackingCallFactory(
         val tracker = AiCallPhaseTracker()
         val taggedRequest = request.newBuilder()
             .tag(AiCallPhaseTracker::class.java, tracker)
+            .apply {
+                request.body?.let { method(request.method, SingleAttemptBody(it)) }
+            }
             .build()
         return TrackingCall(delegate, taggedRequest, tracker)
+    }
+
+    // retryOnConnectionFailure(false) 不会禁止 503 + Retry-After: 0 的状态码重发。
+    private class SingleAttemptBody(private val delegate: RequestBody) : RequestBody() {
+        override fun contentType() = delegate.contentType()
+        override fun contentLength(): Long = delegate.contentLength()
+        override fun writeTo(sink: BufferedSink) = delegate.writeTo(sink)
+        override fun isDuplex(): Boolean = delegate.isDuplex()
+        override fun isOneShot(): Boolean = true
     }
 
     private class TrackingCall(

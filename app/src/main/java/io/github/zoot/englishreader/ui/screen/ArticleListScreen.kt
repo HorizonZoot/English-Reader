@@ -81,7 +81,8 @@ fun ArticleListScreen(
     onArticleClick: (Long) -> Unit,
     onBookClick: (Long) -> Unit,
     viewModel: ArticleListViewModel = hiltViewModel(),
-    onEditArticle: ((Long) -> Unit)? = null
+    onEditArticle: ((Long) -> Unit)? = null,
+    onGenerateAiArticle: (() -> Unit)? = null
 ) = LibraryUiTheme {
     val sort by viewModel.librarySort.collectAsStateWithLifecycle()
     val sortMenuExpanded by viewModel.sortMenuExpanded.collectAsStateWithLifecycle()
@@ -154,7 +155,8 @@ fun ArticleListScreen(
             },
             onImportPaste = {
                 showPasteDialog = true
-            }
+            },
+            onGenerateAiArticle = onGenerateAiArticle
         )
     }
 

@@ -65,11 +65,12 @@ class ImportSupportNoticeTest {
             if (shown.value) ImportDialog(
                 onDismiss = { events += "dismiss"; shown.value = false },
                 onImportFile = { events += "file" },
-                onImportPaste = { events += "paste" }
+                onImportPaste = { events += "paste" },
+                onGenerateAiArticle = { events += "ai" }
             )
         }
 
-        listOf("file", "paste").forEach { choice ->
+        listOf("file", "paste", "ai").forEach { choice ->
             composeRule.runOnIdle { shown.value = true; events.clear() }
             composeRule.onNodeWithTag("import-choice-$choice")
                 .performSemanticsAction(SemanticsActions.OnClick) { click -> click(); click() }
@@ -85,12 +86,16 @@ class ImportSupportNoticeTest {
         composeRule.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, 1.8f)) {
-                ImportDialog(onDismiss = { dismissed++ }, onImportFile = {}, onImportPaste = {})
+                ImportDialog(
+                    onDismiss = { dismissed++ }, onImportFile = {}, onImportPaste = {},
+                    onGenerateAiArticle = {}
+                )
             }
         }
 
         composeRule.onNodeWithTag("import-choice-file").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("import-choice-paste").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("import-choice-ai").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("分章", substring = true).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithContentDescription("取消").assertIsDisplayed().performClick()
         composeRule.runOnIdle { assertEquals(1, dismissed) }

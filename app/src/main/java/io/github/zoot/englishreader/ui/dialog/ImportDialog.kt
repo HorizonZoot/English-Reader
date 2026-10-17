@@ -32,6 +32,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Info
@@ -69,7 +70,8 @@ import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 fun ImportDialog(
     onDismiss: () -> Unit,
     onImportFile: () -> Unit,
-    onImportPaste: () -> Unit
+    onImportPaste: () -> Unit,
+    onGenerateAiArticle: (() -> Unit)? = null
 ) {
     var dispatched by remember { mutableStateOf(false) }
     fun choose(action: () -> Unit) {
@@ -159,6 +161,21 @@ fun ImportDialog(
                                     onClick = { choose(onImportPaste) },
                                     modifier = Modifier.testTag("import-choice-paste")
                                 )
+                                if (onGenerateAiArticle != null) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(start = 66.dp, end = 12.dp),
+                                        thickness = 0.5.dp,
+                                        color = MaterialTheme.colorScheme.outlineVariant
+                                    )
+                                    ImportChoiceRow(
+                                        title = stringResource(R.string.ai_article_title),
+                                        subtitle = stringResource(R.string.ai_article_import_description),
+                                        icon = Icons.Outlined.AutoAwesome,
+                                        enabled = !dispatched,
+                                        onClick = { choose(onGenerateAiArticle) },
+                                        modifier = Modifier.testTag("import-choice-ai")
+                                    )
+                                }
                             }
                             Row(
                                 modifier = Modifier.padding(horizontal = 10.dp),

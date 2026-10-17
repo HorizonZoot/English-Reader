@@ -54,6 +54,7 @@ import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.model.TtsSystemAction
 import io.github.zoot.englishreader.ui.screen.ArticleListScreen
 import io.github.zoot.englishreader.ui.screen.ArticleEditorScreen
+import io.github.zoot.englishreader.ui.screen.AiArticleGenerationScreen
 import io.github.zoot.englishreader.ui.screen.AiProfileConfigScreen
 import io.github.zoot.englishreader.ui.screen.ContextReviewScreen
 import io.github.zoot.englishreader.ui.screen.BookTocScreen
@@ -429,8 +430,23 @@ fun EnglishReaderNavigation() {
                 },
                 onEditArticle = { articleId ->
                     navController.navigate("article/$articleId/edit") { launchSingleTop = true }
+                },
+                onGenerateAiArticle = {
+                    navController.navigate("article/generate") { launchSingleTop = true }
                 }
             )
+        }
+
+        composable("article/generate") {
+            ArticleUiTheme {
+                AiArticleGenerationScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenAiProfile = { navController.navigate("settings/ai-profile") { launchSingleTop = true } },
+                    onReadArticle = { articleId ->
+                        navController.navigate("reading/$articleId") { launchSingleTop = true }
+                    }
+                )
+            }
         }
 
         composable(

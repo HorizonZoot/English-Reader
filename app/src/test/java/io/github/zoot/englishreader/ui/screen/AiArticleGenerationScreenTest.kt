@@ -4,6 +4,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
@@ -36,6 +38,7 @@ import io.github.zoot.englishreader.data.repository.AiArticleGenerationState
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationStatus
 import io.github.zoot.englishreader.data.repository.AiArticlePreview
 import io.github.zoot.englishreader.data.repository.AiArticleSaveStatus
+import io.github.zoot.englishreader.ui.theme.LocalArticleUiDarkTheme
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
 import io.github.zoot.englishreader.viewmodel.AiArticleGenerationUiState
 import io.github.zoot.englishreader.viewmodel.AiArticleGenerationViewModel
@@ -62,6 +65,7 @@ class AiArticleGenerationScreenTest {
     private var generated = 0
     private var settingsOpened = 0
     private var backed = 0
+    private var profilesReloaded = 0
     private val saved = mutableListOf<String>()
     private val discarded = mutableListOf<String>()
 
@@ -269,14 +273,97 @@ class AiArticleGenerationScreenTest {
         }
     }
 
-    private fun render(fontScale: Float = 1f) {
+    @Test
+    fun segments_selectionExposesAccessibleStateAndDoesNotGenerate() {
+        render()
+        formTag("ai_article_difficulty_BEGINNER").assertIsSelected()
+        formTag("ai_article_difficulty_ADVANCED").assertIsNotSelected().performClick().assertIsSelected()
+        formTag("ai_article_length_MEDIUM").assertIsSelected()
+        formTag("ai_article_length_SHORT").performClick().assertIsSelected()
+        AiArticleDifficulty.entries.forEach { difficulty ->
+            formTag("ai_article_difficulty_${difficulty.name}").performClick().assertIsSelected()
+            composeRule.runOnIdle { assertEquals(difficulty, state.value.session.draft.parameters.difficulty) }
+        }
+        AiArticleLength.entries.forEach { length ->
+            formTag("ai_article_length_${length.name}").performClick().assertIsSelected()
+            composeRule.runOnIdle { assertEquals(length, state.value.session.draft.parameters.length) }
+        }
+        composeRule.runOnIdle { assertEquals(0, generated) }
+    }
+
+    @Test
+    @Config(qualifiers = "w320dp-h480dp")
+    fun darkHostCompactForm_largeText_keepsOptionsAndTopicActionsReachable() {
+        render(fontScale = 1.8f, dark = true)
+        formTag("ai_article_difficulty_ADVANCED").assertIsDisplayed().performClick()
+        formTag("ai_article_length_LONG").assertIsDisplayed().performClick()
+        formTag("ai_article_topic").performTextReplacement("A quiet afternoon")
+        formTag("ai_article_generate").assertIsDisplayed().assertIsEnabled()
+        composeRule.runOnIdle {
+            assertEquals(AiArticleDifficulty.ADVANCED, state.value.session.draft.parameters.difficulty)
+            assertEquals(AiArticleLength.LONG, state.value.session.draft.parameters.length)
+            assertEquals("A quiet afternoon", state.value.session.draft.parameters.topic)
+            assertEquals(0, generated)
+        }
+    }
+
+    @Test
+    fun topic_surrogatePairs_countsUtf16AndRejectsOnlyAbove500() {
+        render()
+        formTag("ai_article_topic").performTextReplacement("\uD83C\uDF0D".repeat(250))
+        formTag("ai_article_topic_count").assertTextContains("500 / 500")
+        composeRule.onNodeWithContentDescription("500 / 500 UTF-16 单元").assertExists()
+        formTag("ai_article_generate").assertIsEnabled()
+        formTag("ai_article_topic").performTextReplacement("\uD83C\uDF0D".repeat(250) + "a")
+        formTag("ai_article_topic_count").assertTextContains("501 / 500")
+        formTag("ai_article_generate").assertIsNotEnabled()
+        composeRule.onNodeWithText("清空主题").performScrollTo().performClick()
+        formTag("ai_article_topic_count").assertTextContains("0 / 500")
+        composeRule.runOnIdle { assertEquals(0, generated) }
+    }
+
+    @Test
+    fun profile_loadingAndFailure_preservesReloadAndManagementActions() {
+        state.value = AiArticleGenerationUiState()
+        render()
+        formTag("ai_article_profile").assertIsNotEnabled()
+        composeRule.onNodeWithText("正在读取 AI 配置…").assertIsDisplayed()
+        composeRule.runOnIdle {
+            state.value = state.value.copy(profilesLoaded = true, profilesLoadFailed = true)
+        }
+        composeRule.onNodeWithText("重新读取配置").performScrollTo().performClick()
+        composeRule.onNodeWithText("管理 AI 配置").performScrollTo().performClick()
+        formTag("ai_article_generate").assertIsNotEnabled()
+        composeRule.runOnIdle {
+            assertEquals(1, profilesReloaded)
+            assertEquals(1, settingsOpened)
+            assertEquals(0, generated)
+        }
+    }
+
+    @Test
+    fun running_showsProgressAndDoesNotSubmitAgain() {
+        state.value = readyState().copy(session = readyState().session.copy(
+            status = AiArticleGenerationStatus.Running("request")
+        ))
+        render()
+        formTag("ai_article_generate").assertIsNotEnabled().performClick()
+        composeRule.onNodeWithTag("ai_article_generating_progress").assertIsDisplayed()
+        composeRule.onNodeWithText("正在生成…").assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(0, generated) }
+    }
+
+    private fun render(fontScale: Float = 1f, dark: Boolean = false) {
         composeRule.setContent {
             val density = LocalDensity.current
-            CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
+            CompositionLocalProvider(
+                LocalDensity provides Density(density.density, fontScale),
+                LocalArticleUiDarkTheme provides dark
+            ) {
                 ArticleUiTheme {
                     AiArticleGenerationContent(
                         state = state.value,
-                        onBack = { backed++ }, onOpenAiProfile = { settingsOpened++ }, onReloadProfiles = {},
+                        onBack = { backed++ }, onOpenAiProfile = { settingsOpened++ }, onReloadProfiles = { profilesReloaded++ },
                         onSelectProfile = { id -> state.value = state.value.copy(session = state.value.session.copy(draft = state.value.session.draft.copy(profileId = id))) },
                         onTopicChange = { updateParameters { copy(topic = it) } },
                         onDifficultyChange = { updateParameters { copy(difficulty = it) } },

@@ -48,6 +48,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.navigation.NavType
+import androidx.navigation.NavHostController
 import io.github.zoot.englishreader.data.dictionary.DictionaryPackInstaller
 import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.local.ThemeOption
@@ -181,10 +182,13 @@ class MainActivity : ComponentActivity() {
                         ThemeOption.LIGHT -> false
                         ThemeOption.DARK -> true
                     }
+                    val navController = rememberNavController()
+                    val backStackEntry by navController.currentBackStackEntryAsState()
+                    val lightSystemBars = !darkTheme || backStackEntry?.destination?.route == "article/generate"
                     SideEffect {
                         WindowCompat.getInsetsController(window, window.decorView).apply {
-                            isAppearanceLightStatusBars = !darkTheme
-                            isAppearanceLightNavigationBars = !darkTheme
+                            isAppearanceLightStatusBars = lightSystemBars
+                            isAppearanceLightNavigationBars = lightSystemBars
                         }
                     }
                     EnglishReaderTheme(darkTheme = darkTheme) {
@@ -197,7 +201,7 @@ class MainActivity : ComponentActivity() {
                                     ArticleListScreen(onArticleClick = {}, onBookClick = {})
                                 }
                             ) {
-                                EnglishReaderNavigation()
+                                EnglishReaderNavigation(navController)
                             }
                         }
                     }
@@ -208,8 +212,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun EnglishReaderNavigation() {
-    val navController = rememberNavController()
+fun EnglishReaderNavigation(navController: NavHostController = rememberNavController()) {
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
     val isOnboardingReplay by rememberUpdatedState(currentRoute == ONBOARDING_REPLAY_ROUTE)

@@ -740,11 +740,17 @@
     <string name="ai_article_intermediate_description">更丰富的词汇、复合句、一般话题。参考 CEFR B1–B2，不代表正式等级认证。</string>
     <string name="ai_article_advanced_description">复杂句式、抽象表达、深入讨论。参考 CEFR C1–C2，不代表正式等级认证。</string>
     <string name="ai_article_length">篇幅目标</string>
+    <string name="ai_article_short_option">短篇</string>
+    <string name="ai_article_medium_option">中篇</string>
+    <string name="ai_article_long_option">长篇</string>
+    <string name="ai_article_word_target_prefix">约</string>
+    <string name="ai_article_word_target_words">%1$d词</string>
     <string name="ai_article_short">短篇 · 约200词</string>
     <string name="ai_article_medium">中篇 · 约500词</string>
     <string name="ai_article_long">长篇 · 约800词</string>
     <string name="ai_article_topic">主题（可选）</string>
-    <string name="ai_article_topic_example">如：第一次出国，在机场办理登机\nA first trip to the airport</string>
+    <string name="ai_article_topic_example">请输入主题，例如：环保、人工智能、旅行等</string>
+    <string name="ai_article_topic_count_compact">%1$d / %2$d</string>
     <string name="ai_article_topic_count">%1$d / %2$d UTF-16 单元</string>
     <string name="ai_article_topic_too_long">主题超过 500 UTF-16 单元，请缩短后再生成；不会自动裁剪或发送。</string>
     <string name="ai_article_topic_daily">日常生活</string>
@@ -757,6 +763,7 @@
     <string name="ai_article_topic_auto">AI 自选</string>
     <string name="ai_article_generate">生成文章</string>
     <string name="ai_article_regenerate">重新生成</string>
+    <string name="ai_article_generating_label">正在生成…</string>
     <string name="ai_article_generating">正在生成…可以离开页面，返回后查看进度。离页不会主动取消请求，但系统关闭应用可能中断任务。</string>
     <string name="ai_article_retry_cost">超时或断网不代表未计费。仅在你再次点击时重试，可能再次产生费用。</string>
     <string name="ai_article_cancelled">本次生成已中断，不会自动重发。手动重试可能再次产生费用。</string>

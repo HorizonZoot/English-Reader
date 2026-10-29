@@ -395,6 +395,7 @@ class DictionaryPackInstallerTest {
         // 只改写 getCount 的时序，其余委托给真实 DAO。
         val gatedDao = object : DictionaryDao {
             override suspend fun lookup(word: String) = real.lookup(word)
+            override suspend fun lookupBatch(words: List<String>) = real.lookupBatch(words)
             override suspend fun insertAll(entries: List<DictionaryEntry>) = real.insertAll(entries)
             override suspend fun deleteAll() = real.deleteAll()
             override suspend fun decodeLiteralEscapes(): Int = real.decodeLiteralEscapes()
@@ -451,6 +452,7 @@ class DictionaryPackInstallerTest {
 
         val gatedDao = object : DictionaryDao {
             override suspend fun lookup(word: String) = real.lookup(word)
+            override suspend fun lookupBatch(words: List<String>) = real.lookupBatch(words)
             override suspend fun insertAll(entries: List<DictionaryEntry>) = real.insertAll(entries)
             override suspend fun deleteAll() = real.deleteAll()
             override suspend fun decodeLiteralEscapes(): Int = real.decodeLiteralEscapes()
@@ -659,6 +661,7 @@ class DictionaryPackInstallerTest {
         val real = db.dictionaryDao()
         return object : DictionaryDao {
             override suspend fun lookup(word: String) = real.lookup(word)
+            override suspend fun lookupBatch(words: List<String>) = real.lookupBatch(words)
             override suspend fun insertAll(entries: List<DictionaryEntry>): Unit = throw error
             override suspend fun deleteAll() = real.deleteAll()
             override suspend fun decodeLiteralEscapes(): Int = real.decodeLiteralEscapes()

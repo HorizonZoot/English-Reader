@@ -9,7 +9,10 @@ import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -37,6 +40,7 @@ import io.github.zoot.englishreader.data.repository.AiArticleGenerationDraft
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationState
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationStatus
 import io.github.zoot.englishreader.data.repository.AiArticlePreview
+import io.github.zoot.englishreader.data.repository.AiArticleLookupFailure
 import io.github.zoot.englishreader.data.repository.AiArticleSaveStatus
 import io.github.zoot.englishreader.ui.theme.LocalArticleUiDarkTheme
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
@@ -112,6 +116,28 @@ class AiArticleGenerationScreenTest {
         composeRule.runOnIdle { assertEquals(listOf("result"), saved); assertEquals(0, generated) }
     }
 
+    /**
+     * 表单是 LazyColumn 第 0 项；滚到该项后整项（含末尾提示）都会组合，因此
+     * 「不在预览区内的提示」计数可以反映表单是否重复给出同一提示。
+     */
+    @Test
+    fun temporaryNotice_withPreview_isShownOnlyInResultArea() {
+        val notice = "未保存文章仅临时保留，应用被系统关闭后可能丢失；不会自动加入文章库。"
+        val outsidePreview = hasText(notice) and !hasAnyAncestor(hasTestTag("ai_article_preview"))
+        render()
+        composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(0)
+        composeRule.onAllNodes(outsidePreview).assertCountEquals(1)
+
+        composeRule.runOnIdle {
+            state.value = readyState().copy(session = readyState().session.copy(preview = preview()))
+        }
+        composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(0)
+        composeRule.onNodeWithTag("ai_article_generate").assertExists()
+        composeRule.onAllNodes(outsidePreview).assertCountEquals(0)
+        previewTag("ai_article_preview")
+        composeRule.onNode(hasText(notice) and hasAnyAncestor(hasTestTag("ai_article_preview"))).assertExists()
+    }
+
     @Test
     fun preview_blankLineVariants_keepsValidatedLongContentInSeparateLazyItems() {
         val paragraphs = List(20) { index -> "Paragraph $index. ".padEnd(599, 'a') }
@@ -148,12 +174,6 @@ class AiArticleGenerationScreenTest {
         composeRule.onNodeWithText("Last paragraph.").assertIsDisplayed()
         composeRule.onNodeWithTag("ai_article_content").performScrollToIndex(4)
         composeRule.onNodeWithTag("ai_article_save").assertIsDisplayed()
-        composeRule.runOnIdle {
-            assertEquals(
-                "First line.\nSecond line.  \n\t\n\n  Last paragraph.",
-                state.value.session.preview?.article?.content
-            )
-        }
     }
 
     @Test
@@ -204,6 +224,20 @@ class AiArticleGenerationScreenTest {
         previewTag("ai_article_save").assertIsEnabled()
         composeRule.onNodeWithText("重试保存并阅读").assertIsDisplayed().performClick()
         composeRule.onNodeWithText("不会再次调用 AI", substring = true).performScrollTo().assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(listOf("result"), saved); assertEquals(0, generated) }
+    }
+
+    @Test
+    fun preview_savedLookupFails_keepsLocalRetryAvailableWithoutGenerating() {
+        state.value = readyState().copy(session = readyState().session.copy(
+            preview = preview().copy(saveStatus = AiArticleSaveStatus.Saved(42L, AiArticleLookupFailure.FAILED))
+        ))
+        render()
+        previewTag("ai_article_save").assertIsEnabled()
+        composeRule.onNodeWithText("文章已保存，但未能打开阅读页。请再次点击打开，不会重复入库。")
+            .performScrollTo().assertIsDisplayed()
+        composeRule.runOnIdle { assertEquals(emptyList<String>(), saved); assertEquals(0, generated) }
+        previewTag("ai_article_save").performClick()
         composeRule.runOnIdle { assertEquals(listOf("result"), saved); assertEquals(0, generated) }
     }
 

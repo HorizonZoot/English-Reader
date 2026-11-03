@@ -1,9 +1,18 @@
 package io.github.zoot.englishreader.data.remote.ai
 
+import io.github.zoot.englishreader.data.ai.AiArticleGenerationParameters
+import io.github.zoot.englishreader.data.ai.AiArticleGenerationResult
+import io.github.zoot.englishreader.data.ai.AiArticleGenerator
+import io.github.zoot.englishreader.data.ai.AiArticleLength
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.ai.AiErrorMapper
 import io.github.zoot.englishreader.data.local.AiAuthStrategy
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
+import io.github.zoot.englishreader.data.repository.AiProfileRepository
+import io.github.zoot.englishreader.data.repository.ProfileResolutionResult
+import io.github.zoot.englishreader.data.repository.ResolvedAiProfile
+import io.mockk.coEvery
+import io.mockk.mockk
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -119,6 +128,65 @@ class AiChatTransportTest {
         val body = bodyOf(server)
         assertEquals(4.0, body["max_tokens"])
         assertEquals("disabled", (body["thinking"] as Map<*, *>)["type"])
+    }
+
+    @Test
+    fun requestBody_articleGeneration_serializesScopedThinkingAndLengthBudgetInOnePost() = runTest {
+        val profiles = mockk<AiProfileRepository>()
+        val localUrl = server.url("/")
+        // 只在本测试把 URL 改写到 TLS loopback；Generator 仍使用官方 profile 快照。
+        val localTransport = transportFor(fixture.client.newBuilder().addInterceptor { chain ->
+            val request = chain.request()
+            val url = request.url.newBuilder()
+                .scheme(localUrl.scheme).host(localUrl.host).port(localUrl.port).build()
+            chain.proceed(request.newBuilder().url(url).build())
+        }.build())
+        val generator = AiArticleGenerator(profiles, localTransport, AiErrorMapper(isOnline = { true }))
+        val models = listOf(
+            Triple(AiProviderTemplate.DEEPSEEK, "deepseek-v4-flash", true),
+            Triple(AiProviderTemplate.ZHIPU, "glm-5.2", true),
+            Triple(AiProviderTemplate.KIMI, "kimi-k3", false),
+            Triple(AiProviderTemplate.ZHIPU, "glm-5.3", false),
+            Triple(AiProviderTemplate.OPENAI_COMPATIBLE, "deepseek-v4-flash", false)
+        )
+        for ((provider, model, disabled) in models) {
+            for ((length, tokens) in listOf(
+                AiArticleLength.SHORT to 2_048,
+                AiArticleLength.MEDIUM to 3_072,
+                AiArticleLength.LONG to 4_096
+            )) {
+                coEvery { profiles.resolveValidatedProfile("chosen", any()) } returns
+                    ProfileResolutionResult.Available(ResolvedAiProfile(
+                        profileId = "chosen", providerTemplate = provider,
+                        baseUrl = provider.defaultBaseUrl ?: "https://custom.example/v1",
+                        modelId = model, authStrategy = AiAuthStrategy.API_KEY,
+                        apiKey = "test-key", temperature = 0.2
+                    ))
+                server.enqueue(MockResponse().setBody(
+                    """{"choices":[{"message":{"content":"{\"title\":\"A test article\",\"content\":\"This is a test article.\"}"},"finish_reason":"stop"}]}"""
+                ))
+                val before = server.requestCount
+                val result = generator.generate("chosen", AiArticleGenerationParameters(length = length))
+                assertTrue(result is AiArticleGenerationResult.Success)
+                assertEquals(before + 1, server.requestCount)
+                val request = server.awaitRequest()
+                assertEquals("POST", request.method)
+                val body = requireNotNull(Moshi.Builder().build().adapter(Map::class.java).fromJson(request.body.readUtf8()))
+                assertEquals(tokens.toDouble(), body["max_tokens"])
+                assertEquals(model, body["model"])
+                assertEquals(false, body["stream"])
+                if (disabled) {
+                    assertEquals("disabled", (body["thinking"] as Map<*, *>)["type"])
+                } else {
+                    assertFalse(body.containsKey("thinking"))
+                }
+                if (provider == AiProviderTemplate.KIMI) {
+                    assertFalse(body.containsKey("temperature"))
+                } else {
+                    assertEquals(0.2, body["temperature"])
+                }
+            }
+        }
     }
 
     @Test

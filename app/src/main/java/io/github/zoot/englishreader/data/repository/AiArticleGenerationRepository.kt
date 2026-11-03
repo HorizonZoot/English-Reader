@@ -45,10 +45,15 @@ internal data class AiArticlePreview(
 internal sealed interface AiArticleSaveStatus {
     data object NotSaved : AiArticleSaveStatus
     data object Saving : AiArticleSaveStatus
-    data class Saved(val articleId: Long) : AiArticleSaveStatus
+    data class Saved(
+        val articleId: Long,
+        val lookupFailure: AiArticleLookupFailure? = null
+    ) : AiArticleSaveStatus
     data object Failed : AiArticleSaveStatus
     data object Cancelled : AiArticleSaveStatus
 }
+
+internal enum class AiArticleLookupFailure { FAILED, CANCELLED }
 
 internal sealed interface AiArticleGenerationStatus {
     data object Idle : AiArticleGenerationStatus
@@ -99,23 +104,34 @@ internal class AiArticleGenerationRepository @Inject constructor(
     }
 
     /**
-     * true 表示已接受保存或该结果已保存，并不表示新的写入已完成。
-     * 调用方从当前预览的 Saved 获取 articleId；导航失败不重置此状态。
+     * true 表示已接受保存或已存文章复查，并不表示操作已完成。
+     * 调用方仅从无 lookupFailure 的 Saved 获取 articleId；导航失败不重置此状态。
      */
     fun savePreview(resultId: String): Boolean {
         val preview = synchronized(lock) {
             val current = mutableState.value
             val preview = current.preview?.takeIf { it.resultId == resultId } ?: return false
             if (inFlight != null || inFlightSave != null) return false
-            if (preview.saveStatus is AiArticleSaveStatus.Saved) return true
             if (!ownerScope.isActive) return false
             inFlightSave = preview
             mutableState.value = current.copy(preview = preview.copy(saveStatus = AiArticleSaveStatus.Saving))
             preview
         }
+        val previousSaved = preview.saveStatus as? AiArticleSaveStatus.Saved
+        var missingConfirmed = false
         var savedArticleId: Long? = null
         val job = ownerScope.launch {
             try {
+                currentCoroutineContext().ensureActive()
+                if (previousSaved != null) {
+                    val existing = articleRepository.getArticleById(previousSaved.articleId)
+                    currentCoroutineContext().ensureActive()
+                    if (existing != null) {
+                        savedArticleId = previousSaved.articleId
+                        return@launch
+                    }
+                    missingConfirmed = true
+                }
                 currentCoroutineContext().ensureActive()
                 // 仅保护一次本地写入及返回 ID 的接收，避免已提交却因取消丢失 ID、重试后重复入库。
                 withContext(NonCancellable) {
@@ -141,6 +157,13 @@ internal class AiArticleGenerationRepository @Inject constructor(
                 val articleId = savedArticleId
                 val saveStatus = when {
                     articleId != null -> AiArticleSaveStatus.Saved(articleId)
+                    previousSaved != null && !missingConfirmed -> previousSaved.copy(
+                        lookupFailure = if (cause is CancellationException) {
+                            AiArticleLookupFailure.CANCELLED
+                        } else {
+                            AiArticleLookupFailure.FAILED
+                        }
+                    )
                     cause is CancellationException -> AiArticleSaveStatus.Cancelled
                     else -> AiArticleSaveStatus.Failed
                 }

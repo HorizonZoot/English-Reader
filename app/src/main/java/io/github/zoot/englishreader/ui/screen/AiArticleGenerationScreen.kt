@@ -56,6 +56,7 @@ import io.github.zoot.englishreader.data.ai.AiArticleLength
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.ai.AiGeneratedArticleRejection
 import io.github.zoot.englishreader.data.repository.AiArticleGenerationStatus
+import io.github.zoot.englishreader.data.repository.AiArticleLookupFailure
 import io.github.zoot.englishreader.data.repository.AiArticleSaveStatus
 import io.github.zoot.englishreader.ui.theme.AiArticleGenerationStyle
 import io.github.zoot.englishreader.ui.theme.AiArticleGenerationTheme
@@ -205,7 +206,10 @@ internal fun AiArticleGenerationContent(
                                 is AiArticleGenerationStatus.Cancelled -> AiGenerationFootnote(stringResource(R.string.ai_article_cancelled))
                                 else -> Unit
                             }
-                            AiGenerationFootnote(stringResource(R.string.ai_article_temporary_notice))
+                            // 有预览时同一提示由结果区给出，这里不再重复。
+                            if (preview == null) {
+                                AiGenerationFootnote(stringResource(R.string.ai_article_temporary_notice))
+                            }
                         }
                     }
                     if (preview != null) {
@@ -241,10 +245,14 @@ internal fun AiArticleGenerationContent(
                         }
                         item(key = "preview_actions") {
                             Column(verticalArrangement = Arrangement.spacedBy(AiArticleGenerationStyle.ContentGap)) {
-                                when (preview.saveStatus) {
+                                when (val saved = preview.saveStatus) {
                                     AiArticleSaveStatus.Failed, AiArticleSaveStatus.Cancelled ->
                                         Text(stringResource(R.string.ai_article_save_failed), color = MaterialTheme.colorScheme.error)
-                                    is AiArticleSaveStatus.Saved -> AiGenerationFootnote(stringResource(R.string.ai_article_saved))
+                                    is AiArticleSaveStatus.Saved -> if (saved.lookupFailure == AiArticleLookupFailure.FAILED) {
+                                        Text(stringResource(R.string.ai_article_navigation_failed), color = MaterialTheme.colorScheme.error)
+                                    } else {
+                                        AiGenerationFootnote(stringResource(R.string.ai_article_saved))
+                                    }
                                     else -> Unit
                                 }
                                 Button(

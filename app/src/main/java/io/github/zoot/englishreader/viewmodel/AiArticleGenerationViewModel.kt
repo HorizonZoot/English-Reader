@@ -155,6 +155,7 @@ internal class AiArticleGenerationViewModel @Inject constructor(
         when (val saved = preview.saveStatus) {
             is AiArticleSaveStatus.Saved -> {
                 pendingSaveResultId = null
+                if (saved.lookupFailure != null) return
                 val request = AiArticleReadRequest(resultId, saved.articleId)
                 pendingRead = request
                 readRequests.trySend(request)

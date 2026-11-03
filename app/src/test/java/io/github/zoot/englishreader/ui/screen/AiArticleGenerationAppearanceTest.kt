@@ -3,7 +3,9 @@ package io.github.zoot.englishreader.ui.screen
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.view.View
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalDensity
@@ -33,25 +35,53 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w393dp-h852dp")
+@Config(sdk = [34], qualifiers = "w393dp-h852dp-notnight")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class AiArticleGenerationAppearanceTest {
     @get:Rule val composeRule = createComposeRule()
     private lateinit var view: View
+    private val darkThemeOverride = mutableStateOf<Boolean?>(null)
 
     @Test
-    fun page_darkHost_rendersLightSurfaceAndBlueSelection() {
-        render(darkHost = true)
-        val top = capture("light-from-dark-host-top")
-        assertEquals(0xFFF2F2F7.toInt(), top.getPixel(1, 1))
-        formTag("ai_article_difficulty_BEGINNER").assertIsDisplayed()
-        val options = capture("light-options")
-        val pixels = IntArray(options.width * options.height)
-        options.getPixels(pixels, 0, options.width, 0, 0, options.width, options.height)
-        assertTrue("Expected a blue selected segment", pixels.count { it == 0xFF007AFF.toInt() } > 100)
-        formTag("ai_article_generate").assertIsDisplayed()
+    @Config(qualifiers = "w393dp-h852dp-night")
+    fun page_systemDark_rendersDarkSurfaceAndBlueSelection() {
+        render()
+        val top = capture("system-dark-top")
+        assertEquals(0xFF000000.toInt(), top.getPixel(1, 1))
+        assertFillColor("ai_article_profile", 0xFF2C2C2E.toInt())
+        assertFillColor("ai_article_difficulty_BEGINNER", 0xFF0A84FF.toInt())
+        assertFillColor("ai_article_generate", 0xFF3A3A3C.toInt())
         temporaryNotice().performScrollTo().assertIsDisplayed()
-        capture("light-topic-and-generate")
+        capture("system-dark-topic-and-generate")
+    }
+
+    @Test
+    @Config(qualifiers = "w393dp-h852dp-night")
+    fun page_systemDarkWithLightOverride_keepsLightSurface() {
+        render(darkHost = false)
+        assertEquals(0xFFF2F2F7.toInt(), capture("light-override-top").getPixel(1, 1))
+        assertFillColor("ai_article_difficulty_BEGINNER", 0xFF007AFF.toInt())
+        assertFillColor("ai_article_generate", 0xFFD1D1D6.toInt())
+    }
+
+    @Test
+    fun page_systemLightWithDarkOverride_keepsDarkSurface() {
+        render(darkHost = true)
+        assertEquals(0xFF000000.toInt(), capture("dark-override-top").getPixel(1, 1))
+        assertFillColor("ai_article_difficulty_BEGINNER", 0xFF0A84FF.toInt())
+        assertFillColor("ai_article_generate", 0xFF3A3A3C.toInt())
+    }
+
+    @Test
+    fun page_resolvedThemeChanges_updatesWithoutRecreatingContent() {
+        render()
+        assertEquals(0xFFF2F2F7.toInt(), capture("theme-switch-light").getPixel(1, 1))
+        composeRule.runOnIdle { darkThemeOverride.value = true }
+        assertEquals(0xFF000000.toInt(), capture("theme-switch-dark").getPixel(1, 1))
+        assertFillColor("ai_article_generate", 0xFF3A3A3C.toInt())
+        composeRule.runOnIdle { darkThemeOverride.value = false }
+        assertEquals(0xFFF2F2F7.toInt(), capture("theme-switch-back-light").getPixel(1, 1))
+        assertFillColor("ai_article_generate", 0xFFD1D1D6.toInt())
     }
 
     @Test
@@ -68,8 +98,8 @@ class AiArticleGenerationAppearanceTest {
     }
 
     @Test
-    fun page_readyProfile_rendersBlueGenerateAction() {
-        render(darkHost = false, state = AiArticleGenerationUiState(
+    fun page_systemLightWithReadyProfile_rendersBlueGenerateAction() {
+        render(state = AiArticleGenerationUiState(
             session = AiArticleGenerationState(draft = AiArticleGenerationDraft(profileId = "test-profile")),
             profiles = listOf(AiProviderProfile(
                 "test-profile", "UI test profile", AiProviderTemplate.OPENAI_COMPATIBLE,
@@ -77,22 +107,25 @@ class AiArticleGenerationAppearanceTest {
             )),
             profilesLoaded = true
         ))
+        assertEquals(0xFFF2F2F7.toInt(), capture("system-light-top").getPixel(1, 1))
         formTag("ai_article_generate").assertIsDisplayed().assertIsEnabled()
+        assertFillColor("ai_article_generate", 0xFF007AFF.toInt())
         temporaryNotice().performScrollTo().assertIsDisplayed()
         capture("light-ready-generate")
     }
 
     private fun render(
-        darkHost: Boolean,
+        darkHost: Boolean? = null,
         fontScale: Float = 1f,
         state: AiArticleGenerationUiState = AiArticleGenerationUiState(profilesLoaded = true)
     ) {
+        darkThemeOverride.value = darkHost
         composeRule.setContent {
             val density = LocalDensity.current
             val localView = LocalView.current
             SideEffect { view = localView }
             CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale)) {
-                EnglishReaderTheme(darkTheme = darkHost) {
+                EnglishReaderTheme(darkTheme = darkThemeOverride.value ?: isSystemInDarkTheme()) {
                     AiArticleGenerationContent(
                         state = state,
                         onBack = {}, onOpenAiProfile = {}, onReloadProfiles = {}, onSelectProfile = {},
@@ -110,6 +143,24 @@ class AiArticleGenerationAppearanceTest {
     private fun temporaryNotice() = composeRule.onNodeWithText(
         "未保存文章仅临时保留，应用被系统关闭后可能丢失；不会自动加入文章库。"
     )
+
+    private fun assertFillColor(tag: String, color: Int) {
+        val bounds = formTag(tag).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val bitmap = capture("$tag-${color.toUInt().toString(16)}")
+        val left = bounds.left.toInt().coerceAtLeast(0)
+        val top = bounds.top.toInt().coerceAtLeast(0)
+        val right = bounds.right.toInt().coerceAtMost(bitmap.width)
+        val bottom = bounds.bottom.toInt().coerceAtMost(bitmap.height)
+        val area = (right - left) * (bottom - top)
+        assertTrue("Expected visible pixels for $tag", area > 0)
+        var matchingPixels = 0
+        for (y in top until bottom) {
+            for (x in left until right) {
+                if (bitmap.getPixel(x, y) == color) matchingPixels++
+            }
+        }
+        assertTrue("Expected theme fill in $tag", matchingPixels > area / 3)
+    }
 
     private fun capture(name: String): Bitmap {
         val bitmap = composeRule.runOnIdle {

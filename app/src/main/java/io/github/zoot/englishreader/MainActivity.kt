@@ -183,12 +183,10 @@ class MainActivity : ComponentActivity() {
                         ThemeOption.DARK -> true
                     }
                     val navController = rememberNavController()
-                    val backStackEntry by navController.currentBackStackEntryAsState()
-                    val lightSystemBars = !darkTheme || backStackEntry?.destination?.route == "article/generate"
                     SideEffect {
                         WindowCompat.getInsetsController(window, window.decorView).apply {
-                            isAppearanceLightStatusBars = lightSystemBars
-                            isAppearanceLightNavigationBars = lightSystemBars
+                            isAppearanceLightStatusBars = !darkTheme
+                            isAppearanceLightNavigationBars = !darkTheme
                         }
                     }
                     EnglishReaderTheme(darkTheme = darkTheme) {

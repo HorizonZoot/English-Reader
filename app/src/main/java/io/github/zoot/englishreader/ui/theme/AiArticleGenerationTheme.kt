@@ -2,6 +2,7 @@ package io.github.zoot.englishreader.ui.theme
 
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -17,7 +18,8 @@ internal object AiArticleGenerationStyle {
     val CardShape = RoundedCornerShape(22.dp)
     val FieldShape = RoundedCornerShape(16.dp)
     val ButtonShape = RoundedCornerShape(18.dp)
-    val DisabledBackground = Color(0xFFD1D1D6)
+    val DisabledBackground: Color
+        @Composable get() = if (LocalArticleUiDarkTheme.current) Color(0xFF3A3A3C) else Color(0xFFD1D1D6)
     val DisabledContent = Color(0xFF8E8E93)
 }
 
@@ -39,12 +41,29 @@ private val AiArticleLightColors = lightColorScheme(
     surfaceTint = Color.Transparent
 )
 
-/** 本目的地按参考设计使用浅色，不写入或改变应用的主题偏好。 */
+private val AiArticleDarkColors = darkColorScheme(
+    background = Color.Black,
+    onBackground = Color.White,
+    surface = Color(0xFF1C1C1E),
+    onSurface = Color.White,
+    surfaceVariant = Color(0xFF2C2C2E),
+    onSurfaceVariant = Color(0xFF8E8E93),
+    primary = Color(0xFF0A84FF),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF163B65),
+    onPrimaryContainer = Color(0xFF0A84FF),
+    outline = Color(0xFF38383A),
+    outlineVariant = Color(0xFF38383A),
+    error = Color(0xFFFF453A),
+    surfaceTint = Color.Transparent
+)
+
+/** 复用应用已解析的主题，默认跟随系统并尊重用户的浅色/深色设置。 */
 @Composable
 internal fun AiArticleGenerationTheme(content: @Composable () -> Unit) {
     val type = MaterialTheme.typography
     MaterialTheme(
-        colorScheme = AiArticleLightColors,
+        colorScheme = if (LocalArticleUiDarkTheme.current) AiArticleDarkColors else AiArticleLightColors,
         typography = type.copy(
             titleLarge = type.titleLarge.copy(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold),
             titleMedium = type.titleMedium.copy(fontSize = 17.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),

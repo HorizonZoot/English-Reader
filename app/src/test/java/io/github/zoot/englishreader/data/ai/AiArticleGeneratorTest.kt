@@ -7,6 +7,7 @@ import io.github.zoot.englishreader.data.local.AiProfileMetadataSnapshot
 import io.github.zoot.englishreader.data.local.AiProfileMetadataStore
 import io.github.zoot.englishreader.data.local.AiProviderProfile
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
+import io.github.zoot.englishreader.data.remote.ai.AiThinkingMode
 import io.github.zoot.englishreader.data.remote.ai.AiChatMessage
 import io.github.zoot.englishreader.data.remote.ai.AiChatRequestConfig
 import io.github.zoot.englishreader.data.remote.ai.AiChatTransport
@@ -48,6 +49,30 @@ class AiArticleGeneratorTest {
     private val generator = AiArticleGenerator(profiles, transport, AiErrorMapper(isOnline = { true }))
     private val parameters = AiArticleGenerationParameters(topic = "private topic")
 
+    /**
+     * 打开生成页只构造本类；网络栈要等真正发请求时才取。被拒绝的输入和缺失的配置
+     * 都不应触发 transport 构建。
+     */
+    @Test
+    fun generate_transportResolvedOnlyWhenRequestIsSent() = runTest {
+        var resolved = 0
+        val lazyGenerator = AiArticleGenerator(
+            profiles, { resolved++; transport }, AiErrorMapper(isOnline = { true })
+        )
+        assertEquals(0, resolved)
+
+        lazyGenerator.generate("chosen", parameters.copy(topic = "x".repeat(501)))
+        lazyGenerator.generate(null, parameters)
+        coEvery { profiles.resolveValidatedProfile("chosen", any()) } returns ProfileResolutionResult.ProfileNotFound
+        lazyGenerator.generate("chosen", parameters)
+        assertEquals(0, resolved)
+
+        resolveProfile()
+        coEvery { transport.complete(any(), any()) } returns content()
+        assertTrue(lazyGenerator.generate("chosen", parameters) is AiArticleGenerationResult.Success)
+        assertEquals(1, resolved)
+    }
+
     @Test
     fun generate_eachLength_sendsPreparedMessagesAndBoundedSnapshot() = runTest {
         val profile = profile()
@@ -84,6 +109,98 @@ class AiArticleGeneratorTest {
         coVerify(exactly = 3) { profiles.resolveValidatedProfile("chosen", any()) }
         coVerify(exactly = 0) { profiles.resolveValidatedActiveProfile(any()) }
         coVerify(exactly = 0) { transport.listModels(any()) }
+    }
+
+    @Test
+    fun generate_confirmedModelsAtOfficialEndpoints_disablesThinking() = runTest {
+        val configs = mutableListOf<AiChatRequestConfig>()
+        coEvery { transport.complete(capture(configs), any()) } returns content()
+        for (provider in listOf(AiProviderTemplate.DEEPSEEK, AiProviderTemplate.ZHIPU)) {
+            val model = if (provider == AiProviderTemplate.DEEPSEEK) "deepseek-v4-flash" else "glm-5.2"
+            coEvery { profiles.resolveValidatedProfile("chosen", any()) } returns
+                ProfileResolutionResult.Available(profile().copy(
+                    providerTemplate = provider, baseUrl = requireNotNull(provider.defaultBaseUrl), modelId = model
+                ))
+
+            assertTrue(generator.generate("chosen", parameters) is AiArticleGenerationResult.Success)
+            assertEquals(AiThinkingMode.DISABLED, configs.last().thinkingMode)
+        }
+        coVerify(exactly = 2) { transport.complete(any(), any()) }
+    }
+
+    /**
+     * 白名单按精确模型 ID 匹配，与模板默认模型各自维护。默认模型一旦升级而白名单未跟进，
+     * 新用户的默认配置会静默恢复思考输出，可能计费后截断。此用例让这种漂移直接变红，
+     * 由改默认模型的人确认新模型是否支持关闭思考，再同步白名单与 spec。
+     */
+    @Test
+    fun generate_thinkingTemplateDefaultModels_stayOnDisableList() = runTest {
+        val configs = mutableListOf<AiChatRequestConfig>()
+        coEvery { transport.complete(capture(configs), any()) } returns content()
+        for (provider in listOf(AiProviderTemplate.DEEPSEEK, AiProviderTemplate.ZHIPU)) {
+            coEvery { profiles.resolveValidatedProfile("chosen", any()) } returns
+                ProfileResolutionResult.Available(profile().copy(
+                    providerTemplate = provider,
+                    baseUrl = requireNotNull(provider.defaultBaseUrl),
+                    modelId = requireNotNull(provider.defaultModelId)
+                ))
+
+            assertTrue(generator.generate("chosen", parameters) is AiArticleGenerationResult.Success)
+            assertEquals("$provider default model", AiThinkingMode.DISABLED, configs.last().thinkingMode)
+        }
+    }
+
+    @Test
+    fun generate_unknownForcedThinkingOrCustomEndpoint_omitsThinkingOverride() = runTest {
+        val cases = listOf(
+            Triple(AiProviderTemplate.DEEPSEEK, "deepseek-reasoner", AiProviderTemplate.DEEPSEEK.defaultBaseUrl),
+            Triple(AiProviderTemplate.DEEPSEEK, "future-model", AiProviderTemplate.DEEPSEEK.defaultBaseUrl),
+            Triple(AiProviderTemplate.ZHIPU, "glm-4.5v", AiProviderTemplate.ZHIPU.defaultBaseUrl),
+            Triple(AiProviderTemplate.ZHIPU, "future-model", AiProviderTemplate.ZHIPU.defaultBaseUrl),
+            Triple(AiProviderTemplate.DEEPSEEK, "deepseek-v4-flash", "https://custom.example/v1"),
+            Triple(AiProviderTemplate.ZHIPU, "glm-5.2", "https://custom.example/v1"),
+            Triple(AiProviderTemplate.OPENAI_COMPATIBLE, "glm-5.2", AiProviderTemplate.ZHIPU.defaultBaseUrl)
+        )
+        val configs = mutableListOf<AiChatRequestConfig>()
+        coEvery { transport.complete(capture(configs), any()) } returns content()
+        for ((provider, model, endpoint) in cases) {
+            coEvery { profiles.resolveValidatedProfile("chosen", any()) } returns
+                ProfileResolutionResult.Available(profile().copy(
+                    providerTemplate = provider, baseUrl = requireNotNull(endpoint), modelId = model
+                ))
+
+            assertTrue(generator.generate("chosen", parameters) is AiArticleGenerationResult.Success)
+            assertNull("$provider / $model", configs.last().thinkingMode)
+        }
+        coVerify(exactly = cases.size) { transport.complete(any(), any()) }
+    }
+
+    @Test
+    fun generate_endpointVariants_appliesOnlyExactOfficialRoutes() = runTest {
+        val cases = listOf(
+            Triple(AiProviderTemplate.DEEPSEEK, "https://API.DEEPSEEK.COM:443/", true),
+            Triple(AiProviderTemplate.DEEPSEEK, "https://api.deepseek.com/v1/", true),
+            Triple(AiProviderTemplate.DEEPSEEK, "https://api.deepseek.com/chat/completions", false),
+            Triple(AiProviderTemplate.DEEPSEEK, "https://api.deepseek.com/other", false),
+            Triple(AiProviderTemplate.DEEPSEEK, "https://api.deepseek.com:8443", false),
+            Triple(AiProviderTemplate.DEEPSEEK, "https://api.deepseek.com.evil.example", false),
+            Triple(AiProviderTemplate.ZHIPU, "https://open.bigmodel.cn/api/paas/v4/", true),
+            Triple(AiProviderTemplate.ZHIPU, "https://open.bigmodel.cn/api/paas/v4/chat/completions", false),
+            Triple(AiProviderTemplate.ZHIPU, "https://open.bigmodel.cn/other", false),
+            Triple(AiProviderTemplate.ZHIPU, "https://open.bigmodel.cn:8443/api/paas/v4", false)
+        )
+        val configs = mutableListOf<AiChatRequestConfig>()
+        coEvery { transport.complete(capture(configs), any()) } returns content()
+        for ((provider, endpoint, disabled) in cases) {
+            val model = if (provider == AiProviderTemplate.DEEPSEEK) "deepseek-v4-flash" else "glm-5.2"
+            coEvery { profiles.resolveValidatedProfile("chosen", any()) } returns
+                ProfileResolutionResult.Available(profile().copy(
+                    providerTemplate = provider, baseUrl = endpoint, modelId = "  $model  "
+                ))
+            assertTrue(generator.generate("chosen", parameters) is AiArticleGenerationResult.Success)
+            assertEquals(model, configs.last().modelId)
+            assertEquals(AiThinkingMode.DISABLED.takeIf { disabled }, configs.last().thinkingMode)
+        }
     }
 
     @Test

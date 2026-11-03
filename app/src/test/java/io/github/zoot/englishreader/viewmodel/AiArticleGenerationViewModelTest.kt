@@ -10,6 +10,7 @@ import io.github.zoot.englishreader.data.ai.AiArticleGenerator
 import io.github.zoot.englishreader.data.ai.AiArticleLength
 import io.github.zoot.englishreader.data.ai.AiError
 import io.github.zoot.englishreader.data.ai.AiGeneratedArticle
+import io.github.zoot.englishreader.data.entity.ArticleEntity
 import io.github.zoot.englishreader.data.local.AiAuthStrategy
 import io.github.zoot.englishreader.data.local.AiProviderProfile
 import io.github.zoot.englishreader.data.local.AiProviderTemplate
@@ -60,6 +61,9 @@ class AiArticleGenerationViewModelTest {
             )
         }
         coEvery { articles.insertArticle(any()) } returns 42L
+        coEvery { articles.getArticleById(any()) } answers {
+            ArticleEntity(id = firstArg(), title = "A walk", content = "A short walk in the park.")
+        }
     }
 
     @After
@@ -254,6 +258,101 @@ class AiArticleGenerationViewModelTest {
         }
         coVerify(exactly = 1) { articles.insertArticle(any()) }
         coVerify(exactly = 1) { generator.generate(any(), any()) }
+    }
+
+    @Test
+    fun saveAndRead_deletedArticle_queriesBeforeNavigationAndOpensReplacementOnce() = runTest {
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articles)
+        val vm = viewModel(repository)
+        runCurrent()
+        vm.generate()
+        runCurrent()
+        val id = repository.state.value.preview!!.resultId
+        vm.setScreenActive(true)
+        vm.events.test {
+            vm.saveAndRead(id)
+            runCurrent()
+            assertEquals(42L, vm.consumeReadRequest(awaitItem()))
+            val lookup = CompletableDeferred<ArticleEntity?>()
+            coEvery { articles.getArticleById(42L) } coAnswers { lookup.await() }
+            coEvery { articles.insertArticle(any()) } returns 43L
+            vm.saveAndRead(id)
+            vm.saveAndRead(id)
+            runCurrent()
+            assertTrue(vm.uiState.value.isBusy)
+            expectNoEvents()
+            coVerify(exactly = 1) { articles.insertArticle(any()) }
+            lookup.complete(null)
+            runCurrent()
+            assertEquals(43L, vm.consumeReadRequest(awaitItem()))
+            expectNoEvents()
+        }
+        coVerify(exactly = 1) { articles.getArticleById(42L) }
+        coVerify(exactly = 2) { articles.insertArticle(any()) }
+        coVerify(exactly = 1) { generator.generate(any(), any()) }
+    }
+
+    @Test
+    fun saveAndRead_lookupFailureOrCancellation_doesNotNavigateOrReinsertAndAllowsRetry() = runTest {
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articles)
+        val vm = viewModel(repository)
+        runCurrent()
+        vm.generate()
+        runCurrent()
+        val id = repository.state.value.preview!!.resultId
+        vm.setScreenActive(true)
+        vm.events.test {
+            vm.saveAndRead(id)
+            runCurrent()
+            assertEquals(42L, vm.consumeReadRequest(awaitItem()))
+            for (failure in listOf(IOException("private SQL"), CancellationException("cancelled"))) {
+                coEvery { articles.getArticleById(42L) } throws failure
+                vm.saveAndRead(id)
+                runCurrent()
+                assertFalse(vm.uiState.value.isBusy)
+                assertEquals(42L, (repository.state.value.preview!!.saveStatus as AiArticleSaveStatus.Saved).articleId)
+                expectNoEvents()
+            }
+            coEvery { articles.getArticleById(42L) } returns ArticleEntity(42L, "A walk", "A short walk in the park.")
+            vm.saveAndRead(id)
+            runCurrent()
+            assertEquals(42L, vm.consumeReadRequest(awaitItem()))
+            expectNoEvents()
+        }
+        coVerify(exactly = 3) { articles.getArticleById(42L) }
+        coVerify(exactly = 1) { articles.insertArticle(any()) }
+        coVerify(exactly = 1) { generator.generate(any(), any()) }
+    }
+
+    @Test
+    fun saveAndRead_leaveDuringLookup_finishesLocallyWithoutReplayingNavigation() = runTest {
+        val repository = AiArticleGenerationRepository(generator, backgroundScope, articles)
+        val vm = viewModel(repository)
+        runCurrent()
+        vm.generate()
+        runCurrent()
+        val id = repository.state.value.preview!!.resultId
+        vm.setScreenActive(true)
+        vm.events.test {
+            vm.saveAndRead(id)
+            runCurrent()
+            assertEquals(42L, vm.consumeReadRequest(awaitItem()))
+            val lookup = CompletableDeferred<ArticleEntity?>()
+            coEvery { articles.getArticleById(42L) } coAnswers { lookup.await() }
+            vm.saveAndRead(id)
+            runCurrent()
+            expectNoEvents()
+            vm.setScreenActive(false)
+            lookup.complete(ArticleEntity(42L, "A walk", "A short walk in the park."))
+            runCurrent()
+            vm.setScreenActive(true)
+            expectNoEvents()
+            assertEquals(AiArticleSaveStatus.Saved(42L), repository.state.value.preview!!.saveStatus)
+            vm.saveAndRead(id)
+            runCurrent()
+            assertEquals(42L, vm.consumeReadRequest(awaitItem()))
+        }
+        coVerify(exactly = 1) { articles.insertArticle(any()) }
     }
 
     @Test

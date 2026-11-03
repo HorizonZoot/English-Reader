@@ -53,6 +53,9 @@ class AiArticleGenerationSaveTest {
     fun setUp() {
         coEvery { generator.generate(any(), any()) } returns AiArticleGenerationResult.Success(article)
         coEvery { articleRepository.insertArticle(any()) } returns 77L
+        coEvery { articleRepository.getArticleById(any()) } answers {
+            ArticleEntity(id = firstArg(), title = article.title, content = article.content)
+        }
     }
 
     @Test
@@ -218,13 +221,154 @@ class AiArticleGenerationSaveTest {
         val savedPreview = repository.state.value.preview
         assertTrue(repository.updateDraft(AiArticleGenerationDraft(profileId = "other-profile")))
 
-        repeat(3) { assertTrue(repository.savePreview(resultId)) }
-        runCurrent()
+        repeat(3) {
+            assertTrue(repository.savePreview(resultId))
+            runCurrent()
+        }
 
         assertEquals(savedPreview, repository.state.value.preview)
         assertEquals(AiArticleSaveStatus.Saved(77L), repository.state.value.preview!!.saveStatus)
         coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
         coVerify(exactly = 1) { generator.generate(any(), any()) }
+    }
+
+    @Test
+    fun savePreview_deletedSavedArticle_reinsertsOnceAfterLookupWithoutRegeneration() = runTest {
+        val repository = generatedRepository()
+        val preview = repository.state.value.preview!!
+        assertTrue(repository.savePreview(preview.resultId))
+        runCurrent()
+        val lookup = CompletableDeferred<ArticleEntity?>()
+        val written = slot<ArticleEntity>()
+        coEvery { articleRepository.getArticleById(77L) } coAnswers { lookup.await() }
+        coEvery { articleRepository.insertArticle(capture(written)) } returns 88L
+
+        assertTrue(repository.savePreview(preview.resultId))
+        assertFalse(repository.savePreview(preview.resultId))
+        runCurrent()
+        assertTrue(repository.state.value.isSaving)
+        assertFalse(repository.generate())
+        assertFalse(repository.discardPreview(preview.resultId))
+        assertFalse(repository.updateDraft(AiArticleGenerationDraft(profileId = "changed")))
+        coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
+        lookup.complete(null)
+        runCurrent()
+
+        assertEquals(AiArticleSaveStatus.Saved(88L), repository.state.value.preview!!.saveStatus)
+        assertEquals(preview.resultId, repository.state.value.preview!!.resultId)
+        assertEquals(preview.article.content, written.captured.content)
+        assertEquals(preview.article.title, written.captured.title)
+        assertEquals(0L, written.captured.id)
+        coVerify(exactly = 1) { articleRepository.getArticleById(77L) }
+        coVerify(exactly = 2) { articleRepository.insertArticle(any()) }
+        coVerify(exactly = 1) { generator.generate(any(), any()) }
+    }
+
+    @Test
+    fun savePreview_lookupFailure_preservesSavedIdAndRetriesLookupWithoutWriting() = runTest {
+        val repository = generatedRepository()
+        val preview = repository.state.value.preview!!
+        assertTrue(repository.savePreview(preview.resultId))
+        runCurrent()
+        coEvery { articleRepository.getArticleById(77L) } throws IllegalStateException("private SQL content")
+
+        assertTrue(repository.savePreview(preview.resultId))
+        runCurrent()
+        assertFalse(repository.state.value.isSaving)
+        assertEquals(AiArticleSaveStatus.Saved(77L, AiArticleLookupFailure.FAILED), repository.state.value.preview!!.saveStatus)
+        assertFalse(repository.state.value.toString().contains("private SQL content"))
+        coVerify(exactly = 1) { articleRepository.getArticleById(77L) }
+        coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
+        coEvery { articleRepository.getArticleById(77L) } returns ArticleEntity(77L, article.title, article.content)
+        assertTrue(repository.savePreview(preview.resultId))
+        runCurrent()
+        assertEquals(AiArticleSaveStatus.Saved(77L), repository.state.value.preview!!.saveStatus)
+        coVerify(exactly = 2) { articleRepository.getArticleById(77L) }
+        coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
+    }
+
+    @Test
+    fun savePreview_lookupWrappedCancellation_preservesSavedIdWithoutWriting() = runTest {
+        val repository = generatedRepository()
+        val id = repository.state.value.preview!!.resultId
+        assertTrue(repository.savePreview(id))
+        runCurrent()
+        coEvery { articleRepository.getArticleById(77L) } throws
+            IllegalStateException("private SQL content", CancellationException("cancelled"))
+
+        assertTrue(repository.savePreview(id))
+        runCurrent()
+        assertFalse(repository.state.value.isSaving)
+        assertEquals(AiArticleSaveStatus.Saved(77L, AiArticleLookupFailure.CANCELLED), repository.state.value.preview!!.saveStatus)
+        coVerify(exactly = 1) { articleRepository.getArticleById(77L) }
+        coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
+        coVerify(exactly = 1) { generator.generate(any(), any()) }
+    }
+
+    @Test
+    fun savePreview_lookupOwnerCancelledBeforeLaunch_preservesSavedId() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val repository = generatedRepository(owner)
+        val id = repository.state.value.preview!!.resultId
+        try {
+            assertTrue(repository.savePreview(id))
+            runCurrent()
+            assertTrue(repository.savePreview(id))
+            assertTrue(repository.state.value.isSaving)
+            owner.cancel()
+            runCurrent()
+            assertFalse(repository.state.value.isSaving)
+            assertEquals(AiArticleSaveStatus.Saved(77L, AiArticleLookupFailure.CANCELLED), repository.state.value.preview!!.saveStatus)
+            coVerify(exactly = 0) { articleRepository.getArticleById(any()) }
+            coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
+        } finally {
+            owner.cancel()
+        }
+    }
+
+    @Test
+    fun savePreview_missingArticleWriteFails_retriesLocalInsertWithoutStaleId() = runTest {
+        val repository = generatedRepository()
+        val id = repository.state.value.preview!!.resultId
+        assertTrue(repository.savePreview(id))
+        runCurrent()
+        coEvery { articleRepository.getArticleById(77L) } returns null
+        coEvery { articleRepository.insertArticle(any()) } throws IllegalStateException("private SQL content")
+
+        assertTrue(repository.savePreview(id))
+        runCurrent()
+        assertEquals(AiArticleSaveStatus.Failed, repository.state.value.preview!!.saveStatus)
+        coEvery { articleRepository.insertArticle(any()) } returns 88L
+        assertTrue(repository.savePreview(id))
+        runCurrent()
+
+        assertEquals(AiArticleSaveStatus.Saved(88L), repository.state.value.preview!!.saveStatus)
+        coVerify(exactly = 1) { articleRepository.getArticleById(77L) }
+        coVerify(exactly = 3) { articleRepository.insertArticle(any()) }
+        coVerify(exactly = 1) { generator.generate(any(), any()) }
+    }
+
+    @Test
+    fun savePreview_cancelledLookupReturnsMissing_preservesSavedIdWithoutInserting() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val repository = generatedRepository(owner)
+        val id = repository.state.value.preview!!.resultId
+        try {
+            assertTrue(repository.savePreview(id))
+            runCurrent()
+            coEvery { articleRepository.getArticleById(77L) } coAnswers {
+                currentCoroutineContext().cancel()
+                null
+            }
+            assertTrue(repository.savePreview(id))
+            runCurrent()
+            assertEquals(AiArticleSaveStatus.Saved(77L, AiArticleLookupFailure.CANCELLED), repository.state.value.preview!!.saveStatus)
+            assertFalse(repository.state.value.isSaving)
+            coVerify(exactly = 1) { articleRepository.getArticleById(77L) }
+            coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
+        } finally {
+            owner.cancel()
+        }
     }
 
     @Test
@@ -394,7 +538,8 @@ class AiArticleGenerationSaveTest {
             assertTrue(saveJob.isCompleted)
             assertFalse(repository.state.value.isSaving)
             assertEquals(AiArticleSaveStatus.Saved(77L), repository.state.value.preview!!.saveStatus)
-            assertTrue(repository.savePreview(resultId))
+            assertFalse(repository.savePreview(resultId))
+            coVerify(exactly = 0) { articleRepository.getArticleById(any()) }
             coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
         } finally {
             write.complete(77L)
@@ -417,8 +562,9 @@ class AiArticleGenerationSaveTest {
             runCurrent()
 
             assertEquals(AiArticleSaveStatus.Saved(77L), repository.state.value.preview!!.saveStatus)
-            assertTrue(repository.savePreview(resultId))
+            assertFalse(repository.savePreview(resultId))
             runCurrent()
+            coVerify(exactly = 0) { articleRepository.getArticleById(any()) }
             coVerify(exactly = 1) { articleRepository.insertArticle(any()) }
         } finally {
             owner.cancel()

@@ -51,9 +51,6 @@ class ArticleListViewModel @Inject constructor(
     private val settingsPreferences: SettingsPreferences
 ) : ViewModel() {
 
-    val articles: StateFlow<List<ArticleEntity>> = articleRepository.getAllArticles()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 

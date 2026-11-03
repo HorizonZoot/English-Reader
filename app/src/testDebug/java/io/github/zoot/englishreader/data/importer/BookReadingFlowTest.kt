@@ -92,8 +92,10 @@ class BookReadingFlowTest {
             .setTransactionExecutor(Runnable::run)
             .build()
         bookRepository = BookRepository(db.bookDao(), db.articleDao())
+        // 分句调度器换成测试调度器：生产的 Dispatchers.Default 不受 advanceUntilIdle 推进。
         articleRepository = ArticleRepository(db.articleDao(), applicationScope.backgroundScope,
-            io.github.zoot.englishreader.model.AppliedTranslationLayoutCodec(com.squareup.moshi.Moshi.Builder().build()))
+            io.github.zoot.englishreader.model.AppliedTranslationLayoutCodec(com.squareup.moshi.Moshi.Builder().build()),
+            mainDispatcherRule.testDispatcher)
 
         vocabularyRepository = mockk(relaxed = true)
         dictionaryRepository = mockk(relaxed = true)

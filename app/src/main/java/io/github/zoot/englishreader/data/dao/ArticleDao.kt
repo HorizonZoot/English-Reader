@@ -101,10 +101,16 @@ interface ArticleDao {
     @Transaction
     suspend fun saveReadingPosition(position: ReadingPositionEntity) {
         val article = getArticleById(position.articleId) ?: return
+        saveReadingPositionForContent(position, article.content)
+    }
+
+    /** [content] 必须是同一事务内读到的正文；调用方已读过正文时不必再整篇读第二遍。 */
+    @Transaction
+    suspend fun saveReadingPositionForContent(position: ReadingPositionEntity, content: String) {
         val stored = getReadingPosition(position.articleId)
         if (stored != null && stored.updatedAt > position.updatedAt) return
         upsertReadingPosition(position.copy(progress = readingProgress(
-            article.content, position.paragraphIndex, position.textKind, position.characterOffset
+            content, position.paragraphIndex, position.textKind, position.characterOffset
         )))
         updateLastReadTime(position.articleId, position.updatedAt)
         val bookId = readingBookId(position.articleId) ?: return
@@ -133,7 +139,7 @@ interface ArticleDao {
         if (expectedPublication != null &&
             ReadingPublication(current.article.translation, current.appliedPlan) != expectedPublication
         ) return
-        saveReadingPosition(position)
+        saveReadingPositionForContent(position, current.article.content)
     }
 
     @Query("UPDATE articles SET title = :title WHERE id = :id")

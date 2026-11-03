@@ -18,13 +18,18 @@ import io.github.zoot.englishreader.model.ReadingArticleState
 import io.github.zoot.englishreader.model.ReadingPublication
 import io.github.zoot.englishreader.model.TranslationFingerprint
 import io.github.zoot.englishreader.util.ParagraphAligner
+import io.github.zoot.englishreader.util.SentenceSplitter
 import io.github.zoot.englishreader.util.TestDataGenerator
 import android.util.Log
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
@@ -36,11 +41,20 @@ import javax.inject.Singleton
  * 封装 ArticleDao，提供统一的数据访问接口
  */
 @Singleton
-class ArticleRepository @Inject constructor(
+class ArticleRepository internal constructor(
     private val articleDao: ArticleDao,
-    @ApplicationCoroutineScope private val applicationScope: CoroutineScope,
-    private val layoutCodec: AppliedTranslationLayoutCodec
+    private val applicationScope: CoroutineScope,
+    private val layoutCodec: AppliedTranslationLayoutCodec,
+    /** 全文指纹、分段与 ICU 分句的执行线程；阅读快照的收集方是主线程。 */
+    private val preparationDispatcher: CoroutineDispatcher
 ) {
+    @Inject
+    constructor(
+        articleDao: ArticleDao,
+        @ApplicationCoroutineScope applicationScope: CoroutineScope,
+        layoutCodec: AppliedTranslationLayoutCodec
+    ) : this(articleDao, applicationScope, layoutCodec, Dispatchers.Default)
+
     private val positionMutex = Mutex()
     private var positionTimestamp: Long? = null
 
@@ -129,12 +143,20 @@ class ArticleRepository @Inject constructor(
 
     fun observeArticle(id: Long): Flow<ArticleEntity?> = articleDao.observeArticle(id)
 
-    suspend fun getReadingArticle(id: Long): ReadingArticleState? = articleDao.getReadingArticle(id)?.toReadingState()
+    suspend fun getReadingArticle(id: Long): ReadingArticleState? =
+        articleDao.getReadingArticle(id)?.let { record -> withContext(preparationDispatcher) { record.toReadingState() } }
 
-    fun observeReadingArticle(id: Long): Flow<ReadingArticleState?> =
-        articleDao.observeReadingArticle(id).map { it?.toReadingState() }
+    /** 每次保存阅读位置都会改写 articles 行并触发重查；正文与译文未变时沿用上一份分句结果。 */
+    fun observeReadingArticle(id: Long): Flow<ReadingArticleState?> = flow {
+        var previous: ReadingArticleState? = null
+        articleDao.observeReadingArticle(id).collect { record ->
+            val state = record?.toReadingState(previous)
+            previous = state
+            emit(state)
+        }
+    }.flowOn(preparationDispatcher)
 
-    private fun ReadingArticleRecord.toReadingState(): ReadingArticleState {
+    private fun ReadingArticleRecord.toReadingState(previous: ReadingArticleState? = null): ReadingArticleState {
         val paragraphs = ParagraphAligner.splitParagraphs(article.content)
         val translation = article.translation
         val decoded = layoutCodec.decode(appliedPlan, paragraphs)
@@ -145,7 +167,12 @@ class ArticleRepository @Inject constructor(
                 it.matchesText(paragraphs, ParagraphAligner.splitParagraphs(translation))
         }
         if (appliedPlan != null && layout == null) Log.w("ArticleRepository", "stage=reading_layout category=invalid_layout")
-        return ReadingArticleState(article, ReadingPublication(translation, appliedPlan), layout)
+        return ReadingArticleState(
+            article, ReadingPublication(translation, appliedPlan), layout,
+            paragraphs = previous?.paragraphs?.takeIf {
+                previous.article.content == article.content && previous.article.translation == translation
+            } ?: ParagraphAligner.align(article.content, translation, SentenceSplitter::split)
+        )
     }
 
     /**

@@ -25,6 +25,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Rule
 import org.junit.Test
 
@@ -72,6 +73,18 @@ class ReadingArticleUpdatesViewModelTest {
         assertNull(vm.pendingPositionTarget.value)
         verify(exactly = 0) { fixture.ttsPlayer.stop() }
         verify(exactly = 0) { fixture.ttsPlayer.stopBeforeReading() }
+    }
+
+    @Test
+    fun observeArticle_onlyReadingTimeChanged_keepsPublishedSnapshot() = runTest {
+        val vm = loadedViewModel()
+        val published = vm.readingArticle.value
+
+        // 保存阅读位置会改写 lastReadAt；阅读页不读它，不能因此发布新快照并重组整页。
+        updates.value = original.copy(lastReadAt = 100)
+        runCurrent()
+
+        assertSame(published, vm.readingArticle.value)
     }
 
     @Test

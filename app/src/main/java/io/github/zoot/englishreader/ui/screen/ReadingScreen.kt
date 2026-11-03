@@ -107,6 +107,7 @@ import io.github.zoot.englishreader.ui.component.WordDetailsBottomSheet
 import io.github.zoot.englishreader.ui.component.ReadingTtsControls
 import io.github.zoot.englishreader.ui.component.TtsRecoveryDialog
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
+import io.github.zoot.englishreader.ui.theme.Motion
 import io.github.zoot.englishreader.util.ArticleParagraphFormatting
 import io.github.zoot.englishreader.util.ParagraphAligner
 import io.github.zoot.englishreader.util.SentenceSplitter
@@ -413,6 +414,7 @@ fun ReadingScreen(
 
         ReadingScreenContent(
             article = article,
+            preparedParagraphs = readingArticle?.paragraphs,
             appliedLayout = readingArticle?.layout,
             onReadingPositionChanged = { viewModel.recordReadingPosition(it, renderedPublication) },
             selectedSentence = selectedSentence,
@@ -503,6 +505,8 @@ private data class ReadingExcerptSelection(val paragraphIndex: Int, val range: E
 @Composable
 fun ReadingScreenContent(
     article: ArticleEntity?,
+    /** 与 [article] 同一快照、已在后台完成的分段分句；null 时在组合期自行计算。 */
+    preparedParagraphs: List<ParagraphAligner.AlignedParagraph>? = null,
     selectedSentence: SelectedSentence?,
     selectedWord: String?,
     wordDetailsVisible: Boolean = false,
@@ -569,8 +573,9 @@ fun ReadingScreenContent(
 ) {
     val hasTranslation = !article?.translation.isNullOrBlank()
     val currentSelection = selectedSentence?.takeIf { it.articleId == article?.id }
-    val paragraphs = remember(article?.content, article?.translation) {
-        article?.let {
+    // 生产路径由仓库在后台分句后随快照下发；全文 ICU 分句放在组合期会卡住打开文章的首帧。
+    val paragraphs = remember(article?.content, article?.translation, preparedParagraphs) {
+        preparedParagraphs ?: article?.let {
             ParagraphAligner.align(it.content, it.translation, SentenceSplitter::split)
         }.orEmpty()
     }
@@ -592,6 +597,8 @@ fun ReadingScreenContent(
     var wordSelectionAnchor by remember(article?.id) { mutableStateOf<WordSelectionAnchor?>(null) }
     var wordSheetCorrectionConsumed by remember(article?.id) { mutableStateOf(false) }
     var readingProgress by remember(article?.id) { mutableFloatStateOf(0f) }
+    // 进度每帧都变；百分比文案只在整数变化时让底栏重组，进度条经 lambda 在绘制阶段读取。
+    val readingPercent by remember(article?.id) { derivedStateOf { (readingProgress * 100).roundToInt() } }
     var pageControls by remember(article?.id) { mutableStateOf<ReadingPageControls?>(null) }
     var readingViewportBounds by remember { mutableStateOf<Rect?>(null) }
     var readingViewportBottomOnScreen by remember { mutableStateOf<Float?>(null) }
@@ -797,10 +804,7 @@ fun ReadingScreenContent(
                             trackColor = MaterialTheme.colorScheme.outlineVariant
                         )
                         Text(
-                            text = stringResource(
-                                R.string.reading_progress_percent,
-                                (readingProgress * 100).roundToInt()
-                            ),
+                            text = stringResource(R.string.reading_progress_percent, readingPercent),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.align(Alignment.End)
@@ -910,6 +914,7 @@ fun ReadingScreenContent(
                                 // 用动画而非布尔：到期熄灭时是渐隐，硬切会像页面闪了一下。
                                 val paragraphHighlight by animateFloatAsState(
                                     targetValue = if (paragraphIndex == highlightedParagraph && highlightedExcerpt == null && highlightedContextCard == null) 1f else 0f,
+                                    animationSpec = Motion.spec(),
                                     label = "paragraph-highlight"
                                 )
                                 val ownsResultPopup = popupMode != SentencePopupMode.ACTIONS &&
@@ -1265,7 +1270,7 @@ fun ReadingScreenContent(
                                 listState = listState,
                                 layouts = layouts,
                                 layoutKey = layoutKey,
-                                anchor = readingAnchor,
+                                anchor = { readingAnchor },
                                 selectedAnchor = selectionAnchor,
                                 target = restoreTarget,
                                 enabled = !isLoading && !showReadingSettings,
@@ -1282,7 +1287,7 @@ fun ReadingScreenContent(
                         } else {
                             PagedReadingContent(
                                 blocks = blocks,
-                                anchor = readingAnchor,
+                                anchor = { readingAnchor },
                                 selectedAnchor = selectionAnchor,
                                 target = restoreTarget,
                                 enabled = !isLoading && !showReadingSettings,

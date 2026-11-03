@@ -62,6 +62,7 @@ import io.github.zoot.englishreader.model.ReadingEntry
 import io.github.zoot.englishreader.model.ReadingPositionTarget
 import io.github.zoot.englishreader.model.ReadingTextKind
 import kotlinx.coroutines.launch
+import io.github.zoot.englishreader.ui.theme.Motion
 import kotlin.math.abs
 
 internal data class ReadingPageControls(
@@ -78,7 +79,8 @@ internal data class ReadingPageControls(
 @Composable
 internal fun PagedReadingContent(
     blocks: List<ReadingTextBlock>,
-    anchor: ReadingAnchor,
+    /** 惰性读取，理由同 [ScrollReadingContent] 的 anchor。 */
+    anchor: () -> ReadingAnchor,
     selectedAnchor: ReadingAnchor?,
     target: ReadingPositionTarget?,
     enabled: Boolean,
@@ -138,7 +140,9 @@ internal fun PagedReadingContent(
                 val previous = remember(pager, scope) {
                     {
                         if (currentEnabled && !pager.isScrollInProgress) {
-                            if (pager.currentPage > 0) scope.launch { pager.animateScrollToPage(pager.currentPage - 1) }
+                            if (pager.currentPage > 0) scope.launch {
+                                pager.animateScrollToPage(pager.currentPage - 1, animationSpec = Motion.spec())
+                            }
                             else if (previousChapter) currentOnBoundary(false)
                         }
                         Unit
@@ -147,7 +151,9 @@ internal fun PagedReadingContent(
                 val nextPage = remember(pager, scope) {
                     {
                         if (currentEnabled && !pager.isScrollInProgress) {
-                            if (pager.currentPage < pager.pageCount - 1) scope.launch { pager.animateScrollToPage(pager.currentPage + 1) }
+                            if (pager.currentPage < pager.pageCount - 1) scope.launch {
+                                pager.animateScrollToPage(pager.currentPage + 1, animationSpec = Motion.spec())
+                            }
                             else if (nextChapter) currentOnBoundary(true)
                         }
                         Unit
@@ -156,7 +162,7 @@ internal fun PagedReadingContent(
                 LaunchedEffect(ready, requestId) {
                     val restoreTarget = currentTarget
                     val restoreAnchor = if (restoreTarget != null) restoreTarget.position.anchor
-                        else currentSelectedAnchor ?: currentAnchor
+                        else currentSelectedAnchor ?: currentAnchor()
                     val page = when (restoreTarget?.entry) {
                         ReadingEntry.START -> 0
                         ReadingEntry.END -> ready.pages.lastIndex

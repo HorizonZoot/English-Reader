@@ -68,7 +68,8 @@ internal fun ScrollReadingContent(
     listState: LazyListState,
     layouts: SnapshotStateMap<ReadingBlockKey, TextLayoutResult>,
     layoutKey: ReadingLayoutKey,
-    anchor: ReadingAnchor,
+    /** 惰性读取：锚点随滚动逐行变化，组合期读取会让整个阅读区每行重组一次。 */
+    anchor: () -> ReadingAnchor,
     selectedAnchor: ReadingAnchor?,
     target: ReadingPositionTarget?,
     enabled: Boolean,
@@ -117,7 +118,7 @@ internal fun ScrollReadingContent(
     LaunchedEffect(layoutKey, blocks, requestId) {
         if (contentWidth <= 0 || layoutKey.viewport.height <= 0 || blocks.isEmpty()) return@LaunchedEffect
         val restoreTarget = currentTarget
-        var desired = restoreTarget?.position?.anchor ?: currentSelectedAnchor ?: currentAnchor
+        var desired = restoreTarget?.position?.anchor ?: currentSelectedAnchor ?: currentAnchor()
         if (restoreTarget?.entry == ReadingEntry.START) {
             val first = blocks.first()
             desired = ReadingAnchor(first.paragraphIndex, first.kind, first.textStartOffset)
@@ -142,14 +143,14 @@ internal fun ScrollReadingContent(
     LaunchedEffect(listState, layoutKey, blocks, restored) {
         if (!restored) return@LaunchedEffect
         var previous = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-        var lastObservedAnchor = currentAnchor
+        var lastObservedAnchor = currentAnchor()
         var moved = false
         snapshotFlow {
             val info = listState.layoutInfo
             val lastItem = info.visibleItemsInfo.lastOrNull()
             val endVisible = lastItem != null && lastItem.index == info.totalItemsCount - 1 &&
                 lastItem.offset + lastItem.size <= info.viewportEndOffset
-            val observed = observedAnchor() ?: currentAnchor
+            val observed = observedAnchor() ?: currentAnchor()
             val progressAnchor = if (observed.textKind == ReadingTextKind.TRANSLATION) {
                 blocks.blockFor(observed)?.let { ReadingAnchor(it.paragraphIndex, ReadingTextKind.ORIGINAL, it.sourceEndOffset) } ?: observed
             } else observed
@@ -176,7 +177,7 @@ internal fun ScrollReadingContent(
         }
     }
     DisposableEffect(restored) {
-        onDispose { if (restored && currentEnabled) currentOnPositionSettled(currentAnchor) }
+        onDispose { if (restored && currentEnabled) currentOnPositionSettled(currentAnchor()) }
     }
 
     LazyColumn(

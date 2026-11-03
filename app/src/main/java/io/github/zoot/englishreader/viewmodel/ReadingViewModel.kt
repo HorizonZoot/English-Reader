@@ -784,9 +784,13 @@ class ReadingViewModel @Inject constructor(
                         _readingErrors.trySend(ReadingError.LOAD)
                         return@collect
                     }
+                    // 只比较影响渲染的字段。每次保存阅读位置都会改写 lastReadAt，阅读页并不读它；
+                    // 若因此发布新快照，每次停止滚动后整个阅读页都会重组一次。
+                    val current = _readingArticle.value
                     if (updated.content == previous.content && updated.title == previous.title &&
                         updated.translation == previous.translation && updated.source == previous.source &&
-                        updatedState == _readingArticle.value
+                        current != null && updatedState.publication == current.publication &&
+                        updatedState.layout == current.layout
                     ) return@collect
                     if (updated.content != previous.content) {
                         closeVoiceSettings()

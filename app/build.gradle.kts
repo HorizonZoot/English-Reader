@@ -27,8 +27,8 @@ android {
         applicationId = "io.github.zoot.englishreader"
         minSdk = 24
         targetSdk = 34
-        versionCode = 6
-        versionName = "0.1.4"
+        versionCode = 7
+        versionName = "0.1.5"
         testInstrumentationRunner = "io.github.zoot.englishreader.HiltTestRunner"
 
         ksp {

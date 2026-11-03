@@ -58,7 +58,7 @@ class WholeTranslationSheetTest {
             )
         )
         setContent(state) { choice ->
-            state.value = (state.value as WholeTranslationSheetState.ChoosingScope).copy(selected = choice)
+            state.value = state.value.copy(selected = choice)
         }
 
         composeRule.onNodeWithTag("whole-translation-scope-current").assertIsSelected()

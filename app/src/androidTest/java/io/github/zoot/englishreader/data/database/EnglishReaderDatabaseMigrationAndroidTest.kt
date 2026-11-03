@@ -32,7 +32,7 @@ class EnglishReaderDatabaseMigrationAndroidTest {
         migrationHelper.createDatabase(TEST_DATABASE_NAME, 3).close()
         migrationHelper.runMigrationsAndValidate(
             TEST_DATABASE_NAME,
-            10,
+            11,
             true,
             MIGRATION_3_4,
             MIGRATION_4_5,
@@ -40,7 +40,8 @@ class EnglishReaderDatabaseMigrationAndroidTest {
             MIGRATION_6_7,
             MIGRATION_7_8,
             MIGRATION_8_9,
-            MIGRATION_9_10
+            MIGRATION_9_10,
+            MIGRATION_10_11
         ).close()
     }
 

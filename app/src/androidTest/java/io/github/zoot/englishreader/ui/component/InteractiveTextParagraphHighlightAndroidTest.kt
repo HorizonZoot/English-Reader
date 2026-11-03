@@ -140,6 +140,7 @@ class InteractiveTextParagraphHighlightAndroidTest {
         val (off, on, rect) = captureBeforeAndAfterEnablingHighlight()
         val y = sampleY(rect, off, on)
         val rightOfText = (rect.right.toInt() + 2 until minOf(off.width, on.width)).take(32)
+        assertTrue("fixture must leave pixels to sample after the last glyph", rightOfText.isNotEmpty())
 
         val painted = rightOfText.count { x -> on.differsAt(off, x, y) }
         assertEquals("fill must stop at the last glyph of the line", 0, painted)

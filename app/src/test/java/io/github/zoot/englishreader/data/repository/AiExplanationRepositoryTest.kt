@@ -10,7 +10,6 @@ import io.github.zoot.englishreader.data.ai.AiExecutor
 import io.github.zoot.englishreader.data.ai.AiPromptPolicy
 import io.github.zoot.englishreader.data.ai.AiPromptPreparationResult
 import io.github.zoot.englishreader.data.ai.AiTextNormalizer
-import io.github.zoot.englishreader.data.ai.ExplanationCacheIdentity
 import io.github.zoot.englishreader.data.ai.ExplanationType
 import io.github.zoot.englishreader.data.ai.ResolvedAiExplanationOperation
 import io.github.zoot.englishreader.data.ai.ResolvedAiExplanationRequest

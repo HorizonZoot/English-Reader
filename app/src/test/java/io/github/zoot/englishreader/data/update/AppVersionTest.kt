@@ -19,7 +19,7 @@ class AppVersionComparisonTest(
     private val remote: String,
     private val local: String,
     private val expectNewer: Boolean,
-    @Suppress("unused") private val reason: String
+    private val reason: String
 ) {
 
     @Test

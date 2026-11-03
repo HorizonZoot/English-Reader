@@ -65,6 +65,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import io.github.zoot.englishreader.R
 import io.github.zoot.englishreader.ui.theme.ArticleUiTheme
+import io.github.zoot.englishreader.ui.theme.Motion
 
 @Composable
 fun ImportDialog(
@@ -218,9 +219,14 @@ private fun ImportChoiceRow(
     val background by animateColorAsState(
         if (active) MaterialTheme.colorScheme.primary.copy(alpha = if (pressed) 0.11f else 0.06f)
         else Color.Transparent,
+        animationSpec = Motion.spec(),
         label = "import-choice-background"
     )
-    val arrowOffset by animateDpAsState(if (active) 3.dp else 0.dp, label = "import-choice-arrow")
+    val arrowOffset by animateDpAsState(
+        if (active) 3.dp else 0.dp,
+        animationSpec = Motion.spec(),
+        label = "import-choice-arrow"
+    )
     val iconColor = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
     val shape = RoundedCornerShape(13.dp)
 

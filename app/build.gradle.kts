@@ -167,6 +167,8 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.hilt.navigation.compose)
+    // 显式声明以取得可配置转场的 NavHost，原因见 libs.versions.toml。
+    implementation(libs.navigation.compose)
 
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)

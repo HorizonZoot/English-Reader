@@ -52,6 +52,7 @@ import io.github.zoot.englishreader.ui.component.ImportStatusOverlay
 import io.github.zoot.englishreader.ui.dialog.ImportDialog
 import io.github.zoot.englishreader.ui.dialog.PasteTextDialog
 import io.github.zoot.englishreader.ui.theme.LibraryUiTheme
+import io.github.zoot.englishreader.ui.theme.Motion
 import io.github.zoot.englishreader.ui.component.SortMenuButton
 import io.github.zoot.englishreader.model.LibrarySort
 import io.github.zoot.englishreader.model.LibrarySortField
@@ -309,7 +310,7 @@ fun ArticleListScreen(
                         )
                         Surface(
                             shape = shape,
-                            modifier = Modifier.animateItemPlacement().clip(shape),
+                            modifier = Modifier.animateItemPlacement(Motion.spec()).clip(shape),
                             color = MaterialTheme.colorScheme.surface
                         ) {
                             Column {

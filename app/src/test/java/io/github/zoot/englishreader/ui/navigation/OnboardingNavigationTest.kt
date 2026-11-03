@@ -99,7 +99,7 @@ class OnboardingNavigationTest {
                                 onOpenAbout = {}
                             )
                         }
-                        onboardingReplayDestination(nav)
+                        onboardingReplayDestination(nav) { back }
                     }
                 }
             }
@@ -119,7 +119,8 @@ class OnboardingNavigationTest {
                 }
                 1 -> {
                     compose.onNodeWithText(text(R.string.onboarding_next)).performClick()
-                    compose.runOnIdle { back.onBackPressed() }
+                    // 连按两次：宿主与弹窗窗口的回调都可能收到返回；第二次不得把设置页也弹出。
+                    compose.runOnIdle { back.onBackPressed(); back.onBackPressed() }
                 }
                 else -> {
                     repeat(4) { compose.onNodeWithText(text(R.string.onboarding_next)).performClick() }

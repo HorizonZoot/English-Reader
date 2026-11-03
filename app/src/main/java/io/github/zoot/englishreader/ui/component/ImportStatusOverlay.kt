@@ -49,6 +49,7 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import io.github.zoot.englishreader.R
+import io.github.zoot.englishreader.ui.theme.Motion
 import io.github.zoot.englishreader.viewmodel.ImportOutcome
 import io.github.zoot.englishreader.viewmodel.ImportState
 import kotlinx.coroutines.delay
@@ -69,7 +70,7 @@ fun ImportStatusOverlay(
     /**
      * 当前渲染的内容，**与 [visible] 分离**。
      *
-     * 若让内容跟着可见性回落，退场那 140ms 里 ✓ 会变回旋转圆弧——`AnimatedVisibility`
+     * 若让内容跟着可见性回落，退场那段淡出里 ✓ 会变回旋转圆弧——`AnimatedVisibility`
      * 在退场期间仍然组合它的 content，那时 stage 已经回到隐藏态。分离之后淡出的始终是
      * 刚才看到的那个字形。
      */
@@ -288,17 +289,18 @@ private const val APPEAR_DELAY_MS = 250L
  * 所以字形在 t=[GLYPH_MS] 落定，此处到点后才开始 [EXIT_MS] 的淡出：
  *
  * ```
- * t=0    字形落定(160) ┐同时
+ * t=0    字形落定(100) ┐同时
  *        停留计时(240) ┘
- * t=160  字形完全落定
- * t=240  开始淡出(140)
- * t=380  消失
+ * t=100  字形完全落定
+ * t=240  开始淡出(100)
+ * t=340  消失
  * ```
  *
- * 因此整段收尾是 `TERMINAL_HOLD_MS + EXIT_MS = 380ms`，不是三段相加的 540ms。
+ * 因此整段收尾是 `TERMINAL_HOLD_MS + EXIT_MS = 340ms`，不是三段相加的 440ms。
  * 本值**不得小于** [GLYPH_MS]，否则淡出会在字形还没成形时就开始，✓ 会「一边出现一边消失」。
+ * 停留是让用户看清结果的时间，不属于过渡时长，因此不随 [Motion.DURATION_MS] 缩短。
  */
 private const val TERMINAL_HOLD_MS = 240L
-private const val ENTER_MS = 200
-private const val EXIT_MS = 140
-private const val GLYPH_MS = 160
+private const val ENTER_MS = Motion.DURATION_MS
+private const val EXIT_MS = Motion.DURATION_MS
+private const val GLYPH_MS = Motion.DURATION_MS

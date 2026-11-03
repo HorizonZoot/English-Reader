@@ -576,8 +576,8 @@ class ArticleListScreenTest {
         /** 越过一帧，让阈值到点后的重组真正发生。 */
         const val FRAME_MS = 16L
 
-        /** 字形落定（`GLYPH_MS`）加一帧。 */
-        const val GLYPH_SETTLE_MS = 176L
+        /** 字形落定（`GLYPH_MS` = `Motion.DURATION_MS`）加一帧。 */
+        const val GLYPH_SETTLE_MS = 116L
 
         /** 停留 + 淡出，足够覆盖整段收尾。 */
         const val TERMINAL_TOTAL_MS = 600L

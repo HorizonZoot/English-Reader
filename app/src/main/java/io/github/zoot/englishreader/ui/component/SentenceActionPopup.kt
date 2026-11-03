@@ -58,6 +58,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import io.github.zoot.englishreader.R
+import io.github.zoot.englishreader.ui.theme.Motion
 import io.github.zoot.englishreader.core.SentenceRange
 import io.github.zoot.englishreader.model.AiSheetState
 import kotlinx.coroutines.launch
@@ -87,9 +88,10 @@ data class SentenceActionAnchor(
 
 enum class SentencePopupMode { ACTIONS, TRANSLATION, EXPLANATION }
 
-internal const val SENTENCE_POPUP_FADE_IN_DURATION_MS = 120
+// 统一到 Motion.DURATION_MS；淡出原为 90ms，已比统一值更快，保持不变。
+internal const val SENTENCE_POPUP_FADE_IN_DURATION_MS = Motion.DURATION_MS
 internal const val SENTENCE_POPUP_FADE_OUT_DURATION_MS = 90
-internal const val SENTENCE_POPUP_CONTENT_CROSSFADE_DURATION_MS = 120
+internal const val SENTENCE_POPUP_CONTENT_CROSSFADE_DURATION_MS = Motion.DURATION_MS
 
 /** 工具栏保留外部指针透传；结果窗口持有焦点并响应外点和 Back 关闭。 */
 internal fun sentencePopupProperties(mode: SentencePopupMode): PopupProperties =

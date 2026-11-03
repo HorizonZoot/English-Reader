@@ -28,9 +28,9 @@ class SentencePopupPolicyTest {
 
     @Test
     fun popupFadeDurations_matchExpectedMilliseconds() {
-        assertEquals(120, SENTENCE_POPUP_FADE_IN_DURATION_MS)
+        assertEquals(100, SENTENCE_POPUP_FADE_IN_DURATION_MS)
         assertEquals(90, SENTENCE_POPUP_FADE_OUT_DURATION_MS)
-        assertEquals(120, SENTENCE_POPUP_CONTENT_CROSSFADE_DURATION_MS)
+        assertEquals(100, SENTENCE_POPUP_CONTENT_CROSSFADE_DURATION_MS)
     }
 
     @Test

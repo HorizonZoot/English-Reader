@@ -39,6 +39,7 @@ import io.github.zoot.englishreader.ui.screen.vocabulary.VocabularyGroupId
 import io.github.zoot.englishreader.ui.screen.vocabulary.observeVocabularyTime
 import io.github.zoot.englishreader.ui.screen.vocabulary.vocabularyTimeSignals
 import io.github.zoot.englishreader.ui.theme.FavoritesUiTheme
+import io.github.zoot.englishreader.ui.theme.Motion
 import io.github.zoot.englishreader.viewmodel.VocabularyUiEvent
 import io.github.zoot.englishreader.viewmodel.VocabularyViewModel
 import java.util.Locale
@@ -246,7 +247,11 @@ private fun VocabularyHeader(selectedTab: Int, onTabSelected: (Int) -> Unit) {
 
 @Composable
 internal fun GroupHeader(title: String, wordCount: Int, isToday: Boolean, isExpanded: Boolean, onClick: () -> Unit) {
-    val rotation by animateFloatAsState(if (isExpanded) 0f else 180f, label = "group-chevron")
+    val rotation by animateFloatAsState(
+        if (isExpanded) 0f else 180f,
+        animationSpec = Motion.spec(),
+        label = "group-chevron"
+    )
     Row(
         Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button, onClick = onClick),
         verticalAlignment = Alignment.CenterVertically

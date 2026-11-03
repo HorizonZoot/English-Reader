@@ -9,6 +9,7 @@ import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.BorderStroke
@@ -53,6 +54,7 @@ import io.github.zoot.englishreader.data.dictionary.DictionaryPackInstaller
 import io.github.zoot.englishreader.data.local.SettingsPreferences
 import io.github.zoot.englishreader.data.local.ThemeOption
 import io.github.zoot.englishreader.model.TtsSystemAction
+import io.github.zoot.englishreader.ui.theme.Motion
 import io.github.zoot.englishreader.ui.screen.ArticleListScreen
 import io.github.zoot.englishreader.ui.screen.ArticleEditorScreen
 import io.github.zoot.englishreader.ui.screen.AiArticleGenerationScreen
@@ -225,6 +227,8 @@ fun EnglishReaderNavigation(navController: NavHostController = rememberNavContro
     val downloadActionBusy by updateViewModel.downloadActionBusy.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    // 在 NavHost 之外取：弹窗目的地内部解析到的是弹窗窗口自己的分发器。
+    val hostBackDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     DisposableEffect(lifecycleOwner, updateViewModel) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_START && !isOnboardingReplay) updateViewModel.onForeground()
@@ -416,10 +420,15 @@ fun EnglishReaderNavigation(navController: NavHostController = rememberNavContro
             )
         }
 
+        // 显式给出四个转场：不传时 NavHost 默认 700ms 淡入淡出，进出页面都要等这么久。
         NavHost(
             navController = navController,
             startDestination = "article_list",
-            modifier = Modifier.padding(padding)
+            modifier = Modifier.padding(padding),
+            enterTransition = { Motion.enter },
+            exitTransition = { Motion.exit },
+            popEnterTransition = { Motion.enter },
+            popExitTransition = { Motion.exit }
         ) {
             composable("article_list") {
             ArticleListScreen(
@@ -582,7 +591,7 @@ fun EnglishReaderNavigation(navController: NavHostController = rememberNavContro
             SettingsLicensesScreen(onBack = { navController.popBackStack() })
         }
 
-        onboardingReplayDestination(navController)
+        onboardingReplayDestination(navController) { hostBackDispatcher }
 
         composable("settings/cache") {
             SettingsCacheManagementScreen(onBack = { navController.popBackStack() })

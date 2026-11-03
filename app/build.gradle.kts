@@ -84,6 +84,16 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+        // 本地性能验收用：代码与 release 完全相同（R8、资源压缩、不可调试，ART 会按随包
+        // Baseline Profile 预编译），但用 debug 签名，可直接覆盖手机上的 debug 安装、保留数据。
+        // debug 包被系统标记为可调试，ART 只做 verify 不做 AOT，滑动与页面切换会明显慢于
+        // 用户实际拿到的 release，不能用来判断流畅度。本类型不用于分发。
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+            isDebuggable = false
+        }
     }
 
     packaging {
